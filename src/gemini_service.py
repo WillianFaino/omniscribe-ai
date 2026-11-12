@@ -1,7 +1,7 @@
-"""Serviço de integração com a API do Google Gemini (gemini-2.5-flash).
+"""Serviço OmniScribe AI de integração com a API do Google Gemini (gemini-2.5-flash).
 
 Gerencia fila assíncrona de blocos de áudio, upload via Files API,
-transcrição incremental estéreo (Zoom vs Willian), higienização de arquivos locais/remotos
+transcrição incremental estéreo (Participantes vs Willian), higienização de arquivos locais/remotos
 e síntese consolidada da Ata Executiva ao final da reunião.
 """
 
@@ -49,7 +49,7 @@ except ImportError:
     types = None
     HAS_GOOGLE_GENAI = False
 
-logger = logging.getLogger("zoom_transcriber.gemini_service")
+logger = logging.getLogger("omniscribe.gemini_service")
 
 
 def get_base_dir() -> Path:
@@ -134,10 +134,10 @@ class AudioBlockTask:
 class GeminiService:
     """Gerenciador do pipeline de transcrição incremental e consolidação da Ata."""
 
-    TRANSCRIPTION_SYSTEM_PROMPT = """Você é um transcritor profissional de reuniões corporativas e técnicas.
+    TRANSCRIPTION_SYSTEM_PROMPT = """Você é o motor de transcrição inteligente do OmniScribe AI para reuniões corporativas e técnicas.
 O áudio fornecido em WAV estéreo possui exatamente 2 canais sincronizados:
 - CANAL DIREITO (Right / R): Contém a voz do usuário local, estritamente identificado como **Willian (Você)**.
-- CANAL ESQUERDO (Left / L): Contém os outros participantes da reunião transmitidos pelo Zoom / sistema corporativo.
+- CANAL ESQUERDO (Left / L): Contém os outros participantes da reunião transmitidos pelo sistema (Google Meet, Microsoft Teams, Zoom, Discord, etc.).
 
 REGRAS OBRIGATÓRIAS DE TRANSCRIÇÃO:
 1. Transcreva com fidelidade absoluta tudo o que for falado em português (e eventuais termos em inglês técnico).

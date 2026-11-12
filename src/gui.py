@@ -26,7 +26,7 @@ from gemini_service import (
     save_api_key_to_env,
 )
 
-logger = logging.getLogger("zoom_transcriber.gui")
+logger = logging.getLogger("omniscribe.gui")
 
 # Configurações globais de aparência
 ctk.set_appearance_mode("Dark")
@@ -149,7 +149,7 @@ class ZoomTranscriberApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Zoom Meeting Transcriber & Minute Generator")
+        self.title("OmniScribe AI - Universal Meeting Transcriber & Minute Generator")
         self.geometry("960x730")
         self.minsize(920, 680)
 
@@ -208,14 +208,14 @@ class ZoomTranscriberApp(ctk.CTk):
 
         lbl_app_title = ctk.CTkLabel(
             title_container,
-            text="🎙️ Zoom Meeting Transcriber",
+            text="🎙️ OmniScribe AI",
             font=ctk.CTkFont(size=20, weight="bold"),
         )
         lbl_app_title.pack(anchor="w")
 
         lbl_app_subtitle = ctk.CTkLabel(
             title_container,
-            text="Captura dual WASAPI Loopback + Microfone • Transcrição incremental • Atas Executivas com Gemini 2.5 Flash",
+            text="Captura inteligente (Meet, Teams, Zoom, Mic) • Transcrição incremental • Atas Executivas com Gemini 2.5 Flash",
             font=ctk.CTkFont(size=12),
             text_color="#a1a1aa",
         )
@@ -238,7 +238,7 @@ class ZoomTranscriberApp(ctk.CTk):
         config_frame.grid_columnconfigure((1, 3), weight=1)
 
         # Linha 0: Dispositivos de Áudio
-        lbl_loop = ctk.CTkLabel(config_frame, text="Áudio Zoom (Loopback):", font=ctk.CTkFont(weight="bold"))
+        lbl_loop = ctk.CTkLabel(config_frame, text="Áudio Sistema / Reunião (L):", font=ctk.CTkFont(weight="bold"))
         lbl_loop.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
 
         loop_box_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
@@ -360,10 +360,10 @@ class ZoomTranscriberApp(ctk.CTk):
         vu_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
         vu_frame.grid(row=0, column=1, padx=16, pady=10, sticky="e")
 
-        # VU Zoom (L)
+        # VU Sistema (L)
         vu_zoom_row = ctk.CTkFrame(vu_frame, fg_color="transparent")
         vu_zoom_row.pack(anchor="e", pady=2)
-        self.lbl_vu_zoom = ctk.CTkLabel(vu_zoom_row, text="Zoom (L):", font=ctk.CTkFont(size=11, weight="bold"), width=70)
+        self.lbl_vu_zoom = ctk.CTkLabel(vu_zoom_row, text="Sistema (L):", font=ctk.CTkFont(size=11, weight="bold"), width=70)
         self.lbl_vu_zoom.pack(side="left")
         self.bar_vu_zoom = ctk.CTkProgressBar(vu_zoom_row, width=170, height=12, progress_color="#38bdf8")
         self.bar_vu_zoom.set(0.0)

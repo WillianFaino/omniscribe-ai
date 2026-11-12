@@ -1,4 +1,4 @@
-"""Motor de áudio com suporte a WASAPI Loopback (Zoom/sistema) e microfone local.
+"""Motor de áudio do OmniScribe AI com suporte a WASAPI Loopback (sistema/reuniões) e microfone local.
 
 Realiza captura dual sincronizada, resampling para 16kHz mono via NumPy,
 noise gate configurável, intercalação em WAV estéreo e cálculo de VU meter em tempo real.
@@ -29,7 +29,7 @@ except ImportError:
         pyaudio = None
         HAS_PYAUDIOWPATCH = False
 
-logger = logging.getLogger("zoom_transcriber.audio_engine")
+logger = logging.getLogger("omniscribe.audio_engine")
 
 TARGET_SAMPLE_RATE = 16000  # Taxa padrão otimizada para modelos de voz do Gemini
 DEFAULT_CHUNK_FRAMES = 2048

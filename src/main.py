@@ -1,4 +1,4 @@
-"""Ponto de entrada principal do Zoom Meeting Transcriber & Minute Generator.
+"""Ponto de entrada principal do OmniScribe AI - Universal Meeting Transcriber.
 
 Configura ambiente de execução, caminhos de importação, logging global e inicia a interface CustomTkinter.
 """
@@ -23,7 +23,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
-    logging.getLogger("zoom_transcriber.main").critical(
+    logging.getLogger("omniscribe.main").critical(
         "Exceção não tratada capturada pelo sistema:",
         exc_info=(exc_type, exc_value, exc_traceback),
     )
@@ -51,8 +51,8 @@ def setup_logging():
 def main():
     """Inicializa o sistema e dispara o loop de eventos da interface gráfica."""
     setup_logging()
-    logger = logging.getLogger("zoom_transcriber.main")
-    logger.info("Iniciando Zoom Meeting Transcriber & Minute Generator...")
+    logger = logging.getLogger("omniscribe.main")
+    logger.info("Iniciando OmniScribe AI...")
     logger.info(f"Diretório base detectado: {get_base_dir()}")
 
     # Pré-carrega variáveis de ambiente
