@@ -183,14 +183,15 @@ class ZoomTranscriberApp(ctk.CTk):
         # Constrói componentes da interface gráfica
         self._build_ui()
 
-        # Carrega lista inicial de dispositivos WASAPI
-        self._refresh_audio_devices()
+        # Renderiza a janela imediatamente para abertura instantânea
+        self.update_idletasks()
 
         # Inicia temporizador de interface
         self._timer_running = False
 
-        # Verifica se a chave GEMINI_API_KEY está configurada
-        self.after(300, self._check_initial_api_key)
+        # Carrega lista de dispositivos WASAPI e validação de API key logo após a renderização
+        self.after(50, self._refresh_audio_devices)
+        self.after(200, self._check_initial_api_key)
 
     def _build_ui(self) -> None:
         """Constrói o layout responsivo da janela."""
@@ -459,7 +460,8 @@ class ZoomTranscriberApp(ctk.CTk):
 
         # 1. Atualiza Saídas de Loopback
         self.loopback_map.clear()
-        loop_options = []
+        loop_options = ["Nenhum (Apenas Microfone / Ditado)"]
+        self.loopback_map["Nenhum (Apenas Microfone / Ditado)"] = None
         default_loop_name = None
 
         for d in loop_devices:
@@ -470,12 +472,9 @@ class ZoomTranscriberApp(ctk.CTk):
             if d.get("is_default") and default_loop_name is None:
                 default_loop_name = display_name
 
-        if loop_options:
-            self.opt_loopback.configure(values=loop_options)
-            self.opt_loopback.set(default_loop_name or loop_options[0])
-        else:
-            self.opt_loopback.configure(values=["Nenhum dispositivo Loopback encontrado"])
-            self.opt_loopback.set("Nenhum dispositivo Loopback encontrado")
+        self.opt_loopback.configure(values=loop_options)
+        # Prefere o dispositivo padrão de áudio se detectado, ou o primeiro
+        self.opt_loopback.set(default_loop_name or (loop_options[1] if len(loop_options) > 1 else loop_options[0]))
 
         # 2. Atualiza Entradas de Microfone
         self.mic_map.clear()
@@ -527,12 +526,12 @@ class ZoomTranscriberApp(ctk.CTk):
         selected_loop_str = self.opt_loopback.get()
         loop_index = self.loopback_map.get(selected_loop_str)
 
-        if loop_index is None:
-            self._log_gui("[ERRO] Dispositivo de áudio Loopback inválido ou não selecionado.")
-            return
-
         selected_mic_str = self.opt_mic.get()
         mic_index = self.mic_map.get(selected_mic_str)
+
+        if loop_index is None and mic_index is None:
+            self._log_gui("[ERRO] Selecione ao menos um dispositivo (Loopback ou Microfone).")
+            return
 
         # Determinação do tamanho do bloco
         block_dur_str = self.opt_block_duration.get()

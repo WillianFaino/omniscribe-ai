@@ -253,13 +253,17 @@ class AudioEngine:
 
     def start_recording(
         self,
-        loopback_index: int,
+        loopback_index: Optional[int],
         mic_index: Optional[int],
         block_duration_seconds: int = 180,
     ) -> bool:
-        """Inicia a gravação dual sincronizada."""
+        """Inicia a gravação sincronizada (suporta Loopback, Microfone ou Ambos)."""
         if self.is_recording:
             logger.warning("Gravação já em andamento.")
+            return False
+
+        if loopback_index is None and mic_index is None:
+            logger.error("Nenhum dispositivo de áudio (Loopback ou Mic) foi selecionado.")
             return False
 
         if pyaudio is None:
@@ -278,23 +282,28 @@ class AudioEngine:
         try:
             self._pyaudio_instance = pyaudio.PyAudio()
 
-            # Configura dispositivo de loopback
-            loop_info = self._pyaudio_instance.get_device_info_by_index(loopback_index)
-            self._loopback_channels = max(1, int(loop_info.get("maxInputChannels", 2)))
-            self._loopback_rate = int(loop_info.get("defaultSampleRate", 48000))
+            # Configura dispositivo de loopback (se selecionado)
+            if loopback_index is not None:
+                loop_info = self._pyaudio_instance.get_device_info_by_index(loopback_index)
+                self._loopback_channels = max(1, int(loop_info.get("maxInputChannels", 2)))
+                self._loopback_rate = int(loop_info.get("defaultSampleRate", 48000))
 
-            logger.info(
-                f"Abrindo Loopback [{loopback_index}]: {loop_info.get('name')}, "
-                f"taxa={self._loopback_rate}Hz, canais={self._loopback_channels}"
-            )
-            self._loopback_stream = self._pyaudio_instance.open(
-                format=pyaudio.paInt16,
-                channels=self._loopback_channels,
-                rate=self._loopback_rate,
-                input=True,
-                input_device_index=loopback_index,
-                frames_per_buffer=DEFAULT_CHUNK_FRAMES,
-            )
+                logger.info(
+                    f"Abrindo Loopback [{loopback_index}]: {loop_info.get('name')}, "
+                    f"taxa={self._loopback_rate}Hz, canais={self._loopback_channels}"
+                )
+                self._loopback_stream = self._pyaudio_instance.open(
+                    format=pyaudio.paInt16,
+                    channels=self._loopback_channels,
+                    rate=self._loopback_rate,
+                    input=True,
+                    input_device_index=loopback_index,
+                    frames_per_buffer=DEFAULT_CHUNK_FRAMES,
+                )
+            else:
+                logger.info("Loopback desativado pelo usuário (modo apenas microfone/ditado).")
+                self._loopback_stream = None
+                self._loopback_rate = 48000
 
             # Configura microfone (se selecionado)
             if mic_index is not None:
@@ -317,18 +326,24 @@ class AudioEngine:
             else:
                 logger.info("Microfone desativado pelo usuário (captura somente áudio do sistema).")
                 self._mic_stream = None
+                self._mic_rate = 44100
 
-            # Dispara threads de captura
-            self._loopback_thread = threading.Thread(
-                target=self._capture_loopback_loop, daemon=True, name="AudioLoopbackCapture"
-            )
-            self._loopback_thread.start()
+            # Dispara threads de captura ativas
+            if self._loopback_stream is not None:
+                self._loopback_thread = threading.Thread(
+                    target=self._capture_loopback_loop, daemon=True, name="AudioLoopbackCapture"
+                )
+                self._loopback_thread.start()
+            else:
+                self._loopback_thread = None
 
             if self._mic_stream is not None:
                 self._mic_thread = threading.Thread(
                     target=self._capture_mic_loop, daemon=True, name="AudioMicCapture"
                 )
                 self._mic_thread.start()
+            else:
+                self._mic_thread = None
 
             # Dispara thread fatiadora de blocos
             self._slicer_thread = threading.Thread(
