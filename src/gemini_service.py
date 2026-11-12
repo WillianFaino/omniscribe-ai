@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from usage_tracker import UsageTracker
+
 # Importação defensiva do python-dotenv com parser nativo de fallback
 try:
     from dotenv import load_dotenv
@@ -207,12 +209,19 @@ Transcrição completa da reunião:
         self._client = None
         self._init_client()
 
+        # Rastreador persistente de cotas e custos
+        self.tracker = UsageTracker(get_base_dir() / "atas_reunioes")
+
         # Metadados da reunião atual
         self.meeting_title = ""
         self.meeting_start_time = datetime.now()
         self.transcription_file_path: Optional[Path] = None
         self.minute_file_path: Optional[Path] = None
         self.accumulated_transcript = ""
+
+    def get_usage_summary(self) -> dict:
+        """Retorna resumo estatístico de consumo e custos."""
+        return self.tracker.get_summary()
 
     def _log(self, message: str) -> None:
         logger.info(message)
@@ -382,6 +391,15 @@ Transcrição completa da reunião:
 
             transcription_text = response.text.strip() if response.text else "*[Áudio sem transcrição disponível]*"
 
+            # Rastreamento de tokens e cota da API
+            in_tok = 0
+            out_tok = 0
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+                out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            audio_dur = max(0.0, task.end_seconds - task.start_seconds)
+            self.tracker.register_request(audio_seconds=audio_dur, input_tokens=in_tok, output_tokens=out_tok)
+
             # 3. Formatação no Markdown
             block_markdown = (
                 f"### Bloco {task.block_index:02d} [{time_range}]\n\n"
@@ -506,6 +524,14 @@ Transcrição completa da reunião:
             )
 
             minute_text = response.text.strip() if response.text else "# Ata Executiva\n*(Falha ao gerar texto)*"
+
+            # Rastreamento de tokens da Ata Executiva
+            in_tok = 0
+            out_tok = 0
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+                out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            self.tracker.register_request(audio_seconds=0.0, input_tokens=in_tok, output_tokens=out_tok, is_new_meeting=True)
 
             # Salva no arquivo de Ata Executiva
             with open(self.minute_file_path, "w", encoding="utf-8") as f:

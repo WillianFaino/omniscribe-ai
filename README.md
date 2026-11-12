@@ -25,7 +25,10 @@
   5. *Pendências e Pontos de Atenção*
 - **Noise Gate & Modo Ausente:** Limiar de corte de ruído ajustável e botão de mudo rápido em tempo real.
 - **Medidores VU em Tempo Real:** Barras visuais dinâmicas com resposta logarítmica para monitorar os níveis de volume de ambos os canais antes e durante a reunião.
-- **Inicialização Turbo (< 1s):** Empacotamento otimizado via PyInstaller em modo pré-extraído (`--onedir`) ou executável único (`--onefile`).
+- **Rastreador de Cotas e Custos da API:** Monitor em tempo real das 1.500 requisições diárias gratuitas do Free Tier do Gemini, total de áudio/tokens processados e estimativa em USD e R$ (BRL).
+- **Histórico Visual de Gravações:** Navegue e visualize atas e transcrições passadas diretamente pela interface com um clique.
+- **Assistente de Instalação Gráfico (Setup Wizard):** Instalador moderno executável para que qualquer usuário instale o aplicativo com dois cliques, escolha a pasta de destino e crie atalhos no Desktop e Menu Iniciar.
+- **Inicialização Turbo (< 1s):** Empacotamento otimizado via PyInstaller em modo pré-extraído (`--onedir`), executável único (`--onefile`) ou instalador completo (`OmniScribe_Setup.exe`).
 
 ---
 
@@ -37,14 +40,18 @@ omniscribe-ai/
 ├── .env.example                  # Modelo de configuração
 ├── .gitignore                    # Regras de exclusão de arquivos sensíveis e temporários
 ├── requirements.txt              # Dependências do projeto
-├── build_exe.bat                 # Script automatizado de compilação via PyInstaller
+├── build_exe.bat                 # Script automatizado de compilação e instalador
+├── build_installer.bat           # Gerador dedicado do executável OmniScribe_Setup.exe
 ├── README.md                     # Documentação completa
 ├── src/
 │   ├── main.py                   # Ponto de entrada, logging e boot da aplicação
 │   ├── audio_engine.py           # Descoberta WASAPI, captura dual, resampling 16kHz e VU meters
 │   ├── gemini_service.py         # Fila assíncrona, Gemini 2.5 Flash, limpeza de WAV e Ata
-│   └── gui.py                    # Interface CustomTkinter (Dark Theme, seletores e abas)
+│   ├── usage_tracker.py          # Monitor de requisições, limites Free Tier e cálculo de custos
+│   ├── installer.py              # Assistente visual de instalação (Setup Wizard CustomTkinter)
+│   └── gui.py                    # Interface CustomTkinter (Dark Theme, abas, histórico e cotas)
 └── atas_reunioes/                # Gerada automaticamente em runtime
+    ├── usage_stats.json          # Persistência das métricas e limites da API
     └── AAAA/
         └── MM/
             ├── transcricao_YYYYMMDD_HHMM[_titulo].md
@@ -98,6 +105,9 @@ build_exe.bat
 Você pode escolher entre:
 1. **[1] Modo Turbo Instantâneo (`--onedir` - Recomendado):** Abre em menos de 1 segundo! Gera a pasta `dist\OmniScribe\OmniScribe.exe`.
 2. **[2] Executável Único (`--onefile`):** Gera um único arquivo portável em `dist\OmniScribe.exe`.
+3. **[3] Assistente de Instalação Gráfico:** Gera o instalador autônomo profissional `dist\OmniScribe_Setup.exe`.
+
+> 💡 **Dica:** Você também pode gerar o instalador diretamente executando `build_installer.bat`!
 
 ---
 
@@ -111,3 +121,4 @@ Você pode escolher entre:
 
 ## 📄 Licença
 Distribuído sob a licença MIT. Veja `LICENSE` para mais informações.
+

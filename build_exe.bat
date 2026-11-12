@@ -94,11 +94,13 @@ echo.
 echo Escolha o formato de empacotamento:
 echo   [1] Modo Turbo Instantaneo (--onedir)  - Abre em menos de 1 segundo! [RECOMENDADO]
 echo   [2] Executavel Unico (--onefile)       - Arquivo unico portatil (~3 a 5s para abrir)
+echo   [3] Assistente de Instalacao Grafico   - Gera 'OmniScribe_Setup.exe' completo [NOVO]
 echo.
 set BUILD_MODE=1
-set /p BUILD_MODE="Digite 1 ou 2 (Pressione ENTER para o padrao [1] Turbo): "
+set /p BUILD_MODE="Digite 1, 2 ou 3 (Pressione ENTER para o padrao [1] Turbo): "
 
 if "%BUILD_MODE%"=="2" goto build_onefile
+if "%BUILD_MODE%"=="3" goto build_installer_flow
 goto build_onedir
 
 :build_onedir
@@ -171,6 +173,51 @@ echo                          BUILD CONCLUIDO COM SUCESSO!
 echo ===============================================================================
 echo  Executavel portavel gerado em:
 echo    ^> dist\OmniScribe.exe
+echo ===============================================================================
+goto end
+
+:build_installer_flow
+echo.
+echo [3/5] Compilando versao base Turbo em 'dist\OmniScribe\'...
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERRO] Falha ao compilar arquivos base do OmniScribe.
+    pause
+    exit /b 1
+)
+
+if not exist "dist\OmniScribe" mkdir "dist\OmniScribe"
+if exist ".env.example" copy /Y ".env.example" "dist\OmniScribe\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
+
+echo.
+echo [4/5] Empacotando Assistente de Instalacao Grafico (OmniScribe_Setup.exe)...
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\OmniScribe;app_data" --collect-all "customtkinter" src/installer.py
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERRO] Ocorreu uma falha durante o empacotamento do instalador.
+    pause
+    exit /b 1
+)
+
+if "%RESTORE_BACKUP%"=="1" (
+    echo [RESTAURACAO] Restaurando dados preservados...
+    if exist "_temp_backup\.env" copy /Y "_temp_backup\.env" "dist\OmniScribe\.env" >nul
+    if exist "_temp_backup\atas_reunioes" xcopy /E /I /Y "_temp_backup\atas_reunioes" "dist\OmniScribe\atas_reunioes" >nul
+    rmdir /s /q "_temp_backup" >nul 2>&1
+)
+
+echo.
+echo ===============================================================================
+echo                   INSTALADOR GERADO COM SUCESSO!
+echo ===============================================================================
+echo  O instalador grafico profissional e autonomo foi gerado em:
+echo    ^> dist\OmniScribe_Setup.exe
+echo.
+echo  Qualquer usuario pode dar dois cliques nele para instalar no Windows!
 echo ===============================================================================
 goto end
 

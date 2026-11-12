@@ -145,6 +145,108 @@ class ApiKeyModal(ctk.CTkToplevel):
 
 
 
+class UsageModal(ctk.CTkToplevel):
+    """Modal visual para exibir métricas detalhadas de consumo, custos e cotas da API Gemini."""
+
+    def __init__(self, parent: "ZoomTranscriberApp"):
+        super().__init__(parent)
+        self.parent = parent
+
+        self.title("Consumo & Cotas da API - OmniScribe AI")
+        self.geometry("580x500")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self.grid_columnconfigure(0, weight=1)
+
+        summary = self.parent.gemini_service.get_usage_summary()
+
+        # Cabeçalho
+        lbl_title = ctk.CTkLabel(
+            self,
+            text="📊 Monitor de Consumo & Custos da API",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        lbl_title.pack(pady=(20, 4))
+
+        lbl_sub = ctk.CTkLabel(
+            self,
+            text="Rastreamento em tempo real do Gemini 2.5 Flash para total transparência.",
+            font=ctk.CTkFont(size=12),
+            text_color="#9ca3af",
+        )
+        lbl_sub.pack(pady=(0, 14))
+
+        # Card de Cota Diária (Free Tier)
+        quota_card = ctk.CTkFrame(self, fg_color="#18181b", corner_radius=8)
+        quota_card.pack(fill="x", padx=24, pady=6)
+        quota_card.grid_columnconfigure(0, weight=1)
+
+        today_req = summary["today_requests"]
+        free_lim = summary["free_limit"]
+        percent = summary["daily_percent"]
+
+        lbl_q_title = ctk.CTkLabel(
+            quota_card,
+            text="Cota Gratuita Diária (Google AI Studio)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
+        lbl_q_title.grid(row=0, column=0, padx=14, pady=(12, 4), sticky="w")
+
+        q_color = "#38bdf8" if percent < 80 else ("#f59e0b" if percent < 95 else "#ef4444")
+        lbl_q_val = ctk.CTkLabel(
+            quota_card,
+            text=f"{today_req} / {free_lim} requisições hoje ({percent:.1f}%)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=q_color,
+        )
+        lbl_q_val.grid(row=0, column=1, padx=14, pady=(12, 4), sticky="e")
+
+        bar_quota = ctk.CTkProgressBar(quota_card, height=12, progress_color="#10b981" if percent < 80 else "#ef4444")
+        bar_quota.set(percent / 100.0)
+        bar_quota.grid(row=1, column=0, columnspan=2, padx=14, pady=(4, 14), sticky="ew")
+
+        # Card de Estatísticas Gerais
+        stats_card = ctk.CTkFrame(self, fg_color="#27272a", corner_radius=8)
+        stats_card.pack(fill="x", padx=24, pady=8)
+        stats_card.grid_columnconfigure((0, 1), weight=1)
+
+        # Linhas de métricas
+        self._add_metric_row(stats_card, 0, "🎙️ Total de Reuniões Concluídas:", f"{summary['total_meetings']} sessões")
+        self._add_metric_row(stats_card, 1, "⏱️ Áudio Processado Acumulado:", summary["audio_time_str"])
+        self._add_metric_row(stats_card, 2, "⚡ Requisições Totais Realizadas:", f"{summary['total_requests']} chamadas")
+        self._add_metric_row(stats_card, 3, "🔤 Volume de Tokens (Prompt + Output):", f"{summary['total_tokens']:,} tokens".replace(",", "."))
+        self._add_metric_row(stats_card, 4, "💵 Custo Estimado Acumulado (USD):", f"${summary['cost_usd']:.4f}")
+        self._add_metric_row(stats_card, 5, "🇧🇷 Custo Estimado em Reais (BRL):", f"R$ {summary['cost_brl']:.2f}", highlight=True)
+
+        # Informações de transparência
+        lbl_info = ctk.CTkLabel(
+            self,
+            text="💡 O Gemini 2.5 Flash oferece até 1.500 requisições/dia totalmente gratuitas no AI Studio.\nMesmo em conta paga (Pay-as-you-go), 1 hora de reunião custa apenas ~R$ 0,40.",
+            font=ctk.CTkFont(size=11),
+            text_color="#71717a",
+            justify="center",
+        )
+        lbl_info.pack(pady=8)
+
+        btn_ok = ctk.CTkButton(
+            self,
+            text="Entendido",
+            fg_color="#3b82f6",
+            hover_color="#2563eb",
+            width=120,
+            command=self.destroy,
+        )
+        btn_ok.pack(pady=(4, 16))
+
+    def _add_metric_row(self, frame: ctk.CTkFrame, row: int, label: str, value: str, highlight: bool = False):
+        lbl_lbl = ctk.CTkLabel(frame, text=label, font=ctk.CTkFont(size=12, weight="bold" if highlight else "normal"))
+        lbl_lbl.grid(row=row, column=0, padx=14, pady=5, sticky="w")
+        color = "#10b981" if highlight else "#f3f4f6"
+        lbl_val = ctk.CTkLabel(frame, text=value, font=ctk.CTkFont(size=12, weight="bold"), text_color=color)
+        lbl_val.grid(row=row, column=1, padx=14, pady=5, sticky="e")
+
+
 class HistoryModal(ctk.CTkToplevel):
     """Modal visual para listar, buscar e carregar atas e transcrições anteriores."""
 
@@ -406,16 +508,30 @@ class ZoomTranscriberApp(ctk.CTk):
         )
         lbl_app_subtitle.pack(anchor="w")
 
+        header_actions = ctk.CTkFrame(header_frame, fg_color="transparent")
+        header_actions.grid(row=0, column=1, padx=16, pady=10, sticky="e")
+
+        self.btn_usage = ctk.CTkButton(
+            header_actions,
+            text="📊 Consumo & Cotas",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#4f46e5",
+            hover_color="#4338ca",
+            width=150,
+            command=self._open_usage_modal,
+        )
+        self.btn_usage.pack(side="left", padx=(0, 8))
+
         self.btn_config_key = ctk.CTkButton(
-            header_frame,
+            header_actions,
             text="🔑 Configurar API Key",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#3b82f6",
             hover_color="#2563eb",
-            width=160,
+            width=150,
             command=self._open_api_key_dialog,
         )
-        self.btn_config_key.grid(row=0, column=1, padx=16, pady=10, sticky="e")
+        self.btn_config_key.pack(side="left")
 
         # ---------------- 2. CONFIGURAÇÕES & DISPOSITIVOS ----------------
         config_frame = ctk.CTkFrame(self, fg_color="#27272a", corner_radius=8)
@@ -702,6 +818,10 @@ class ZoomTranscriberApp(ctk.CTk):
     def _open_api_key_dialog(self) -> None:
         """Abre a janela modal para configurar a GEMINI_API_KEY."""
         ApiKeyModal(self, on_save_callback=self._on_api_key_saved)
+
+    def _open_usage_modal(self) -> None:
+        """Abre o modal de monitoramento de cotas e custos da API."""
+        UsageModal(self)
 
     def _on_api_key_saved(self, new_key: str) -> None:
         """Callback acionado quando o usuário salva a chave API."""
