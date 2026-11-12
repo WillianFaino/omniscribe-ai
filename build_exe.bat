@@ -50,12 +50,15 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: 4. Copia do modelo .env.example para a pasta dist
+:: 4. Copia do .env e .env.example para a pasta dist
 echo.
-echo [3/3] Copiando .env.example para a pasta dist/...
+echo [3/3] Copiando arquivos de configuracao para a pasta dist/...
 if not exist "dist" mkdir "dist"
 if exist ".env.example" (
     copy /Y ".env.example" "dist\.env.example" >nul
+)
+if exist ".env" (
+    copy /Y ".env" "dist\.env" >nul
 )
 
 echo.

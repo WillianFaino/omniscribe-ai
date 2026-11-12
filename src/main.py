@@ -19,6 +19,16 @@ from gemini_service import get_base_dir, load_api_key_from_env
 from gui import run_gui
 
 
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logging.getLogger("zoom_transcriber.main").critical(
+        "Exceção não tratada capturada pelo sistema:",
+        exc_info=(exc_type, exc_value, exc_traceback),
+    )
+
+
 def setup_logging():
     """Configura o sistema de logging da aplicação para console e arquivo rotativo."""
     base_dir = get_base_dir()
@@ -35,6 +45,7 @@ def setup_logging():
             logging.FileHandler(str(log_file), encoding="utf-8", mode="a"),
         ],
     )
+    sys.excepthook = handle_exception
 
 
 def main():
@@ -57,3 +68,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

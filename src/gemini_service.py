@@ -464,14 +464,33 @@ Transcrição completa da reunião:
             return
 
         try:
-            # Lê o conteúdo completo da transcrição gravada
-            with open(self.transcription_file_path, "r", encoding="utf-8") as f:
-                full_transcript = f.read()
-
             now = datetime.now()
             duration_secs = (now - self.meeting_start_time).total_seconds()
             duration_str = format_seconds(duration_secs)
             date_str = self.meeting_start_time.strftime("%d/%m/%Y às %H:%M")
+
+            # Verifica se houve alguma transcrição real acumulada
+            if not self.accumulated_transcript.strip():
+                self._log("[AVISO] Nenhum áudio/bloco transcrito registrado durante a sessão.")
+                notice_text = (
+                    f"# Ata Executiva da Reunião: {self.meeting_title}\n\n"
+                    f"**Data:** {date_str}\n"
+                    f"**Duração:** {duration_str}\n\n"
+                    f"*[Nenhum bloco de áudio com fala foi detectado durante o período gravado.]*\n\n"
+                    f"---\n\n"
+                    f"### Observação do Sistema\n"
+                    f"A gravação foi iniciada e encerrada sem dados de áudio acumulados no período.\n"
+                    f"Certifique-se de reproduzir áudio (Zoom/YouTube/Teams) na saída selecionada ou falar ao microfone.\n"
+                )
+                with open(self.minute_file_path, "w", encoding="utf-8") as f:
+                    f.write(notice_text)
+                if self.on_minute_generated:
+                    self.on_minute_generated(self.minute_file_path, notice_text)
+                return
+
+            # Lê o conteúdo completo da transcrição gravada
+            with open(self.transcription_file_path, "r", encoding="utf-8") as f:
+                full_transcript = f.read()
 
             prompt = self.MINUTES_SYSTEM_PROMPT.format(
                 title=self.meeting_title,

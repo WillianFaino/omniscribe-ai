@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -588,23 +589,35 @@ class ZoomTranscriberApp(ctk.CTk):
         self._timer_running = False
 
         self.btn_stop.configure(state="disabled")
-        self.lbl_status.configure(text="Status: Processando últimos blocos...", text_color="#f59e0b")
+        self.lbl_status.configure(text="Status: Encerrando gravação...", text_color="#f59e0b")
 
-        # Para captura no motor de áudio
-        self.audio_engine.stop_recording(finalize_block=True)
+        # Roda o encerramento em thread assíncrona para não travar a GUI
+        threading.Thread(target=self._async_stop_recording, daemon=True, name="AsyncStopRecording").start()
 
-        # Notifica o Gemini Service para processar os blocos restantes e gerar a Ata
-        self.gemini_service.finish_session()
+    def _async_stop_recording(self) -> None:
+        """Processamento de encerramento em thread secundária."""
+        try:
+            self._log_gui("[GRAVAÇÃO] Encerrando motor de áudio e descarregando buffers...")
+            self.audio_engine.stop_recording(finalize_block=True)
 
-        # Reabilita controles
-        self.btn_start.configure(state="normal")
-        self.opt_loopback.configure(state="normal")
-        self.opt_mic.configure(state="normal")
-        self.btn_refresh_devices.configure(state="normal")
-        self.opt_block_duration.configure(state="normal")
-        self.entry_meeting_title.configure(state="normal")
+            self._log_gui("[GRAVAÇÃO] Finalizando fila do Gemini e gerando Ata...")
+            self.gemini_service.finish_session()
 
-        self._log_gui("[GRAVAÇÃO] Encerrada pelo usuário. Aguardando finalização da Ata...")
+            def reenable_controls():
+                self.btn_start.configure(state="normal")
+                self.opt_loopback.configure(state="normal")
+                self.opt_mic.configure(state="normal")
+                self.btn_refresh_devices.configure(state="normal")
+                self.opt_block_duration.configure(state="normal")
+                self.entry_meeting_title.configure(state="normal")
+
+            self.after(0, reenable_controls)
+            self._log_gui("[GRAVAÇÃO] Gravação finalizada com sucesso.")
+
+        except Exception as e:
+            logger.exception(f"Erro ao encerrar gravação: {e}")
+            self._log_gui(f"[ERRO] Falha no encerramento da gravação: {e}")
+            self.after(0, lambda: self.btn_start.configure(state="normal"))
 
     def _update_timer(self) -> None:
         """Atualiza o contador de tempo decorrido da reunião a cada segundo."""
@@ -711,3 +724,4 @@ def run_gui():
 
 if __name__ == "__main__":
     run_gui()
+

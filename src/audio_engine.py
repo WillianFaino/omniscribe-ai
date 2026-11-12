@@ -358,9 +358,16 @@ class AudioEngine:
 
         while self.is_recording and stream is not None:
             try:
+                # Evita chamadas bloqueantes em C quando não há áudio reproduzindo
+                if hasattr(stream, "get_read_available"):
+                    avail = stream.get_read_available()
+                    if avail < DEFAULT_CHUNK_FRAMES:
+                        time.sleep(0.01)
+                        continue
+
                 data = stream.read(DEFAULT_CHUNK_FRAMES, exception_on_overflow=False)
                 if not data:
-                    time.sleep(0.005)
+                    time.sleep(0.01)
                     continue
 
                 samples = np.frombuffer(data, dtype=np.int16)
@@ -390,9 +397,15 @@ class AudioEngine:
 
         while self.is_recording and stream is not None:
             try:
+                if hasattr(stream, "get_read_available"):
+                    avail = stream.get_read_available()
+                    if avail < DEFAULT_CHUNK_FRAMES:
+                        time.sleep(0.01)
+                        continue
+
                 data = stream.read(DEFAULT_CHUNK_FRAMES, exception_on_overflow=False)
                 if not data:
-                    time.sleep(0.005)
+                    time.sleep(0.01)
                     continue
 
                 samples = np.frombuffer(data, dtype=np.int16)
@@ -458,12 +471,15 @@ class AudioEngine:
     def _create_block_file(self, is_final: bool = False) -> Optional[Path]:
         """Extrai os dados acumulados, reamostra para 16kHz, intercala em estéreo e salva em WAV."""
         with self._buffer_lock:
-            if not self._raw_loop_chunks:
+            if not self._raw_loop_chunks and not self._raw_mic_chunks:
                 logger.debug("Nenhum dado de áudio no buffer para fatiar.")
                 return None
 
-            loop_raw = np.concatenate(self._raw_loop_chunks)
-            self._raw_loop_chunks = []
+            if self._raw_loop_chunks:
+                loop_raw = np.concatenate(self._raw_loop_chunks)
+                self._raw_loop_chunks = []
+            else:
+                loop_raw = np.empty(0, dtype=np.int16)
 
             if self._raw_mic_chunks:
                 mic_raw = np.concatenate(self._raw_mic_chunks)
@@ -472,21 +488,31 @@ class AudioEngine:
                 mic_raw = np.empty(0, dtype=np.int16)
 
         # Duração em segundos do sinal original
-        duration_loop = len(loop_raw) / float(self._loopback_rate) if self._loopback_rate > 0 else 0.0
-        if duration_loop < 1.0 and not is_final:
+        dur_loop = len(loop_raw) / float(self._loopback_rate) if self._loopback_rate > 0 else 0.0
+        dur_mic = len(mic_raw) / float(self._mic_rate) if self._mic_rate > 0 else 0.0
+        max_duration = max(dur_loop, dur_mic)
+
+        if max_duration < 1.0 and not is_final:
             # Trecho muito curto, descarta se não for o encerramento da reunião
             return None
 
-        # Reamostra ambos para 16kHz mono
-        loop_16k = resample_to_16k(loop_raw, self._loopback_rate, TARGET_SAMPLE_RATE)
+        # Reamostra ambos para 16kHz mono (se um canal estiver vazio, preenche com silêncio)
+        if len(loop_raw) > 0:
+            loop_16k = resample_to_16k(loop_raw, self._loopback_rate, TARGET_SAMPLE_RATE)
+        else:
+            mic_resampled_len = int(round(dur_mic * TARGET_SAMPLE_RATE))
+            loop_16k = np.zeros(mic_resampled_len, dtype=np.int16)
 
         if len(mic_raw) > 0:
             mic_16k = resample_to_16k(mic_raw, self._mic_rate, TARGET_SAMPLE_RATE)
         else:
-            mic_16k = np.zeros_like(loop_16k)
+            mic_16k = np.zeros(len(loop_16k), dtype=np.int16)
 
         # Sincroniza e iguala o comprimento de amostras dos dois canais
         target_len = max(len(loop_16k), len(mic_16k))
+        if target_len == 0:
+            return None
+
         if len(loop_16k) < target_len:
             loop_16k = np.pad(loop_16k, (0, target_len - len(loop_16k)), mode="constant")
         elif len(loop_16k) > target_len:
@@ -534,41 +560,48 @@ class AudioEngine:
             return None
 
     def stop_recording(self, finalize_block: bool = True) -> None:
-        """Interrompe a captura de áudio e opcionalmente empacota o bloco residual final."""
+        """Interrompe a captura de áudio com encerramento seguro e não bloqueante."""
         if not self.is_recording:
             return
 
         logger.info("Encerrando captura de áudio...")
         self.is_recording = False
 
-        # Aguarda encerramento de threads de captura para drenar últimos dados
-        time.sleep(0.2)
+        # Aguarda finalização limpa das threads de captura
+        for thread in [self._loopback_thread, self._mic_thread, self._slicer_thread, self._vu_thread]:
+            if thread and thread.is_alive():
+                try:
+                    thread.join(timeout=0.6)
+                except Exception:
+                    pass
 
         if finalize_block:
-            self._create_block_file(is_final=True)
-
-        # Fecha streams
-        if self._loopback_stream is not None:
             try:
-                self._loopback_stream.stop_stream()
-                self._loopback_stream.close()
+                self._create_block_file(is_final=True)
             except Exception as e:
-                logger.debug(f"Erro ao fechar loopback stream: {e}")
-            self._loopback_stream = None
+                logger.exception(f"Erro ao empacotar bloco final: {e}")
 
-        if self._mic_stream is not None:
-            try:
-                self._mic_stream.stop_stream()
-                self._mic_stream.close()
-            except Exception as e:
-                logger.debug(f"Erro ao fechar mic stream: {e}")
-            self._mic_stream = None
+        # Fecha streams com verificações de estado seguro
+        for attr in ["_loopback_stream", "_mic_stream"]:
+            stream = getattr(self, attr, None)
+            if stream is not None:
+                try:
+                    if hasattr(stream, "is_active") and stream.is_active():
+                        stream.stop_stream()
+                except Exception as e:
+                    logger.debug(f"Aviso ao parar stream {attr}: {e}")
+                try:
+                    stream.close()
+                except Exception as e:
+                    logger.debug(f"Aviso ao fechar stream {attr}: {e}")
+                setattr(self, attr, None)
 
         if self._pyaudio_instance is not None:
             try:
                 self._pyaudio_instance.terminate()
             except Exception as e:
-                logger.debug(f"Erro ao terminar instância PyAudio: {e}")
+                logger.debug(f"Aviso ao terminar instância PyAudio: {e}")
             self._pyaudio_instance = None
 
-        logger.info("Motor de áudio encerrado.")
+        logger.info("Motor de áudio encerrado com sucesso.")
+
