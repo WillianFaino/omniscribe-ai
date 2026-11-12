@@ -1,0 +1,27 @@
+# Ambientes Virtuais e Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# PyInstaller & Build
+build/
+dist/
+*.spec
+
+# Variáveis de Ambiente e Segredos (NUNCA versionar)
+.env
+*.env.local
+
+# Áudio Temporário e Buffers Locais
+temp_blocks/
+*.wav
+
+# Atas e Transcrições Geradas Localmente
+atas_reunioes/
+.vscode/
+.idea/
