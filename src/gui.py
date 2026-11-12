@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from tkinter import filedialog
 
 import customtkinter as ctk
 
@@ -141,6 +142,190 @@ class ApiKeyModal(ctk.CTkToplevel):
             self.destroy()
         else:
             self.entry_key.configure(border_color="#ef4444")
+
+
+
+class HistoryModal(ctk.CTkToplevel):
+    """Modal visual para listar, buscar e carregar atas e transcrições anteriores."""
+
+    def __init__(self, parent: "ZoomTranscriberApp"):
+        super().__init__(parent)
+        self.parent = parent
+
+        self.title("Histórico de Reuniões & Atas - OmniScribe AI")
+        self.geometry("740x540")
+        self.minsize(620, 420)
+        self.grab_set()
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+
+        # Cabeçalho
+        top_frame = ctk.CTkFrame(self, fg_color="transparent")
+        top_frame.grid(row=0, column=0, padx=20, pady=(16, 8), sticky="ew")
+        top_frame.grid_columnconfigure(0, weight=1)
+
+        lbl_title = ctk.CTkLabel(
+            top_frame,
+            text="📜 Histórico de Reuniões e Gravações",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        lbl_title.grid(row=0, column=0, sticky="w")
+
+        lbl_sub = ctk.CTkLabel(
+            top_frame,
+            text="Selecione qualquer ata executiva ou transcrição salva para visualizar imediatamente no aplicativo.",
+            font=ctk.CTkFont(size=12),
+            text_color="#9ca3af",
+        )
+        lbl_sub.grid(row=1, column=0, sticky="w")
+
+        # Container rolável com as reuniões
+        self.scroll_list = ctk.CTkScrollableFrame(self, corner_radius=8)
+        self.scroll_list.grid(row=1, column=0, padx=20, pady=8, sticky="nsew")
+        self.scroll_list.grid_columnconfigure(0, weight=1)
+
+        # Rodapé
+        bot_frame = ctk.CTkFrame(self, fg_color="transparent")
+        bot_frame.grid(row=2, column=0, padx=20, pady=(8, 16), sticky="ew")
+
+        btn_browse = ctk.CTkButton(
+            bot_frame,
+            text="📂 Procurar outro arquivo (.md)...",
+            font=ctk.CTkFont(size=12),
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=self._browse_custom_file,
+        )
+        btn_browse.pack(side="left")
+
+        btn_close = ctk.CTkButton(
+            bot_frame,
+            text="Fechar",
+            font=ctk.CTkFont(size=12),
+            fg_color="#4b5563",
+            hover_color="#374151",
+            width=100,
+            command=self.destroy,
+        )
+        btn_close.pack(side="right")
+
+        self._populate_list()
+
+    def _populate_list(self) -> None:
+        base_dir = get_base_dir()
+        atas_root = base_dir / "atas_reunioes"
+
+        if not atas_root.exists():
+            lbl_empty = ctk.CTkLabel(
+                self.scroll_list,
+                text="Nenhuma ata gravada ainda.\nSuas gravações concluídas aparecerão aqui automaticamente!",
+                font=ctk.CTkFont(size=13),
+                text_color="#9ca3af",
+                justify="center",
+            )
+            lbl_empty.pack(pady=40)
+            return
+
+        files = [f for f in atas_root.glob("**/*.md") if f.is_file() and not f.name.startswith(".")]
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+        if not files:
+            lbl_empty = ctk.CTkLabel(
+                self.scroll_list,
+                text="Nenhum arquivo Markdown encontrado na pasta de atas.",
+                font=ctk.CTkFont(size=13),
+                text_color="#9ca3af",
+            )
+            lbl_empty.pack(pady=40)
+            return
+
+        for f in files:
+            self._create_item_card(f)
+
+    def _create_item_card(self, file_path: Path) -> None:
+        filename = file_path.name
+        is_ata = "ata_executiva" in filename
+        is_transc = "transcricao" in filename
+
+        mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+        date_str = mtime.strftime("%d/%m/%Y às %H:%M")
+
+        card = ctk.CTkFrame(self.scroll_list, fg_color="#27272a", corner_radius=6)
+        card.pack(fill="x", padx=4, pady=4)
+        card.grid_columnconfigure(1, weight=1)
+
+        # Ícone e Badge
+        if is_ata:
+            badge_text = "ATA EXECUTIVA"
+            badge_color = "#059669"
+            icon = "📋"
+        elif is_transc:
+            badge_text = "TRANSCRIÇÃO"
+            badge_color = "#2563eb"
+            icon = "🎙️"
+        else:
+            badge_text = "DOCUMENTO"
+            badge_color = "#4b5563"
+            icon = "📄"
+
+        badge = ctk.CTkLabel(
+            card,
+            text=f"{icon} {badge_text}",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#ffffff",
+            fg_color=badge_color,
+            corner_radius=4,
+            width=110,
+            height=24,
+        )
+        badge.grid(row=0, column=0, padx=10, pady=10, sticky="w")
+
+        info_frame = ctk.CTkFrame(card, fg_color="transparent")
+        info_frame.grid(row=0, column=1, padx=6, pady=8, sticky="w")
+
+        lbl_fname = ctk.CTkLabel(
+            info_frame,
+            text=filename,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#f3f4f6",
+        )
+        lbl_fname.pack(anchor="w")
+
+        lbl_date = ctk.CTkLabel(
+            info_frame,
+            text=f"Modificado em: {date_str} • Tamanho: {file_path.stat().st_size // 1024 + 1} KB",
+            font=ctk.CTkFont(size=11),
+            text_color="#9ca3af",
+        )
+        lbl_date.pack(anchor="w")
+
+        btn_load = ctk.CTkButton(
+            card,
+            text="Visualizar",
+            width=100,
+            height=30,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#3b82f6",
+            hover_color="#1d4ed8",
+            command=lambda p=file_path: self._select_file(p),
+        )
+        btn_load.grid(row=0, column=2, padx=12, pady=10, sticky="e")
+
+    def _select_file(self, file_path: Path) -> None:
+        self.parent.load_document(file_path)
+        self.destroy()
+
+    def _browse_custom_file(self) -> None:
+        atas_root = get_base_dir() / "atas_reunioes"
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Selecione um arquivo de Ata ou Transcrição",
+            initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
+            filetypes=[("Documentos Markdown", "*.md"), ("Todos os Arquivos", "*.*")],
+        )
+        if chosen:
+            self._select_file(Path(chosen))
 
 
 class ZoomTranscriberApp(ctk.CTk):
@@ -439,15 +624,28 @@ class ZoomTranscriberApp(ctk.CTk):
         )
         self.lbl_footer_info.grid(row=0, column=0, sticky="w")
 
+        footer_btn_box = ctk.CTkFrame(footer_frame, fg_color="transparent")
+        footer_btn_box.grid(row=0, column=1, sticky="e")
+
+        self.btn_history = ctk.CTkButton(
+            footer_btn_box,
+            text="📜 Histórico de Reuniões",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#4f46e5",
+            hover_color="#4338ca",
+            command=self._open_history_modal,
+        )
+        self.btn_history.pack(side="left", padx=(0, 8))
+
         self.btn_open_folder = ctk.CTkButton(
-            footer_frame,
+            footer_btn_box,
             text="📁 Abrir Pasta das Atas",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#374151",
             hover_color="#4b5563",
             command=self._open_atas_folder,
         )
-        self.btn_open_folder.grid(row=0, column=1, sticky="e")
+        self.btn_open_folder.pack(side="left")
 
     # ---------------- MÉTODOS DE HARDWARE E DISPOSITIVOS ----------------
     def _refresh_audio_devices(self) -> None:
@@ -713,6 +911,65 @@ class ZoomTranscriberApp(ctk.CTk):
         now = datetime.now()
         target_dir = get_base_dir() / "atas_reunioes" / now.strftime("%Y") / now.strftime("%m")
         open_folder_in_explorer(target_dir)
+
+    def _open_history_modal(self) -> None:
+        """Abre o modal visual de histórico de reuniões."""
+        HistoryModal(self)
+
+    def load_document(self, file_path: Path) -> None:
+        """Carrega e exibe um arquivo de Ata ou Transcrição nas abas da interface."""
+        file_path = Path(file_path).resolve()
+        if not file_path.exists():
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            filename = file_path.name
+            if "ata_executiva" in filename:
+                self.txt_minutes.delete("1.0", "end")
+                self.txt_minutes.insert("end", content)
+                self.tabview.set("Ata Executiva")
+                self.lbl_status.configure(text=f"Ata carregada: {filename[:28]}...", text_color="#10b981")
+
+                # Tenta localizar a transcrição correspondente na mesma pasta
+                matching_name = filename.replace("ata_executiva_", "transcricao_")
+                matching_file = file_path.parent / matching_name
+                if matching_file.exists():
+                    try:
+                        with open(matching_file, "r", encoding="utf-8") as mf:
+                            self.txt_transcription.delete("1.0", "end")
+                            self.txt_transcription.insert("end", mf.read())
+                    except Exception:
+                        pass
+
+            elif "transcricao" in filename:
+                self.txt_transcription.delete("1.0", "end")
+                self.txt_transcription.insert("end", content)
+                self.tabview.set("Transcrição ao Vivo")
+                self.lbl_status.configure(text=f"Transcrição carregada: {filename[:28]}...", text_color="#38bdf8")
+
+                # Tenta localizar a ata correspondente na mesma pasta
+                matching_name = filename.replace("transcricao_", "ata_executiva_")
+                matching_file = file_path.parent / matching_name
+                if matching_file.exists():
+                    try:
+                        with open(matching_file, "r", encoding="utf-8") as mf:
+                            self.txt_minutes.delete("1.0", "end")
+                            self.txt_minutes.insert("end", mf.read())
+                    except Exception:
+                        pass
+            else:
+                self.txt_transcription.delete("1.0", "end")
+                self.txt_transcription.insert("end", content)
+                self.tabview.set("Transcrição ao Vivo")
+
+            self._log_gui(f"[HISTÓRICO] Reunião carregada na interface: {filename}")
+
+        except Exception as e:
+            logger.exception(f"Erro ao carregar documento: {e}")
+            self._log_gui(f"[ERRO] Falha ao ler arquivo: {e}")
 
 
 def run_gui():
