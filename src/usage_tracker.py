@@ -125,3 +125,4 @@ class UsageTracker:
             "cost_usd": cost_usd,
             "cost_brl": cost_brl,
         }
+

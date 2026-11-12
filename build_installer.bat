@@ -73,3 +73,4 @@ echo       cria atalhos na Area de Trabalho e Menu Iniciar, e preserva suas atas
 echo ===============================================================================
 echo.
 pause
+
