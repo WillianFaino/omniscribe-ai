@@ -39,80 +39,69 @@ echo Escolha o modo de empacotamento:
 echo   [1] Modo Turbo Instantaneo (--onedir)  - Abre em menos de 1 segundo! [RECOMENDADO]
 echo   [2] Executavel Unico (--onefile)       - Arquivo unico portatil (~3 a 5s para abrir)
 echo.
-set "BUILD_MODE=1"
-set /p "BUILD_MODE=Digite 1 ou 2 (Pressione ENTER para o padrao [1] Turbo): "
+set BUILD_MODE=1
+set /p BUILD_MODE="Digite 1 ou 2 (Pressione ENTER para o padrao [1] Turbo): "
 
-if "%BUILD_MODE%"=="2" (
-    echo.
-    echo [2/3] Empacotando aplicacao via PyInstaller (--onefile --windowed)...
-    python -m PyInstaller --noconfirm --clean --onefile --windowed ^
-        --name "OmniScribe" ^
-        --paths "src" ^
-        --collect-all "customtkinter" ^
-        --collect-all "google.genai" ^
-        src/main.py
+if "%BUILD_MODE%"=="2" goto build_onefile
+goto build_onedir
 
-    if %errorlevel% neq 0 (
-        echo.
-        echo [ERRO] Ocorreu uma falha durante o empacotamento com o PyInstaller.
-        pause
-        exit /b 1
-    )
+:build_onedir
+echo.
+echo [2/3] Empacotando aplicacao em Modo Turbo Instantaneo (--onedir --windowed)...
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
 
+if %errorlevel% neq 0 (
     echo.
-    echo [3/3] Copiando arquivos de configuracao para a pasta dist/...
-    if not exist "dist" mkdir "dist"
-    if exist ".env.example" (
-        copy /Y ".env.example" "dist\.env.example" >nul
-    )
-    if exist ".env" (
-        copy /Y ".env" "dist\.env" >nul
-    )
-
-    echo.
-    echo ===============================================================================
-    echo                          BUILD CONCLUIDO COM SUCESSO!
-    echo ===============================================================================
-    echo  Executavel portavel gerado em:
-    echo    ^> dist\OmniScribe.exe
-    echo ===============================================================================
-) else (
-    echo.
-    echo [2/3] Empacotando aplicacao em Modo Turbo Instantaneo (--onedir --windowed)...
-    python -m PyInstaller --noconfirm --clean --onedir --windowed ^
-        --name "OmniScribe" ^
-        --paths "src" ^
-        --collect-all "customtkinter" ^
-        --collect-all "google.genai" ^
-        src/main.py
-
-    if %errorlevel% neq 0 (
-        echo.
-        echo [ERRO] Ocorreu uma falha durante o empacotamento com o PyInstaller.
-        pause
-        exit /b 1
-    )
-
-    echo.
-    echo [3/3] Copiando arquivos de configuracao para dist\OmniScribe\...
-    if exist ".env.example" (
-        copy /Y ".env.example" "dist\OmniScribe\.env.example" >nul
-    )
-    if exist ".env" (
-        copy /Y ".env" "dist\OmniScribe\.env" >nul
-    )
-
-    echo.
-    echo ===============================================================================
-    echo                     BUILD TURBO CONCLUIDO COM SUCESSO!
-    echo ===============================================================================
-    echo  Executavel com inicializacao ultra-rapida gerado em:
-    echo    ^> dist\OmniScribe\OmniScribe.exe
-    echo.
-    echo  DICA: Voce pode clicar com o botao direito em 'OmniScribe.exe' e
-    echo        selecionar 'Enviar para' -^> 'Area de trabalho (criar atalho)'!
-    echo ===============================================================================
+    echo [ERRO] Ocorreu uma falha durante o empacotamento com o PyInstaller.
+    pause
+    exit /b 1
 )
 
+echo.
+echo [3/3] Copiando arquivos de configuracao para dist\OmniScribe\...
+if not exist "dist\OmniScribe" mkdir "dist\OmniScribe"
+if exist ".env.example" copy /Y ".env.example" "dist\OmniScribe\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
+
+echo.
+echo ===============================================================================
+echo                     BUILD TURBO CONCLUIDO COM SUCESSO!
+echo ===============================================================================
+echo  Executavel com inicializacao ultra-rapida gerado em:
+echo    ^> dist\OmniScribe\OmniScribe.exe
+echo.
+echo  DICA: Voce pode clicar com o botao direito em 'OmniScribe.exe' e
+echo        selecionar 'Enviar para' -^> 'Area de trabalho (criar atalho)'!
+echo ===============================================================================
+goto end
+
+:build_onefile
+echo.
+echo [2/3] Empacotando aplicacao via PyInstaller (--onefile --windowed)...
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
+
+if %errorlevel% neq 0 (
+    echo.
+    echo [ERRO] Ocorreu uma falha durante o empacotamento com o PyInstaller.
+    pause
+    exit /b 1
+)
+
+echo.
+echo [3/3] Copiando arquivos de configuracao para a pasta dist/...
+if not exist "dist" mkdir "dist"
+if exist ".env.example" copy /Y ".env.example" "dist\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\.env" >nul
+
+echo.
+echo ===============================================================================
+echo                          BUILD CONCLUIDO COM SUCESSO!
+echo ===============================================================================
+echo  Executavel portavel gerado em:
+echo    ^> dist\OmniScribe.exe
+echo ===============================================================================
+goto end
+
+:end
 echo.
 pause
