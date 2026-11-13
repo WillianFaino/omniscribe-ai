@@ -19,6 +19,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from audio_engine import AudioEngine, listar_dispositivos_audio
+from mascot_widget import OmniMicWidget
 from gemini_service import (
     GeminiService,
     format_seconds,
@@ -503,9 +504,11 @@ class ZoomTranscriberApp(ctk.CTk):
         self._timer_running = False
 
         # Carrega dispositivos WASAPI, cliente Gemini e validação de API key após renderização
+        self.mascot: Optional[OmniMicWidget] = None
         self.after(60, self._refresh_audio_devices)
         self.after(120, self.gemini_service._init_client)
         self.after(200, self._check_initial_api_key)
+        self.after(280, self._init_mascot)
 
     def _build_ui(self) -> None:
         """Constrói o layout responsivo e profissional da janela."""
@@ -925,6 +928,19 @@ class ZoomTranscriberApp(ctk.CTk):
         footer_btn_box = ctk.CTkFrame(footer_frame, fg_color="transparent")
         footer_btn_box.grid(row=0, column=1, sticky="e")
 
+        self.btn_toggle_mascot = ctk.CTkButton(
+            footer_btn_box,
+            text="🎙️ OmniMic",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            border_color="#374151",
+            border_width=1,
+            width=110,
+            command=self._toggle_mascot,
+        )
+        self.btn_toggle_mascot.pack(side="left", padx=(0, 8))
+
         self.btn_open_folder = ctk.CTkButton(
             footer_btn_box,
             text="📁 Abrir Pasta das Atas",
@@ -1012,11 +1028,26 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self._log_gui(f"Dispositivos detectados: {len(loop_devices)} loopback(s), {len(mic_devices)} microfone(s).")
 
+    def _init_mascot(self) -> None:
+        """Inicializa o mascote 3D OmniMic após a abertura da janela principal."""
+        if self.mascot is not None:
+            return
+        self.mascot = OmniMicWidget(self)
+        self.mascot.place_default()
+
+    def _toggle_mascot(self) -> None:
+        if self.mascot is None:
+            self._init_mascot()
+        else:
+            self.mascot.toggle_mascot()
+
     # ---------------- GERENCIAMENTO DA CHAVE API ----------------
     def _check_initial_api_key(self) -> None:
         """Verifica na inicialização se há chave configurada no .env ou ambiente."""
         key = load_api_key_from_env()
         if not key:
+            if self.mascot:
+                self.mascot.trigger_warning("Chave Gemini não configurada! Cole sua API Key para começar.")
             self._open_api_key_dialog()
 
     def _open_api_key_dialog(self) -> None:
@@ -1099,6 +1130,9 @@ class ZoomTranscriberApp(ctk.CTk):
         self._timer_running = True
         self._update_timer()
 
+        if self.mascot:
+            self.mascot.start_listening()
+
         self._log_gui(f"[GRAVAÇÃO] Iniciada: Bloco={block_seconds}s, Loopback={selected_loop_str}, Mic={selected_mic_str}")
 
     def _stop_recording(self) -> None:
@@ -1111,6 +1145,10 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self.btn_stop.configure(state="disabled")
         self.lbl_status.configure(text="Status: Encerrando gravação...", text_color="#f59e0b")
+
+        if self.mascot:
+            self.mascot.stop_listening()
+            self.mascot.trigger_transcribing(4.0, "Consolidando transcrição e gerando Ata...")
 
         # Roda o encerramento em thread assíncrona para não travar a GUI
         threading.Thread(target=self._async_stop_recording, daemon=True, name="AsyncStopRecording").start()
@@ -1157,6 +1195,8 @@ class ZoomTranscriberApp(ctk.CTk):
                 self.lbl_vu_zoom_val.configure(text=f"{int(zoom_rms * 100)}%")
             if hasattr(self, "lbl_vu_mic_val"):
                 self.lbl_vu_mic_val.configure(text=f"{int(mic_rms * 100)}%")
+            if self.mascot:
+                self.mascot.set_audio_rms(max(zoom_rms, mic_rms))
 
         self.after(0, update)
 
@@ -1198,6 +1238,8 @@ class ZoomTranscriberApp(ctk.CTk):
         def update():
             self.txt_transcription.insert("end", block_text)
             self.txt_transcription.see("end")
+            if self.mascot and not is_final:
+                self.mascot.trigger_transcribing(2.2)
 
         self.after(0, update)
 
@@ -1209,6 +1251,8 @@ class ZoomTranscriberApp(ctk.CTk):
             self.tabview.set("Ata Executiva")
             self.lbl_status.configure(text="Status: Ata Executiva Concluída!", text_color="#10b981")
             self._log_gui(f"[CONCLUÍDO] Ata Executiva disponível em: {minute_path.name}")
+            if self.mascot:
+                self.mascot.trigger_celebrating("Ata executiva pronta e salva! 🏆")
 
         self.after(0, update)
 
