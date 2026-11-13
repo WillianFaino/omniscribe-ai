@@ -77,6 +77,8 @@ def build_native_installer(root_dir: Path, zip_path: Path) -> Path:
         "/nologo",
         "/target:winexe",
         "/optimize+",
+        "/codepage:65001",
+        "/utf8output",
         "/r:System.Windows.Forms.dll",
         "/r:System.Drawing.dll",
         "/r:System.IO.Compression.dll",

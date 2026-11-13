@@ -233,7 +233,7 @@ namespace OmniScribeSetup
             _navBar.Controls.Add(_btnCancel);
 
             _btnNext = new FlatButton();
-            _btnNext.Text = "Avancar >";
+            _btnNext.Text = "Avançar >";
             _btnNext.Size = new Size(135, 36);
             _btnNext.Location = new Point(483, 14);
             _btnNext.BackColor = AccentBlue;
@@ -295,7 +295,7 @@ namespace OmniScribeSetup
             _btnBack.Enabled = false;
             _btnCancel.Enabled = true;
             _btnNext.Enabled = true;
-            _btnNext.Text = "Avancar >";
+            _btnNext.Text = "Avançar >";
             _btnNext.BackColor = AccentBlue;
 
             Panel badge = new Panel();
@@ -312,7 +312,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(badge);
 
             Label title = new Label();
-            title.Text = "Bem-vindo ao Assistente de Instalacao\ndo OmniScribe AI";
+            title.Text = "Bem-vindo ao Assistente de Instalação\ndo OmniScribe AI";
             title.Font = new Font("Segoe UI", 17f, FontStyle.Bold);
             title.ForeColor = TextMain;
             title.Size = new Size(576, 70);
@@ -327,12 +327,12 @@ namespace OmniScribeSetup
 
             Label desc = new Label();
             desc.Text =
-                "O OmniScribe AI realiza transcricao incremental em tempo real e gera Atas Executivas\n" +
-                "automaticas para reunioes (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n" +
-                "Recursos incluidos nesta versao:\n" +
-                "  - Diarizacao multi-voz inteligente e suporte a falas sobrepostas\n" +
+                "O OmniScribe AI realiza transcrição incremental em tempo real e gera Atas Executivas\n" +
+                "automáticas para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n" +
+                "Recursos incluídos nesta versão:\n" +
+                "  - Diarização multi-voz inteligente e suporte a falas sobrepostas\n" +
                 "  - Rastreador em tempo real de cotas Free Tier e custos da API\n" +
-                "  - Instalacao rapida sem privilegios de administrador ou terminal";
+                "  - Instalação rápida sem privilégios de administrador ou terminal";
             desc.Font = new Font("Segoe UI", 9.5f);
             desc.ForeColor = TextMuted;
             desc.Dock = DockStyle.Fill;
@@ -346,11 +346,11 @@ namespace OmniScribeSetup
             _btnBack.Enabled = true;
             _btnCancel.Enabled = true;
             _btnNext.Enabled = true;
-            _btnNext.Text = "Avancar >";
+            _btnNext.Text = "Avançar >";
             _btnNext.BackColor = AccentBlue;
 
             Label title = new Label();
-            title.Text = "Pasta de Instalacao";
+            title.Text = "Pasta de Instalação";
             title.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
             title.ForeColor = TextMain;
             title.Location = new Point(32, 34);
@@ -358,7 +358,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(title);
 
             Label sub = new Label();
-            sub.Text = "Escolha a pasta onde o OmniScribe AI sera instalado em seu computador:";
+            sub.Text = "Escolha a pasta onde o OmniScribe AI será instalado em seu computador:";
             sub.Font = new Font("Segoe UI", 9.5f);
             sub.ForeColor = TextMuted;
             sub.Location = new Point(32, 74);
@@ -402,7 +402,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(btnBrowse);
 
             Label info = new Label();
-            info.Text = "Espaco em disco necessario: ~125 MB\nNao requer permissao de administrador (instalacao segura no perfil do usuario).";
+            info.Text = "Espaço em disco necessário: ~125 MB\nNão requer permissão de administrador (instalação segura no perfil do usuário).";
             info.Font = new Font("Segoe UI", 9f);
             info.ForeColor = Color.FromArgb(100, 116, 139);
             info.Location = new Point(32, 170);
@@ -419,7 +419,7 @@ namespace OmniScribeSetup
             _btnNext.BackColor = AccentGreen;
 
             Label title = new Label();
-            title.Text = "Configuracoes e Atalhos";
+            title.Text = "Configurações e Atalhos";
             title.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
             title.ForeColor = TextMain;
             title.Location = new Point(32, 34);
@@ -427,7 +427,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(title);
 
             Label sub = new Label();
-            sub.Text = "Selecione as opcoes adicionais para concluir a configuracao:";
+            sub.Text = "Selecione as opções adicionais para concluir a configuração:";
             sub.Font = new Font("Segoe UI", 9.5f);
             sub.ForeColor = TextMuted;
             sub.Location = new Point(32, 74);
@@ -440,7 +440,7 @@ namespace OmniScribeSetup
             card.BackColor = CardColor;
 
             _chkDesktop = new CheckBox();
-            _chkDesktop.Text = "Criar atalho na Area de Trabalho (Desktop)";
+            _chkDesktop.Text = "Criar atalho na Área de Trabalho (Desktop)";
             _chkDesktop.Checked = _desktopShortcut;
             _chkDesktop.Font = new Font("Segoe UI", 10f);
             _chkDesktop.ForeColor = TextMain;
@@ -458,7 +458,7 @@ namespace OmniScribeSetup
             card.Controls.Add(_chkStart);
 
             _chkPreserve = new CheckBox();
-            _chkPreserve.Text = "Preservar atas, gravacoes anteriores e chave da API (.env) existentes";
+            _chkPreserve.Text = "Preservar atas, gravações anteriores e chave da API (.env) existentes";
             _chkPreserve.Checked = _preserveData;
             _chkPreserve.Font = new Font("Segoe UI", 10f);
             _chkPreserve.ForeColor = TextMain;
@@ -512,7 +512,7 @@ namespace OmniScribeSetup
             _btnNext.BackColor = AccentGreen;
 
             Label title = new Label();
-            title.Text = "Instalacao Concluida com Sucesso!";
+            title.Text = "Instalação Concluída com Sucesso!";
             title.Font = new Font("Segoe UI", 16.5f, FontStyle.Bold);
             title.ForeColor = AccentGreen;
             title.Location = new Point(32, 54);
@@ -529,7 +529,7 @@ namespace OmniScribeSetup
             desc.Text =
                 "O OmniScribe AI foi instalado com sucesso em:\n" +
                 _targetDir + "\n\n" +
-                "Seus atalhos foram configurados e o software esta pronto para uso imediato.";
+                "Seus atalhos foram configurados e o software está pronto para uso imediato.";
             desc.Font = new Font("Segoe UI", 9.5f);
             desc.ForeColor = TextMuted;
             desc.Dock = DockStyle.Fill;
@@ -572,7 +572,7 @@ namespace OmniScribeSetup
                 {
                     _pageContainer.Controls.Clear();
                     Label errLbl = new Label();
-                    errLbl.Text = "Ocorreu um erro durante a instalacao:\n\n" + errorMessage;
+                    errLbl.Text = "Ocorreu um erro durante a instalação:\n\n" + errorMessage;
                     errLbl.Font = new Font("Segoe UI", 10f);
                     errLbl.ForeColor = Color.FromArgb(239, 68, 68);
                     errLbl.Location = new Point(32, 60);
@@ -593,7 +593,7 @@ namespace OmniScribeSetup
         {
             try
             {
-                UpdateProgress(0.08, "Fechando instancias em execucao...");
+                UpdateProgress(0.08, "Fechando instâncias em execução...");
                 RunHiddenProcess("taskkill.exe", "/f /im OmniScribe.exe");
                 Thread.Sleep(150);
 
@@ -606,7 +606,7 @@ namespace OmniScribeSetup
 
                 if (_preserveData && Directory.Exists(fullTargetDir))
                 {
-                    UpdateProgress(0.15, "Preservando suas atas e configuracoes (.env)...");
+                    UpdateProgress(0.15, "Preservando suas atas e configurações (.env)...");
                     string oldAtas = Path.Combine(fullTargetDir, "atas_reunioes");
                     string oldEnv = Path.Combine(fullTargetDir, ".env");
 
@@ -652,12 +652,12 @@ namespace OmniScribeSetup
                         }
                         else
                         {
-                            throw new FileNotFoundException("Pacote de instalacao nao encontrado no executavel.");
+                            throw new FileNotFoundException("Pacote de instalação não encontrado no executável.");
                         }
                     }
                 }
 
-                UpdateProgress(0.84, "Configurando variaveis de ambiente...");
+                UpdateProgress(0.84, "Configurando variáveis de ambiente...");
                 string targetEnv = Path.Combine(fullTargetDir, ".env");
                 string targetExample = Path.Combine(fullTargetDir, ".env.example");
                 if (hasBackupEnv && File.Exists(backupEnv))
@@ -693,7 +693,7 @@ namespace OmniScribeSetup
                     CreateShortcut(exePath, Path.Combine(startMenu, "OmniScribe AI.lnk"), fullTargetDir);
                 }
 
-                UpdateProgress(1.0, "Instalacao concluida!");
+                UpdateProgress(1.0, "Instalação concluída!");
                 Thread.Sleep(250);
                 BeginInvoke((Action)delegate { ShowStep(5); });
             }
