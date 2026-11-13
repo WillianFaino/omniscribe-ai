@@ -33,6 +33,21 @@ logger = logging.getLogger("omniscribe.gui")
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
+# Paleta de Cores Profissional (Regra 60-30-10 & Dark Obsidian Theme)
+THEME_BG = "#0b0f19"          # Fundo base escuro e sofisticado (60%)
+THEME_CARD = "#111827"        # Containers e cartões modulares (30%)
+THEME_BORDER = "#1f2937"      # Bordas sutis de contraste elegante
+THEME_INPUT = "#070b12"       # Entradas e editores de texto
+THEME_TEXT_PRIMARY = "#f8fafc"# Texto primário
+THEME_TEXT_MUTED = "#94a3b8"  # Texto secundário suave
+THEME_TEXT_DIM = "#64748b"    # Metadados e rótulos discretos
+
+COLOR_PRIMARY = "#3b82f6"     # Azul vibrante (10% acento)
+COLOR_SUCCESS = "#10b981"     # Esmeralda para Iniciar Gravação
+COLOR_DANGER = "#ef4444"      # Vermelho Carmesim para Parar
+COLOR_INDIGO = "#6366f1"      # Índigo para Consumo & Cotas
+COLOR_PURPLE = "#8b5cf6"      # Roxo para Histórico
+
 
 def open_folder_in_explorer(folder_path: Path) -> None:
     """Abre uma pasta no Windows Explorer ou explorador padrão do sistema operacional."""
@@ -61,6 +76,7 @@ class ApiKeyModal(ctk.CTkToplevel):
         self.title("Configurar Chave da API Google Gemini")
         self.geometry("540x260")
         self.resizable(False, False)
+        self.configure(fg_color=THEME_BG)
         self.grab_set()  # Modal
 
         self.grid_columnconfigure(0, weight=1)
@@ -70,6 +86,7 @@ class ApiKeyModal(ctk.CTkToplevel):
             self,
             text="Configuração da API Google Gemini",
             font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
         )
         self.lbl_title.pack(pady=(20, 5))
 
@@ -77,7 +94,7 @@ class ApiKeyModal(ctk.CTkToplevel):
             self,
             text="Insira sua GEMINI_API_KEY para habilitar a transcrição e geração de atas.\nA chave será salva em seu arquivo .env local.",
             font=ctk.CTkFont(size=12),
-            text_color="#9ca3af",
+            text_color=THEME_TEXT_MUTED,
             justify="center",
         )
         self.lbl_desc.pack(pady=(0, 15))
@@ -89,6 +106,8 @@ class ApiKeyModal(ctk.CTkToplevel):
             width=460,
             show="*",
             placeholder_text="Cole sua GEMINI_API_KEY aqui...",
+            fg_color=THEME_INPUT,
+            border_color=THEME_BORDER,
         )
         if current_key:
             self.entry_key.insert(0, current_key)
@@ -155,6 +174,7 @@ class UsageModal(ctk.CTkToplevel):
         self.title("Consumo & Cotas da API - OmniScribe AI")
         self.geometry("580x500")
         self.resizable(False, False)
+        self.configure(fg_color=THEME_BG)
         self.grab_set()
 
         self.grid_columnconfigure(0, weight=1)
@@ -166,6 +186,7 @@ class UsageModal(ctk.CTkToplevel):
             self,
             text="📊 Monitor de Consumo & Custos da API",
             font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
         )
         lbl_title.pack(pady=(20, 4))
 
@@ -173,12 +194,12 @@ class UsageModal(ctk.CTkToplevel):
             self,
             text="Rastreamento em tempo real do Gemini 2.5 Flash para total transparência.",
             font=ctk.CTkFont(size=12),
-            text_color="#9ca3af",
+            text_color=THEME_TEXT_MUTED,
         )
         lbl_sub.pack(pady=(0, 14))
 
         # Card de Cota Diária (Free Tier)
-        quota_card = ctk.CTkFrame(self, fg_color="#18181b", corner_radius=8)
+        quota_card = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         quota_card.pack(fill="x", padx=24, pady=6)
         quota_card.grid_columnconfigure(0, weight=1)
 
@@ -190,6 +211,7 @@ class UsageModal(ctk.CTkToplevel):
             quota_card,
             text="Cota Gratuita Diária (Google AI Studio)",
             font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
         )
         lbl_q_title.grid(row=0, column=0, padx=14, pady=(12, 4), sticky="w")
 
@@ -202,12 +224,12 @@ class UsageModal(ctk.CTkToplevel):
         )
         lbl_q_val.grid(row=0, column=1, padx=14, pady=(12, 4), sticky="e")
 
-        bar_quota = ctk.CTkProgressBar(quota_card, height=12, progress_color="#10b981" if percent < 80 else "#ef4444")
+        bar_quota = ctk.CTkProgressBar(quota_card, height=12, progress_color="#10b981" if percent < 80 else "#ef4444", fg_color="#1f2937", corner_radius=6)
         bar_quota.set(percent / 100.0)
         bar_quota.grid(row=1, column=0, columnspan=2, padx=14, pady=(4, 14), sticky="ew")
 
         # Card de Estatísticas Gerais
-        stats_card = ctk.CTkFrame(self, fg_color="#27272a", corner_radius=8)
+        stats_card = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         stats_card.pack(fill="x", padx=24, pady=8)
         stats_card.grid_columnconfigure((0, 1), weight=1)
 
@@ -257,6 +279,7 @@ class HistoryModal(ctk.CTkToplevel):
         self.title("Histórico de Reuniões & Atas - OmniScribe AI")
         self.geometry("740x540")
         self.minsize(620, 420)
+        self.configure(fg_color=THEME_BG)
         self.grab_set()
 
         self.grid_columnconfigure(0, weight=1)
@@ -271,6 +294,7 @@ class HistoryModal(ctk.CTkToplevel):
             top_frame,
             text="📜 Histórico de Reuniões e Gravações",
             font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
         )
         lbl_title.grid(row=0, column=0, sticky="w")
 
@@ -278,12 +302,12 @@ class HistoryModal(ctk.CTkToplevel):
             top_frame,
             text="Selecione qualquer ata executiva ou transcrição salva para visualizar imediatamente no aplicativo.",
             font=ctk.CTkFont(size=12),
-            text_color="#9ca3af",
+            text_color=THEME_TEXT_MUTED,
         )
         lbl_sub.grid(row=1, column=0, sticky="w")
 
         # Container rolável com as reuniões
-        self.scroll_list = ctk.CTkScrollableFrame(self, corner_radius=8)
+        self.scroll_list = ctk.CTkScrollableFrame(self, corner_radius=10, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1)
         self.scroll_list.grid(row=1, column=0, padx=20, pady=8, sticky="nsew")
         self.scroll_list.grid_columnconfigure(0, weight=1)
 
@@ -353,7 +377,7 @@ class HistoryModal(ctk.CTkToplevel):
         mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
         date_str = mtime.strftime("%d/%m/%Y às %H:%M")
 
-        card = ctk.CTkFrame(self.scroll_list, fg_color="#27272a", corner_radius=6)
+        card = ctk.CTkFrame(self.scroll_list, fg_color="#182235", border_color=THEME_BORDER, border_width=1, corner_radius=8)
         card.pack(fill="x", padx=4, pady=4)
         card.grid_columnconfigure(1, weight=1)
 
@@ -437,8 +461,9 @@ class ZoomTranscriberApp(ctk.CTk):
         super().__init__()
 
         self.title("OmniScribe AI - Universal Meeting Transcriber & Minute Generator")
-        self.geometry("960x730")
-        self.minsize(920, 680)
+        self.geometry("1020x760")
+        self.minsize(960, 700)
+        self.configure(fg_color=THEME_BG)
 
         # Estado da gravação
         self.is_recording = False
@@ -481,60 +506,87 @@ class ZoomTranscriberApp(ctk.CTk):
         self.after(200, self._check_initial_api_key)
 
     def _build_ui(self) -> None:
-        """Constrói o layout responsivo da janela."""
+        """Constrói o layout responsivo e profissional da janela."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(2, weight=1)  # Abas ocupam o espaço vertical restante
+        self.grid_rowconfigure(3, weight=1)  # Abas ocupam todo o espaço vertical restante dinamicamente
 
         # ---------------- 1. CABEÇALHO SUPERIOR ----------------
-        header_frame = ctk.CTkFrame(self, fg_color="#18181b", corner_radius=8)
+        header_frame = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         header_frame.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
         header_frame.grid_columnconfigure(0, weight=1)
 
         title_container = ctk.CTkFrame(header_frame, fg_color="transparent")
         title_container.grid(row=0, column=0, padx=16, pady=10, sticky="w")
 
+        title_badge_row = ctk.CTkFrame(title_container, fg_color="transparent")
+        title_badge_row.pack(anchor="w")
+
         lbl_app_title = ctk.CTkLabel(
-            title_container,
+            title_badge_row,
             text="🎙️ OmniScribe AI",
-            font=ctk.CTkFont(size=20, weight="bold"),
+            font=ctk.CTkFont(size=21, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
         )
-        lbl_app_title.pack(anchor="w")
+        lbl_app_title.pack(side="left")
+
+        lbl_badge = ctk.CTkLabel(
+            title_badge_row,
+            text="PRO v1.2",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="#1e293b",
+            text_color="#38bdf8",
+            corner_radius=6,
+            padx=8,
+            pady=2,
+        )
+        lbl_badge.pack(side="left", padx=(10, 0))
 
         lbl_app_subtitle = ctk.CTkLabel(
             title_container,
-            text="Captura inteligente (Meet, Teams, Zoom, Mic) • Transcrição incremental • Atas Executivas com Gemini 2.5 Flash",
+            text="Captura Dual WASAPI • Diarização Inteligente Multi-Voz • Atas Executivas com Gemini 2.5 Flash",
             font=ctk.CTkFont(size=12),
-            text_color="#a1a1aa",
+            text_color=THEME_TEXT_MUTED,
         )
-        lbl_app_subtitle.pack(anchor="w")
+        lbl_app_subtitle.pack(anchor="w", pady=(2, 0))
 
         header_actions = ctk.CTkFrame(header_frame, fg_color="transparent")
         header_actions.grid(row=0, column=1, padx=16, pady=10, sticky="e")
+
+        self.btn_header_history = ctk.CTkButton(
+            header_actions,
+            text="📜 Histórico",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_PURPLE,
+            hover_color="#7c3aed",
+            width=110,
+            command=self._open_history_modal,
+        )
+        self.btn_header_history.pack(side="left", padx=(0, 8))
 
         self.btn_usage = ctk.CTkButton(
             header_actions,
             text="📊 Consumo & Cotas",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#4f46e5",
-            hover_color="#4338ca",
-            width=150,
+            fg_color=COLOR_INDIGO,
+            hover_color="#4f46e5",
+            width=140,
             command=self._open_usage_modal,
         )
         self.btn_usage.pack(side="left", padx=(0, 8))
 
         self.btn_config_key = ctk.CTkButton(
             header_actions,
-            text="🔑 Configurar API Key",
+            text="🔑 API Key",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#3b82f6",
+            fg_color=COLOR_PRIMARY,
             hover_color="#2563eb",
-            width=150,
+            width=110,
             command=self._open_api_key_dialog,
         )
         self.btn_config_key.pack(side="left")
 
         # ---------------- 2. CONFIGURAÇÕES & DISPOSITIVOS ----------------
-        config_frame = ctk.CTkFrame(self, fg_color="#27272a", corner_radius=8)
+        config_frame = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         config_frame.grid(row=1, column=0, padx=16, pady=6, sticky="ew")
         config_frame.grid_columnconfigure((1, 3), weight=1)
 
@@ -554,25 +606,27 @@ class ZoomTranscriberApp(ctk.CTk):
             text="↻",
             width=36,
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#4b5563",
-            hover_color="#374151",
+            fg_color="#374151",
+            hover_color="#4b5563",
             command=self._refresh_audio_devices,
         )
         self.btn_refresh_devices.grid(row=0, column=1, padx=(6, 0))
 
-        lbl_mic = ctk.CTkLabel(config_frame, text="Microfone Local:", font=ctk.CTkFont(weight="bold"))
+        lbl_mic = ctk.CTkLabel(config_frame, text="Microfone Local (R):", font=ctk.CTkFont(weight="bold"))
         lbl_mic.grid(row=0, column=2, padx=(14, 8), pady=(12, 6), sticky="w")
 
         self.opt_mic = ctk.CTkOptionMenu(config_frame, values=["Procurando dispositivos..."])
         self.opt_mic.grid(row=0, column=3, padx=(6, 14), pady=(12, 6), sticky="ew")
 
         # Linha 1: Título da Reunião e Duração dos Blocos
-        lbl_title = ctk.CTkLabel(config_frame, text="Título da Reunião:", font=ctk.CTkFont(weight="bold"))
+        lbl_title = ctk.CTkLabel(config_frame, text="Título da Sessão:", font=ctk.CTkFont(weight="bold"))
         lbl_title.grid(row=1, column=0, padx=(14, 8), pady=8, sticky="w")
 
         self.entry_meeting_title = ctk.CTkEntry(
             config_frame,
-            placeholder_text="Ex: Alinhamento Semanal BI / Sprint Review",
+            placeholder_text="Ex: Alinhamento Semanal BI / React Podcast Tech",
+            fg_color=THEME_INPUT,
+            border_color=THEME_BORDER,
         )
         self.entry_meeting_title.grid(row=1, column=1, padx=6, pady=8, sticky="ew")
 
@@ -608,7 +662,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.chk_mic_mute.pack(side="left", padx=10)
 
         # ---------------- 3. PAINEL DE CONTROLES & VU METERS ----------------
-        control_frame = ctk.CTkFrame(self, fg_color="#18181b", corner_radius=8)
+        control_frame = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         control_frame.grid(row=2, column=0, padx=16, pady=6, sticky="ew")
         control_frame.grid_columnconfigure(1, weight=1)
 
@@ -620,10 +674,11 @@ class ZoomTranscriberApp(ctk.CTk):
             left_ctrl,
             text="▶ Iniciar Gravação",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#10b981",
+            fg_color=COLOR_SUCCESS,
             hover_color="#059669",
-            width=160,
-            height=40,
+            width=165,
+            height=42,
+            corner_radius=8,
             command=self._start_recording,
         )
         self.btn_start.pack(side="left", padx=(0, 10))
@@ -632,30 +687,31 @@ class ZoomTranscriberApp(ctk.CTk):
             left_ctrl,
             text="⏹ Encerrar e Gerar Ata",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#ef4444",
+            fg_color=COLOR_DANGER,
             hover_color="#dc2626",
-            width=180,
-            height=40,
+            width=185,
+            height=42,
+            corner_radius=8,
             state="disabled",
             command=self._stop_recording,
         )
-        self.btn_stop.pack(side="left", padx=10)
+        self.btn_stop.pack(side="left", padx=(0, 14))
 
         self.lbl_timer = ctk.CTkLabel(
             left_ctrl,
             text="⏱ 00:00:00",
-            font=ctk.CTkFont(family="Consolas", size=20, weight="bold"),
+            font=ctk.CTkFont(family="Consolas", size=22, weight="bold"),
             text_color="#38bdf8",
         )
-        self.lbl_timer.pack(side="left", padx=16)
+        self.lbl_timer.pack(side="left", padx=(0, 14))
 
         self.lbl_status = ctk.CTkLabel(
             left_ctrl,
-            text="Status: Aguardando...",
+            text="● Pronto para Iniciar",
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#9ca3af",
+            text_color=COLOR_SUCCESS,
         )
-        self.lbl_status.pack(side="left", padx=8)
+        self.lbl_status.pack(side="left", padx=4)
 
         # Lado Direito: VU Meters em Tempo Real
         vu_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
@@ -664,52 +720,128 @@ class ZoomTranscriberApp(ctk.CTk):
         # VU Sistema (L)
         vu_zoom_row = ctk.CTkFrame(vu_frame, fg_color="transparent")
         vu_zoom_row.pack(anchor="e", pady=2)
-        self.lbl_vu_zoom = ctk.CTkLabel(vu_zoom_row, text="Sistema (L):", font=ctk.CTkFont(size=11, weight="bold"), width=70)
+        self.lbl_vu_zoom = ctk.CTkLabel(vu_zoom_row, text="Sistema (L):", font=ctk.CTkFont(size=11, weight="bold"), width=75, anchor="e")
         self.lbl_vu_zoom.pack(side="left")
-        self.bar_vu_zoom = ctk.CTkProgressBar(vu_zoom_row, width=170, height=12, progress_color="#38bdf8")
+        self.bar_vu_zoom = ctk.CTkProgressBar(vu_zoom_row, width=150, height=12, progress_color="#38bdf8", fg_color="#1f2937", corner_radius=6)
         self.bar_vu_zoom.set(0.0)
         self.bar_vu_zoom.pack(side="left", padx=6)
+        self.lbl_vu_zoom_val = ctk.CTkLabel(vu_zoom_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=32)
+        self.lbl_vu_zoom_val.pack(side="left")
 
         # VU Mic (R)
         vu_mic_row = ctk.CTkFrame(vu_frame, fg_color="transparent")
         vu_mic_row.pack(anchor="e", pady=2)
-        self.lbl_vu_mic = ctk.CTkLabel(vu_mic_row, text="Mic (R):", font=ctk.CTkFont(size=11, weight="bold"), width=70)
+        self.lbl_vu_mic = ctk.CTkLabel(vu_mic_row, text="Mic (R):", font=ctk.CTkFont(size=11, weight="bold"), width=75, anchor="e")
         self.lbl_vu_mic.pack(side="left")
-        self.bar_vu_mic = ctk.CTkProgressBar(vu_mic_row, width=170, height=12, progress_color="#10b981")
+        self.bar_vu_mic = ctk.CTkProgressBar(vu_mic_row, width=150, height=12, progress_color=COLOR_SUCCESS, fg_color="#1f2937", corner_radius=6)
         self.bar_vu_mic.set(0.0)
         self.bar_vu_mic.pack(side="left", padx=6)
+        self.lbl_vu_mic_val = ctk.CTkLabel(vu_mic_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=32)
+        self.lbl_vu_mic_val.pack(side="left")
 
         # ---------------- 4. ÁREA DE VISUALIZAÇÃO EM ABAS ----------------
-        self.tabview = ctk.CTkTabview(self, corner_radius=8)
+        self.tabview = ctk.CTkTabview(
+            self,
+            corner_radius=10,
+            fg_color=THEME_CARD,
+            segmented_button_fg_color="#070b12",
+            segmented_button_selected_color=COLOR_PRIMARY,
+            segmented_button_selected_hover_color="#2563eb",
+            segmented_button_unselected_color="#1f2937",
+            segmented_button_unselected_hover_color="#374151",
+            text_color="#f8fafc",
+        )
         self.tabview.grid(row=3, column=0, padx=16, pady=(6, 8), sticky="nsew")
 
         # Aba 1: Transcrição ao Vivo
         tab_transcription = self.tabview.add("Transcrição ao Vivo")
         tab_transcription.grid_columnconfigure(0, weight=1)
-        tab_transcription.grid_rowconfigure(0, weight=1)
+        tab_transcription.grid_rowconfigure(1, weight=1)
+
+        tb_trans = ctk.CTkFrame(tab_transcription, fg_color="transparent")
+        tb_trans.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 6))
+        tb_trans.grid_columnconfigure(0, weight=1)
+
+        lbl_t_info = ctk.CTkLabel(
+            tb_trans,
+            text="⚡ Diarização acústica ativa • Canal L (Sistema) & Canal R (Você) • Falas sobrepostas preservadas",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_MUTED,
+        )
+        lbl_t_info.grid(row=0, column=0, sticky="w")
+
+        self.btn_copy_trans = ctk.CTkButton(
+            tb_trans,
+            text="📋 Copiar Transcrição",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            border_color="#374151",
+            border_width=1,
+            width=160,
+            height=28,
+            command=self._copy_transcription,
+        )
+        self.btn_copy_trans.grid(row=0, column=1, sticky="e")
 
         self.txt_transcription = ctk.CTkTextbox(
             tab_transcription,
             font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=THEME_INPUT,
+            text_color=THEME_TEXT_PRIMARY,
+            border_color=THEME_BORDER,
+            border_width=1,
+            corner_radius=8,
             wrap="word",
         )
-        self.txt_transcription.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.txt_transcription.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.txt_transcription.insert(
             "end",
-            "A transcrição incremental aparecerá aqui à medida que os blocos de áudio forem concluídos...\n"
+            "A transcrição incremental com diarização de vozes aparecerá aqui à medida que os blocos forem gravados...\n"
         )
 
         # Aba 2: Ata Executiva
         tab_minutes = self.tabview.add("Ata Executiva")
         tab_minutes.grid_columnconfigure(0, weight=1)
-        tab_minutes.grid_rowconfigure(0, weight=1)
+        tab_minutes.grid_rowconfigure(1, weight=1)
+
+        tb_min = ctk.CTkFrame(tab_minutes, fg_color="transparent")
+        tb_min.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 6))
+        tb_min.grid_columnconfigure(0, weight=1)
+
+        lbl_m_info = ctk.CTkLabel(
+            tb_min,
+            text="📄 Síntese executiva formatada em Markdown com Plano de Ação e Decisões",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_MUTED,
+        )
+        lbl_m_info.grid(row=0, column=0, sticky="w")
+
+        self.btn_copy_min = ctk.CTkButton(
+            tb_min,
+            text="📋 Copiar Ata Markdown",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            border_color="#374151",
+            border_width=1,
+            width=170,
+            height=28,
+            command=self._copy_minutes,
+        )
+        self.btn_copy_min.grid(row=0, column=1, sticky="e")
 
         self.txt_minutes = ctk.CTkTextbox(
             tab_minutes,
             font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=THEME_INPUT,
+            text_color=THEME_TEXT_PRIMARY,
+            border_color=THEME_BORDER,
+            border_width=1,
+            corner_radius=8,
             wrap="word",
         )
-        self.txt_minutes.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.txt_minutes.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
         self.txt_minutes.insert(
             "end",
             "Ao encerrar a reunião, a Ata Executiva consolidada em Markdown será exibida nesta aba.\n"
@@ -718,14 +850,62 @@ class ZoomTranscriberApp(ctk.CTk):
         # Aba 3: Logs do Sistema
         tab_logs = self.tabview.add("Logs do Sistema")
         tab_logs.grid_columnconfigure(0, weight=1)
-        tab_logs.grid_rowconfigure(0, weight=1)
+        tab_logs.grid_rowconfigure(1, weight=1)
+
+        tb_logs = ctk.CTkFrame(tab_logs, fg_color="transparent")
+        tb_logs.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 6))
+        tb_logs.grid_columnconfigure(0, weight=1)
+
+        lbl_l_info = ctk.CTkLabel(
+            tb_logs,
+            text="⚙️ Registro Operacional em Tempo Real",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_MUTED,
+        )
+        lbl_l_info.grid(row=0, column=0, sticky="w")
+
+        btn_box_logs = ctk.CTkFrame(tb_logs, fg_color="transparent")
+        btn_box_logs.grid(row=0, column=1, sticky="e")
+
+        self.btn_copy_logs = ctk.CTkButton(
+            btn_box_logs,
+            text="📋 Copiar Logs",
+            font=ctk.CTkFont(size=11),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            border_color="#374151",
+            border_width=1,
+            width=100,
+            height=26,
+            command=self._copy_logs,
+        )
+        self.btn_copy_logs.pack(side="left", padx=(0, 6))
+
+        self.btn_clear_logs = ctk.CTkButton(
+            btn_box_logs,
+            text="🗑️ Limpar",
+            font=ctk.CTkFont(size=11),
+            fg_color="#1f2937",
+            hover_color="#374151",
+            border_color="#374151",
+            border_width=1,
+            width=80,
+            height=26,
+            command=lambda: self.txt_logs.delete("1.0", "end"),
+        )
+        self.btn_clear_logs.pack(side="left")
 
         self.txt_logs = ctk.CTkTextbox(
             tab_logs,
             font=ctk.CTkFont(family="Consolas", size=11),
+            fg_color=THEME_INPUT,
+            text_color="#38bdf8",
+            border_color=THEME_BORDER,
+            border_width=1,
+            corner_radius=8,
             wrap="word",
         )
-        self.txt_logs.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+        self.txt_logs.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
 
         # ---------------- 5. RODAPÉ ----------------
         footer_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -734,34 +914,56 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self.lbl_footer_info = ctk.CTkLabel(
             footer_frame,
-            text=f"Base: {get_base_dir()}",
+            text=f"📂 Diretório Base: {get_base_dir()}",
             font=ctk.CTkFont(size=11),
-            text_color="#71717a",
+            text_color=THEME_TEXT_DIM,
         )
         self.lbl_footer_info.grid(row=0, column=0, sticky="w")
 
         footer_btn_box = ctk.CTkFrame(footer_frame, fg_color="transparent")
         footer_btn_box.grid(row=0, column=1, sticky="e")
 
-        self.btn_history = ctk.CTkButton(
-            footer_btn_box,
-            text="📜 Histórico de Reuniões",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#4f46e5",
-            hover_color="#4338ca",
-            command=self._open_history_modal,
-        )
-        self.btn_history.pack(side="left", padx=(0, 8))
-
         self.btn_open_folder = ctk.CTkButton(
             footer_btn_box,
             text="📁 Abrir Pasta das Atas",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#374151",
-            hover_color="#4b5563",
+            fg_color="#1f2937",
+            hover_color="#374151",
+            border_color="#374151",
+            border_width=1,
             command=self._open_atas_folder,
         )
         self.btn_open_folder.pack(side="left")
+
+    def _copy_transcription(self) -> None:
+        """Copia o conteúdo da aba Transcrição para a Área de Transferência com feedback visual."""
+        content = self.txt_transcription.get("1.0", "end-1c").strip()
+        if content:
+            self.clipboard_clear()
+            self.clipboard_append(content)
+            self.update()
+            self.btn_copy_trans.configure(text="✅ Copiado!", fg_color=COLOR_SUCCESS)
+            self.after(1800, lambda: self.btn_copy_trans.configure(text="📋 Copiar Transcrição", fg_color="#1f2937"))
+
+    def _copy_minutes(self) -> None:
+        """Copia o conteúdo da Ata Executiva para a Área de Transferência com feedback visual."""
+        content = self.txt_minutes.get("1.0", "end-1c").strip()
+        if content:
+            self.clipboard_clear()
+            self.clipboard_append(content)
+            self.update()
+            self.btn_copy_min.configure(text="✅ Copiado!", fg_color=COLOR_SUCCESS)
+            self.after(1800, lambda: self.btn_copy_min.configure(text="📋 Copiar Ata Markdown", fg_color="#1f2937"))
+
+    def _copy_logs(self) -> None:
+        """Copia os logs técnicos para a Área de Transferência."""
+        content = self.txt_logs.get("1.0", "end-1c").strip()
+        if content:
+            self.clipboard_clear()
+            self.clipboard_append(content)
+            self.update()
+            self.btn_copy_logs.configure(text="✅ Copiado!", fg_color=COLOR_SUCCESS)
+            self.after(1800, lambda: self.btn_copy_logs.configure(text="📋 Copiar Logs", fg_color="#1f2937"))
 
     # ---------------- MÉTODOS DE HARDWARE E DISPOSITIVOS ----------------
     def _refresh_audio_devices(self) -> None:
@@ -887,7 +1089,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.opt_block_duration.configure(state="disabled")
         self.entry_meeting_title.configure(state="disabled")
 
-        self.lbl_status.configure(text="Status: Gravando...", text_color="#10b981")
+        self.lbl_status.configure(text="● Gravando...", text_color="#ef4444")
         self.txt_transcription.delete("1.0", "end")
         self.txt_transcription.insert("end", f"=== Início da Gravação: {meeting_title} ===\n\n")
 
@@ -949,6 +1151,10 @@ class ZoomTranscriberApp(ctk.CTk):
         def update():
             self.bar_vu_zoom.set(zoom_rms)
             self.bar_vu_mic.set(mic_rms)
+            if hasattr(self, "lbl_vu_zoom_val"):
+                self.lbl_vu_zoom_val.configure(text=f"{int(zoom_rms * 100)}%")
+            if hasattr(self, "lbl_vu_mic_val"):
+                self.lbl_vu_mic_val.configure(text=f"{int(mic_rms * 100)}%")
 
         self.after(0, update)
 

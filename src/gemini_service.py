@@ -136,32 +136,52 @@ class AudioBlockTask:
 class GeminiService:
     """Gerenciador do pipeline de transcrição incremental e consolidação da Ata."""
 
-    TRANSCRIPTION_SYSTEM_PROMPT = """Você é o motor de transcrição inteligente do OmniScribe AI para reuniões corporativas e técnicas.
+    TRANSCRIPTION_SYSTEM_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do OmniScribe AI.
 O áudio fornecido em WAV estéreo possui exatamente 2 canais sincronizados:
-- CANAL DIREITO (Right / R): Contém a voz do usuário local, estritamente identificado como **Willian (Você)**.
-- CANAL ESQUERDO (Left / L): Contém os outros participantes da reunião transmitidos pelo sistema (Google Meet, Microsoft Teams, Zoom, Discord, etc.).
+- CANAL DIREITO (Right / R): Microfone local do usuário -> SEMPRE identificado como **Willian (Você)**.
+- CANAL ESQUERDO (Left / L): Áudio do sistema (Reuniões Google Meet/Teams/Zoom/Discord, vídeos do YouTube, podcasts ou palestras).
 
-REGRAS OBRIGATÓRIAS DE TRANSCRIÇÃO:
-1. Transcreva com fidelidade absoluta tudo o que for falado em português (e eventuais termos em inglês técnico).
-2. Identificação clara de interlocutores:
-   - Toda fala capturada no Canal Direito DEVE ser rotulada como:
+DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO E IDENTIFICAÇÃO DE VOZES:
+1. CANAL DIREITO (R) - Willian (Você):
+   - Toda fala originada neste canal DEVE ser rotulada como:
      [MM:SS] **Willian (Você)**: <texto falado>
-   - Falas capturadas no Canal Esquerdo DEVEM ser rotuladas como:
-     [MM:SS] **Participante A**: <texto>, **Participante B**: <texto> OU pelo NOME REAL da pessoa caso seja citado na conversa (ex.: [MM:SS] **Carlos**: <texto>, [MM:SS] **Mariana**: <texto>).
-3. Se um dos canais estiver em silêncio ou apenas com ruído estático de microfone, ignore o ruído e transcreva apenas as falas reais.
-4. Se o trecho inteiro não possuir fala humana perceptível, retorne exatamente: *[Silêncio / Sem fala identificada no período]*
-5. Não invente conteúdo nem resuma neste momento; forneça a transcrição textual direta.
+
+2. CANAL ESQUERDO (L) - IDENTIFICAÇÃO INTELIGENTE DE INTERLOCUTORES:
+   - Extração Ativa de Nomes: Fique atento a apresentações pessoais ("Fala pessoal, aqui é o Lucas", "Bem-vindo ao canal do TechCode, sou o Marcos") e menções diretas de terceiros ("O que você acha, Juliana?", "Valeu, Roberto"). Assim que um nome for identificado, associe essa voz a esse NOME REAL permanentemente (ex.: [MM:SS] **Lucas**: <texto>, [MM:SS] **Juliana**: <texto>).
+   - Vídeos do YouTube, Podcasts e Palestras: Se o áudio do sistema for uma transmissão, aula ou vídeo com um anfitrião/palestrante e o nome ainda não tiver sido dito, rotule como **Apresentador / Host** ou **Palestrante** em vez do genérico 'Participante A'.
+   - Múltiplos Participantes Remotos (Diarização Acústica): Diferencie as vozes no Canal L pelo timbre, tom e gênero. Mantenha numeração consistente ao longo dos blocos:
+     [MM:SS] **Participante 1 (Voz masculina)**: <texto>
+     [MM:SS] **Participante 2 (Voz feminina)**: <texto>
+     (Mantenha a coerência com as falas anteriores informadas no bloco de contexto).
+
+3. TRATAMENTO DE FALAS SOBREPOSTAS E INTERRUPÇÕES (CROSS-TALK):
+   - Em reuniões, debates e reacts de vídeos, é comum pessoas falarem ao mesmo tempo ou interromperem umas às outras.
+   - Como os canais L e R são fisicamente isolados em estéreo, você é capaz de ouvir AMBAS as falas mesmo quando acontecem no exato mesmo segundo.
+   - Quando Willian falar por cima do participante remoto (ou vice-versa), NUNCA descarte ou omita nenhuma das falas. Formate como falas simultâneas:
+     [MM:SS] ⚡ [Falas Sobrepostas / Interrupção]:
+       - **Willian (Você)**: <fala no microfone>
+       - **<Nome/Apresentador>**: <fala no sistema ao mesmo tempo>
+   - Se duas pessoas no Canal Esquerdo (sistema) falarem ao mesmo tempo, transcreva ambas claramente:
+     [MM:SS] ⚡ [Falas Sobrepostas no Sistema]:
+       - **Participante 1**: <texto>
+       - **Participante 2**: <texto>
+
+4. FIDELIDADE E FORMATAÇÃO:
+   - Transcreva com fidelidade em português brasileiro, mantendo termos técnicos em inglês (ex.: Framework, Deploy, Pipeline, Bug, Query, API).
+   - Ignore chiados estáticos, ruído elétrico ou respiração.
+   - Se o trecho inteiro não possuir fala humana perceptível, retorne exatamente: *[Silêncio / Sem fala identificada no período]*
+   - Não resuma nem omita palavras nesta etapa; forneça o diálogo completo.
 """
 
-    MINUTES_SYSTEM_PROMPT = """Você é um secretário executivo sênior e analista corporativo de alto nível, especialista na elaboração de Atas Executivas para diretoria e times de BI/BA.
-Abaixo está a transcrição integral e sequencial de uma reunião corporativa.
+    MINUTES_SYSTEM_PROMPT = """Você é um secretário executivo sênior e analista corporativo de alto nível, especialista na elaboração de Atas Executivas para diretoria, reuniões técnicas e sessões de alinhamento.
+Abaixo está a transcrição integral e sequencial da reunião (ou vídeo/podcast analisado).
 
-Sua missão é produzir uma ATA EXECUTIVA completa, profissional e acionável em Markdown, estruturada estritamente com as seguintes seções obrigatórias:
+Sua missão é produzir uma ATA EXECUTIVA completa, profissional e altamente acionável em Markdown, estruturada estritamente com as seguintes seções obrigatórias:
 
 # Ata Executiva da Reunião: {title}
 **Data:** {date_str}
 **Duração Total:** {duration_str}
-**Participantes Identificados:** Willian (Você) e demais participantes identificados
+**Participantes Identificados:** Willian (Você) e demais participantes identificados pelo nome ou papel (ex.: Apresentador, Host, etc.)
 
 ---
 
@@ -180,8 +200,8 @@ Sua missão é produzir uma ATA EXECUTIVA completa, profissional e acionável em
 | :--- | :--- | :--- | :--- |
 | ... | ... | ... | ... |)
 
-## 5. Pendências e Pontos de Atenção
-(Riscos, bloqueios técnicos, dúvidas não resolvidas e dependências externas levantadas na reunião. Destaque COM ÊNFASE em negrito quaisquer menções diretas a responsabilidades de Willian)
+## 5. Pendências, Pontos de Atenção e Debates
+(Riscos, bloqueios técnicos, dúvidas não resolvidas e pontos de desacordo ou debate durante falas sobrepostas. Destaque COM ÊNFASE em negrito quaisquer menções diretas a responsabilidades de Willian)
 
 ---
 Transcrição completa da reunião:
@@ -378,9 +398,26 @@ Transcrição completa da reunião:
             uploaded_remote_file = self._client.files.upload(file=str(task.wav_path))
 
             # 2. Chamada de geração com gemini-2.5-flash
+            recent_context = ""
+            if self.accumulated_transcript.strip():
+                # Coleta os últimos turnos de fala significativos para manter continuidade de vozes e nomes
+                lines = [
+                    l.strip()
+                    for l in self.accumulated_transcript.strip().split("\n")
+                    if l.strip() and not l.startswith("###") and not l.startswith("---") and not l.startswith("*[")
+                ]
+                last_turns = lines[-8:] if len(lines) > 8 else lines
+                if last_turns:
+                    recent_context = (
+                        "\n--- CONTEXTO DAS FALAS ANTERIORES (Use para manter nomes e diarização consistentes) ---\n"
+                        + "\n".join(last_turns)
+                        + "\n--------------------------------------------------------------------------------------\n\n"
+                    )
+
             prompt = (
                 f"Transcreva este bloco de áudio da reunião.\n"
-                f"Trecho temporal: {time_range}.\n\n"
+                f"Trecho temporal: {time_range}.\n"
+                f"{recent_context}"
                 f"{self.TRANSCRIPTION_SYSTEM_PROMPT}"
             )
 
