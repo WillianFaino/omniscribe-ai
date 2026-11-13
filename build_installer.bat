@@ -43,14 +43,23 @@ if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
 
 :build_setup
 echo.
-echo [2/3] Empacotando Assistente de Instalacao Grafico com PyInstaller...
-echo       (Isso incorpora os binarios do app dentro de OmniScribe_Setup.exe)
+echo [2/3] Gerando pacote ultracompacto (app_data.zip)...
+python make_package.py "dist\OmniScribe" "dist\app_data.zip"
+if %errorlevel% neq 0 (
+    echo [ERRO] Falha ao compactar os binarios base.
+    pause
+    exit /b 1
+)
+
+echo.
+echo [3/3] Empacotando Instalador Grafico com Abertura Instantanea...
+echo       (Utiliza pacote zip otimizado para inicializacao em menos de 1 segundo)
 echo.
 
 :: Fecha instalador antigo se estiver em execucao
 taskkill /f /im OmniScribe_Setup.exe >nul 2>&1
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\OmniScribe;app_data" --collect-all "customtkinter" src/installer.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\app_data.zip;." --collect-all "customtkinter" src/installer.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -58,6 +67,8 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
+
+copy /Y "dist\OmniScribe_Setup.exe" "OmniScribe_Setup.exe" >nul 2>&1
 
 echo.
 echo ===============================================================================

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 from tkinter import filedialog
 from typing import Optional
@@ -33,8 +34,33 @@ def get_default_install_dir() -> Path:
     return Path.home() / "AppData" / "Local" / "Programs" / "OmniScribe AI"
 
 
+def get_app_package_zip() -> Optional[Path]:
+    """Localiza o arquivo zip ultracompacto com todos os binários do aplicativo."""
+    # 1. Se estiver empacotado pelo PyInstaller
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / "app_data.zip"
+        if bundled.exists():
+            return bundled
+
+    # 2. Ao lado do executável ou em dist/
+    candidate_local = Path(sys.executable).resolve().parent / "app_data.zip"
+    if candidate_local.exists():
+        return candidate_local
+
+    root = Path(__file__).resolve().parent.parent
+    candidate = root / "dist" / "app_data.zip"
+    if candidate.exists():
+        return candidate
+
+    candidate_root = Path(sys.executable).resolve().parent / "dist" / "app_data.zip"
+    if candidate_root.exists():
+        return candidate_root
+
+    return None
+
+
 def get_source_app_dir() -> Optional[Path]:
-    """Localiza a pasta com os binários compilados do OmniScribe AI."""
+    """Localiza a pasta com os binários compilados do OmniScribe AI (fallback)."""
     # 1. Se estiver empacotado dentro do executável do Setup pelo PyInstaller
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         bundled = Path(sys._MEIPASS) / "app_data"
@@ -380,7 +406,8 @@ class InstallerApp(ctk.CTk):
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/f", "/im", "OmniScribe.exe"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            # Localiza os binários compilados
+            # Localiza pacote zip de alta performance ou pasta de origem
+            pkg_zip = get_app_package_zip()
             source_dir = get_source_app_dir()
             target_dir = self.target_dir.resolve()
 
@@ -388,7 +415,7 @@ class InstallerApp(ctk.CTk):
             backup_atas = None
             backup_env = None
             if self.var_preserve_data.get() and target_dir.exists():
-                self._update_progress(0.3, "Salvando dados e atas existentes...")
+                self._update_progress(0.25, "Salvando dados e atas existentes...")
                 atas_dir = target_dir / "atas_reunioes"
                 env_file = target_dir / ".env"
                 if atas_dir.exists():
@@ -401,11 +428,23 @@ class InstallerApp(ctk.CTk):
                     backup_env = target_dir.parent / "_temp_env_backup"
                     shutil.copyfile(env_file, backup_env)
 
-            self._update_progress(0.4, f"Copiando arquivos para {target_dir.name}...")
             target_dir.mkdir(parents=True, exist_ok=True)
 
-            if source_dir and source_dir.exists():
-                # Copia todos os arquivos do OmniScribe compilado
+            # Instalação via descompactação ultrarrápida do pacote
+            if pkg_zip and pkg_zip.exists():
+                self._update_progress(0.35, "Extraindo arquivos do OmniScribe AI...")
+                with zipfile.ZipFile(pkg_zip, "r") as zf:
+                    members = zf.namelist()
+                    total = len(members)
+                    for i, member in enumerate(members):
+                        zf.extract(member, target_dir)
+                        if i % 60 == 0 or i == total - 1:
+                            ratio = i / max(1, total)
+                            prog = 0.35 + 0.40 * ratio
+                            fname = Path(member).name or member
+                            self._update_progress(prog, f"Instalando: {fname} ({int(ratio * 100)}%)")
+            elif source_dir and source_dir.exists():
+                self._update_progress(0.4, f"Copiando arquivos para {target_dir.name}...")
                 for item in source_dir.iterdir():
                     dest = target_dir / item.name
                     if item.is_dir():
@@ -415,10 +454,9 @@ class InstallerApp(ctk.CTk):
                     else:
                         shutil.copy2(item, dest)
             else:
-                # Fallback se source_dir não existir: cria estrutura de suporte
                 (target_dir / "src").mkdir(exist_ok=True)
 
-            self._update_progress(0.7, "Configurando variáveis de ambiente...")
+            self._update_progress(0.8, "Configurando variáveis de ambiente...")
             # Restaura .env ou cria a partir de .env.example
             if backup_env and backup_env.exists():
                 shutil.copyfile(backup_env, target_dir / ".env")

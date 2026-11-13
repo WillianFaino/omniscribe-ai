@@ -193,8 +193,9 @@ if exist ".env.example" copy /Y ".env.example" "dist\OmniScribe\.env.example" >n
 if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
 
 echo.
-echo [4/5] Empacotando Assistente de Instalacao Grafico (OmniScribe_Setup.exe)...
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\OmniScribe;app_data" --collect-all "customtkinter" src/installer.py
+echo [4/5] Gerando pacote ultracompacto e empacotando Instalador Instantaneo...
+python make_package.py "dist\OmniScribe" "dist\app_data.zip"
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\app_data.zip;." --collect-all "customtkinter" src/installer.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -202,6 +203,8 @@ if %errorlevel% neq 0 (
     pause
     exit /b 1
 )
+
+copy /Y "dist\OmniScribe_Setup.exe" "OmniScribe_Setup.exe" >nul 2>&1
 
 if "%RESTORE_BACKUP%"=="1" (
     echo [RESTAURACAO] Restaurando dados preservados...
