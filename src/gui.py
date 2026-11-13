@@ -478,12 +478,13 @@ class ZoomTranscriberApp(ctk.CTk):
         self.temp_dir = get_base_dir() / "atas_reunioes" / "temp_blocks"
         self.temp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Inicializa motores e serviços
+        # Inicializa motores e serviços com carregamento adiado do SDK para boot instantâneo
         self.gemini_service = GeminiService(
             on_log=self._handle_service_log,
             on_transcription_update=self._handle_transcription_update,
             on_minute_generated=self._handle_minute_generated,
             on_status_change=self._handle_status_change,
+            defer_init=True,
         )
 
         self.audio_engine = AudioEngine(
@@ -495,14 +496,15 @@ class ZoomTranscriberApp(ctk.CTk):
         # Constrói componentes da interface gráfica
         self._build_ui()
 
-        # Renderiza a janela imediatamente para abertura instantânea
-        self.update_idletasks()
+        # Pinta a janela imediatamente antes de carregar áudio/SDK pesado
+        self.update()
 
         # Inicia temporizador de interface
         self._timer_running = False
 
-        # Carrega lista de dispositivos WASAPI e validação de API key logo após a renderização
-        self.after(50, self._refresh_audio_devices)
+        # Carrega dispositivos WASAPI, cliente Gemini e validação de API key após renderização
+        self.after(60, self._refresh_audio_devices)
+        self.after(120, self.gemini_service._init_client)
         self.after(200, self._check_initial_api_key)
 
     def _build_ui(self) -> None:

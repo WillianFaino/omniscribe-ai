@@ -41,15 +41,28 @@ except ImportError:
             except Exception:
                 pass
 
-# Importação defensiva do SDK oficial google-genai
-try:
-    from google import genai
-    from google.genai import types
-    HAS_GOOGLE_GENAI = True
-except ImportError:
-    genai = None
-    types = None
-    HAS_GOOGLE_GENAI = False
+# Importação sob demanda (Lazy Loading) do SDK oficial google-genai para inicialização instantânea
+genai = None
+types = None
+HAS_GOOGLE_GENAI: Optional[bool] = None
+
+
+def _ensure_genai_loaded() -> bool:
+    """Carrega o SDK google-genai apenas quando necessário, evitando bloqueio no boot da GUI."""
+    global genai, types, HAS_GOOGLE_GENAI
+    if HAS_GOOGLE_GENAI is not None:
+        return HAS_GOOGLE_GENAI
+    try:
+        from google import genai as _genai
+        from google.genai import types as _types
+        genai = _genai
+        types = _types
+        HAS_GOOGLE_GENAI = True
+    except ImportError:
+        genai = None
+        types = None
+        HAS_GOOGLE_GENAI = False
+    return HAS_GOOGLE_GENAI
 
 logger = logging.getLogger("omniscribe.gemini_service")
 
@@ -215,6 +228,7 @@ Transcrição completa da reunião:
         on_transcription_update: Optional[Callable[[int, str, str, bool], None]] = None,
         on_minute_generated: Optional[Callable[[Path, str], None]] = None,
         on_status_change: Optional[Callable[[str], None]] = None,
+        defer_init: bool = False,
     ):
         self.api_key = api_key or load_api_key_from_env()
         self.on_log = on_log
@@ -227,7 +241,8 @@ Transcrição completa da reunião:
         self._is_running = False
 
         self._client = None
-        self._init_client()
+        if not defer_init:
+            self._init_client()
 
         # Rastreador persistente de cotas e custos
         self.tracker = UsageTracker(get_base_dir() / "atas_reunioes")
@@ -259,7 +274,7 @@ Transcrição completa da reunião:
                 pass
 
     def _init_client(self) -> bool:
-        if not HAS_GOOGLE_GENAI:
+        if not _ensure_genai_loaded():
             self._log("[AVISO] SDK 'google-genai' não está instalado no ambiente.")
             return False
 

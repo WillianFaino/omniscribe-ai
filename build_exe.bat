@@ -106,7 +106,7 @@ goto build_onedir
 :build_onedir
 echo.
 echo [3/4] Empacotando aplicacao em Modo Turbo Instantaneo (--onedir --windowed)...
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -144,7 +144,7 @@ goto end
 :build_onefile
 echo.
 echo [3/4] Empacotando aplicacao via PyInstaller (--onefile --windowed)...
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -179,7 +179,7 @@ goto end
 :build_installer_flow
 echo.
 echo [3/5] Compilando versao base Turbo em 'dist\OmniScribe\'...
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -193,9 +193,9 @@ if exist ".env.example" copy /Y ".env.example" "dist\OmniScribe\.env.example" >n
 if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
 
 echo.
-echo [4/5] Gerando pacote ultracompacto e empacotando Instalador Instantaneo...
+echo [4/5] Gerando pacote ultracompacto e empacotando Instalador Nativo Instantaneo...
+taskkill /f /im OmniScribe_Setup.exe >nul 2>&1
 python make_package.py "dist\OmniScribe" "dist\app_data.zip"
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\app_data.zip;." --collect-all "customtkinter" src/installer.py
 
 if %errorlevel% neq 0 (
     echo.

@@ -30,9 +30,9 @@ echo.
 if exist "dist\OmniScribe\OmniScribe.exe" goto build_setup
 
 echo [AVISO] Os binarios do OmniScribe nao foram encontrados em 'dist\OmniScribe\'.
-echo Compilando versao Turbo antes de empacotar o Instalador...
+echo Compilando versao Turbo enxuta antes de empacotar o Instalador...
 echo.
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "google.genai" src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 if %errorlevel% neq 0 (
     echo [ERRO] Falha ao compilar os arquivos base do OmniScribe.
     pause
@@ -43,32 +43,19 @@ if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
 
 :build_setup
 echo.
-echo [2/3] Gerando pacote ultracompacto (app_data.zip)...
-python make_package.py "dist\OmniScribe" "dist\app_data.zip"
-if %errorlevel% neq 0 (
-    echo [ERRO] Falha ao compactar os binarios base.
-    pause
-    exit /b 1
-)
-
-echo.
-echo [3/3] Empacotando Instalador Grafico com Abertura Instantanea...
-echo       (Utiliza pacote zip otimizado para inicializacao em menos de 1 segundo)
+echo [2/2] Gerando pacote compacto e compilando Instalador Nativo Instantaneo...
+echo       (Stub Win32/.NET ~32 KB com Payload EOF -> Abertura em menos de 0.1s!)
 echo.
 
 :: Fecha instalador antigo se estiver em execucao
 taskkill /f /im OmniScribe_Setup.exe >nul 2>&1
 
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe_Setup" --paths "src" --add-data "dist\app_data.zip;." --collect-all "customtkinter" src/installer.py
-
+python make_package.py "dist\OmniScribe" "dist\app_data.zip"
 if %errorlevel% neq 0 (
-    echo.
-    echo [ERRO] Ocorreu uma falha durante o empacotamento do instalador.
+    echo [ERRO] Falha ao gerar o instalador nativo.
     pause
     exit /b 1
 )
-
-copy /Y "dist\OmniScribe_Setup.exe" "OmniScribe_Setup.exe" >nul 2>&1
 
 echo.
 echo ===============================================================================
