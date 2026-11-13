@@ -12,6 +12,8 @@ venv/
 build/
 dist/
 *.spec
+*.exe
+*.zip
 
 # Variáveis de Ambiente e Segredos (NUNCA versionar)
 .env
