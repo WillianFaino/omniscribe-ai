@@ -1,0 +1,128 @@
+# Handoff Técnico — OmniScribe AI
+
+> Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **OmniScribe AI**.
+> Última atualização: 14/11/2026 (baseado no commit `ccc55eb` na branch `main`).
+
+---
+
+## 1. Visão Geral do Projeto
+
+O **OmniScribe AI** é uma aplicação desktop para **Windows 10/11** em Python (`3.11+`) que realiza:
+1. **Captura dual sincronizada de áudio** via WASAPI (saída do sistema em loopback + microfone local).
+2. **Transcrição incremental em blocos** usando a API do **Google Gemini (`gemini-2.5-flash`)** com diarização entre o usuário local (**Canal Direito / R**) e participantes remotos (**Canal Esquerdo / L**).
+3. **Geração consolidada de Ata Executiva** estruturada em Markdown ao encerrar a sessão.
+4. **Acompanhamento visual e interativo** por medidores VU, histórico de atas, monitor de cota/custo da API e o mascote 3D **OmniMic** estilo Windows 95/XP.
+
+---
+
+## 2. Estrutura do Repositório
+
+```text
+omniscribe-ai/
+├── .env.example              # Template de configuração (GEMINI_API_KEY)
+├── .gitignore                # Ignora build/, dist/, *.exe, *.zip, .env, atas_reunioes/, temp_blocks/, *.wav
+├── README.md                 # Documentação de uso e recursos
+├── HANDOFF.md                # Este documento de handoff
+├── requirements.txt          # Dependências Python
+├── build_exe.bat             # Script interativo de build (--onedir, --onefile ou Setup)
+├── build_installer.bat       # Script dedicado para gerar OmniScribe_Setup.exe
+├── make_package.py           # Empacotador ZIP + compilador do instalador nativo Win32/.NET
+└── src/
+    ├── __init__.py
+    ├── main.py               # Entry point, sys.path, logging em atas_reunioes/logs/app.log e boot da GUI
+    ├── audio_engine.py       # Descoberta WASAPI, captura dual, resampling 16 kHz, noise gate e VU meters
+    ├── gemini_service.py     # Fila assíncrona de blocos WAV, upload/delete Files API, transcrição e Ata Executiva
+    ├── usage_tracker.py      # Persistência de uso diário (Free Tier 1.500 req/dia) e cálculo estimado USD/BRL
+    ├── gui.py                # Interface CustomTkinter (ZoomTranscriberApp + modais ApiKey, Usage e History)
+    ├── mascot_3d.py          # Renderizador 3D software Ultra Low-Poly (NumPy + Pillow) do OmniMic
+    ├── mascot_widget.py      # Widget flutuante/arrastável OmniMicWidget com balão XP e máquina de estados
+    ├── installer.py          # Setup Wizard em CustomTkinter (alternativa Python ao instalador nativo)
+    └── installer_native.cs   # Stub WinForms/C# (~30 KB) que lê app_data.zip acoplado via EOF Overlay ('OMNISCRB')
+```
+
+---
+
+## 3. Arquitetura e Fluxo de Execução
+
+### 3.1 Inicialização (`src/main.py`)
+- Garante `src/` no `sys.path`.
+- Configura logging para `stdout` e `atas_reunioes/logs/app.log` via `setup_logging()` e `sys.excepthook`.
+- Carrega `GEMINI_API_KEY` do `.env` (em `get_base_dir()`) ou variável de ambiente e inicia `run_gui()`.
+- O SDK `google-genai` usa carregamento sob demanda (`_ensure_genai_loaded()` e `defer_init=True` no `GeminiService`) para manter o boot da interface rápido.
+
+### 3.2 Motor de Áudio (`src/audio_engine.py`)
+- **Descoberta de dispositivos (`listar_dispositivos_audio`)**: lista dispositivos WASAPI de loopback e microfones via `pyaudiowpatch` (com fallback para `pyaudio` ou lista mock caso indisponível).
+- **Captura (`AudioEngine`)**:
+  - Threads separadas para `_capture_loopback_loop` e `_capture_mic_loop`.
+  - Modo mudo (`set_mic_muted`) e noise gate dinâmico (`set_noise_gate`, limiar padrão `0.015`).
+  - Thread `_vu_meter_loop` enviando RMS em dB normalizado (`0.0` a `1.0`) para a GUI.
+  - Thread `_slicer_loop` fatiando blocos periodicamente (padrão `180s`, selecionável na UI entre 1, 3 ou 5 minutos) e no encerramento (`stop_recording(finalize_block=True)`).
+- **Processamento WAV (`_create_block_file`)**:
+  - Reamostra ambos os canais para **16 kHz mono** via `resample_to_16k` (`np.interp`).
+  - Alinha os comprimentos com zero-padding e gera WAV **estéreo 16-bit PCM (`16000 Hz`)**:
+    - **Canal Esquerdo (L)**: Áudio do sistema (Loopback).
+    - **Canal Direito (R)**: Microfone local.
+
+### 3.3 Pipeline Gemini (`src/gemini_service.py`)
+- `start_session(title)` cria `atas_reunioes/AAAA/MM/transcricao_YYYYMMDD_HHMM[_titulo].md` e `ata_executiva_YYYYMMDD_HHMM[_titulo].md`, iniciando a thread `GeminiWorker`.
+- Cada bloco WAV enfileirado (`enqueue_block`) passa por `_process_single_block`:
+  1. Faz upload do `.wav` pela Files API (`self._client.files.upload`).
+  2. Envia os últimos 8 turnos de fala como contexto + `TRANSCRIPTION_SYSTEM_PROMPT` para `gemini-2.5-flash`.
+  3. Registra áudio e tokens no `UsageTracker`.
+  4. Anexa a transcrição ao arquivo Markdown e atualiza a GUI (`on_transcription_update`).
+  5. **Segurança**: o `.wav` local só é removido após escrita confirmada com sucesso; em caso de falha, é preservado em disco.
+  6. O arquivo remoto na nuvem é removido no bloco `finally` (`self._client.files.delete`).
+- Ao receber a sentinela `None` via `finish_session()`, `_generate_executive_minutes()` sintetiza a Ata Executiva usando `MINUTES_SYSTEM_PROMPT` em 5 seções obrigatórias (Resumo Executivo, Principais Tópicos, Decisões Tomadas, Tabela de Plano de Ação e Pendências).
+
+### 3.4 Monitoramento de Cotas e Custos (`src/usage_tracker.py`)
+- Persiste métricas em `atas_reunioes/usage_stats.json`.
+- Zera `today_requests` automaticamente quando muda a data (`YYYY-MM-DD`).
+- Referência de limite gratuito configurada: `FREE_TIER_DAILY_LIMIT_REQUESTS = 1500`.
+- Estimativa de custo baseada nas constantes `COST_PER_AUDIO_SECOND_USD`, `COST_PER_INPUT_TOKEN_USD`, `COST_PER_OUTPUT_TOKEN_USD` e `DEFAULT_USD_TO_BRL = 5.80`.
+
+### 3.5 Interface Gráfica (`src/gui.py`)
+- Classe principal `ZoomTranscriberApp(ctk.CTk)` com tema escuro e 3 abas principais (Transcrição ao Vivo, Ata Executiva e Logs).
+- Modais auxiliares:
+  - `ApiKeyModal`: configuração e persistência da `GEMINI_API_KEY` no `.env`.
+  - `UsageModal`: visualização de requisições do dia, barra de cota Free Tier, tokens e custo estimado.
+  - `HistoryModal`: listagem e abertura de atas/transcrições salvas em `atas_reunioes/`.
+
+### 3.6 Mascote 3D OmniMic (`src/mascot_3d.py` e `src/mascot_widget.py`)
+- **Renderização (`OmniMic3DRenderer`)**: malha articulada `Mesh3D` (`OmniMic #03-A Ultra Low-Poly`) renderizada em software (`128x144` ampliada com `NEAREST` para `192x216`), usando Painter's Algorithm, backface culling e iluminação flat-shading estilo Windows 95.
+- **Interatividade (`OmniMicWidget`)**:
+  - Overlay flutuante/arrastável no canto da janela com balão de fala estilo XP (`#FFFFE1`) e menu de contexto (`⋮` / clique direito).
+  - Rastreamento do cursor do mouse nas pupilas.
+  - Reação a eventos da aplicação: `greeting`, `idle`, `sleeping` (após 45s sem interação), `listening` (reage ao RMS do áudio), `transcribing` (segura bloquinho amarelo e caneta), `celebrating` (troféu dourado ao finalizar ata), `warning` e `spin`.
+  - Visibilidade alternável pelo botão `🎙️ OmniMic` no rodapé da GUI.
+
+---
+
+## 4. Como Executar e Empacotar
+
+### Desenvolvimento local
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env   # preencher GEMINI_API_KEY
+python src/main.py
+```
+
+### Build e Distribuição (Windows)
+- **`build_exe.bat`**: oferece backup automático de `atas_reunioes/` e `.env` de builds anteriores e gera:
+  - `[1]` `--onedir` (`dist/OmniScribe/OmniScribe.exe`) — inicialização rápida.
+  - `[2]` `--onefile` (`dist/OmniScribe.exe`).
+  - `[3]` Instalador nativo (`dist/OmniScribe_Setup.exe` + cópia na raiz).
+- **`build_installer.bat`**: gera diretamente `dist/OmniScribe_Setup.exe` compilando `src/installer_native.cs` via `csc.exe` (.NET Framework 4.x) e acoplando `dist/app_data.zip` via `make_package.py` com assinatura `OMNISCRB`.
+
+---
+
+## 5. Estado Atual do Git e Pontos de Atenção
+
+- **Branch atual**: `main` (sincronizada com `origin/main` no commit `ccc55eb`).
+- **Dependência externa principal**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal na primeira execução).
+- **Observações técnicas conhecidas no código atual**:
+  - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).
+  - O nome da classe principal em `src/gui.py` ainda é `ZoomTranscriberApp` (herança da fase inicial de MVP).
+  - Os arquivos `src/installer.py` (CustomTkinter) e `src/installer_native.cs` (WinForms nativo) coexistem no repositório; o fluxo oficial dos `.bat` e `make_package.py` utiliza `src/installer_native.cs`.
+  - Ainda não há suíte de testes automatizados versionada no repositório.
