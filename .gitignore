@@ -28,3 +28,8 @@ atas_reunioes/
 .vscode/
 .idea/
 
+# Backups automáticos do Blender
+*.blend1
+*.blend2
+
+
