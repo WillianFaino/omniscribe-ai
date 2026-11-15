@@ -1,7 +1,7 @@
 # Handoff Técnico — OmniScribe AI
 
 > Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **OmniScribe AI**.
-> Última atualização: 14/11/2026 (baseado no commit `ccc55eb` na branch `main`).
+> Última atualização: 15/11/2026 (baseado no commit `bbcacbd` na branch `main`).
 
 ---
 
@@ -20,13 +20,21 @@ O **OmniScribe AI** é uma aplicação desktop para **Windows 10/11** em Python 
 ```text
 omniscribe-ai/
 ├── .env.example              # Template de configuração (GEMINI_API_KEY)
-├── .gitignore                # Ignora build/, dist/, *.exe, *.zip, .env, atas_reunioes/, temp_blocks/, *.wav
+├── .gitignore                # Ignora build/, dist/, *.exe, *.zip, .env, atas_reunioes/, temp_blocks/, *.wav, *.blend1/2
+├── AGENTS.md                 # Diretrizes de fluxo Git/PR e manutenção do HANDOFF.md
 ├── README.md                 # Documentação de uso e recursos
 ├── HANDOFF.md                # Este documento de handoff
 ├── requirements.txt          # Dependências Python
 ├── build_exe.bat             # Script interativo de build (--onedir, --onefile ou Setup)
 ├── build_installer.bat       # Script dedicado para gerar OmniScribe_Setup.exe
 ├── make_package.py           # Empacotador ZIP + compilador do instalador nativo Win32/.NET
+├── assets/
+│   ├── blender/
+│   │   ├── omnimic_mascot.blend   # Cena inicial com rascunhos OmniMic_Detailed e OmniMic_V2_Exact
+│   │   └── omnimic_tpose.blend    # Modelo principal OmniMic_TPOSE em T-pose pronto para rigging
+│   └── references/
+│       ├── omnimic_var1_more_serrilhado.jpg  # Referência visual aprovada (PS1 low-poly + Bayer dithering)
+│       └── omnimic_tpose_{front,back,left,right,top,bottom}.jpg  # Turnaround ortográfico 6 vistas em T-pose
 └── src/
     ├── __init__.py
     ├── main.py               # Entry point, sys.path, logging em atas_reunioes/logs/app.log e boot da GUI
@@ -94,6 +102,10 @@ omniscribe-ai/
   - Rastreamento do cursor do mouse nas pupilas.
   - Reação a eventos da aplicação: `greeting`, `idle`, `sleeping` (após 45s sem interação), `listening` (reage ao RMS do áudio), `transcribing` (segura bloquinho amarelo e caneta), `celebrating` (troféu dourado ao finalizar ata), `warning` e `spin`.
   - Visibilidade alternável pelo botão `🎙️ OmniMic` no rodapé da GUI.
+- **Assets 3D em Blender (`assets/blender/omnimic_tpose.blend` e `assets/references/`)**:
+  - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
+  - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
+  - Shader retrô PS1 em grupo `NG_PS1_Bayer4x4` (`ShaderToRGB -> Ambient Occlusion -> Layer Weight -> matriz Bayer 4x4` em `GridScale = 384.0`) alinhado ao compositor `Compositor_PS1` (`Pixelate Size = 2`), além de `Outline_Solidify` com backface culling e geometria refinada (expressão calma/preguiçosa nos olhos e sobrancelhas, luvas 3D com `3` costuras dorsais visíveis na vista traseira e facetas radiais na base inferior).
 
 ---
 
@@ -119,7 +131,8 @@ python src/main.py
 
 ## 5. Estado Atual do Git e Pontos de Atenção
 
-- **Branch atual**: `main` (sincronizada com `origin/main` no commit `ccc55eb`).
+- **Branch base**: `main` (sincronizada com `origin/main` no commit `bbcacbd`), com desenvolvimento do mascote 3D em `feature/omnimic-tpose-3d-assets`.
+- **Próxima etapa planejada (3D)**: rigging/armature, weight painting e animações de estados sobre `OmniMic_TPOSE` em `assets/blender/omnimic_tpose.blend`, além da eventual integração/exportação para o app.
 - **Dependência externa principal**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal na primeira execução).
 - **Observações técnicas conhecidas no código atual**:
   - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).
