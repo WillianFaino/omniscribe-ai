@@ -32,10 +32,10 @@ omniscribe-ai/
 │   ├── blender/
 │   │   ├── omnimic_mascot.blend   # Cena inicial com rascunhos OmniMic_Detailed e OmniMic_V2_Exact
 │   │   ├── omnimic_tpose.blend    # Modelo principal OmniMic_TPOSE em T-pose pronto para rigging
-│   │   ├── omnimic_rigged.blend   # Cena rigada (OmniMic_Rig, 18 ossos) + 7 animações em NLA
-│   │   └── rig_omnimic.py         # Script reprodutível de rigging, curvas Bezier e QA geométrico
+│   │   ├── omnimic_rigged.blend   # Cena rigada (OmniMic_Rig, 22 ossos) + 4 props PS1 + 7 animações em NLA
+│   │   └── rig_omnimic.py         # Script reprodutível de rigging, props PS1, curvas Bezier e QA geométrico
 │   ├── models/
-│   │   └── omnimic.glb            # Exportação GLB v2 (~805 KB) com skinning e 7 Actions embutidas
+│   │   └── omnimic.glb            # Exportação GLB v2 (~906 KB) com skinning, 4 props e 7 Actions embutidas
 │   └── references/
 │       ├── omnimic_var1_more_serrilhado.jpg  # Referência visual aprovada (PS1 low-poly + Bayer dithering)
 │       └── omnimic_tpose_{front,back,left,right,top,bottom}.jpg  # Turnaround ortográfico 6 vistas em T-pose
@@ -110,10 +110,11 @@ omniscribe-ai/
   - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
   - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
   - Shader retrô PS1 em grupo `NG_PS1_Bayer4x4` (`ShaderToRGB -> Ambient Occlusion -> Layer Weight -> matriz Bayer 4x4` em `GridScale = 384.0`) alinhado ao compositor `Compositor_PS1` (`Pixelate Size = 2`), além de `Outline_Solidify` com backface culling e geometria refinada (expressão calma/preguiçosa nos olhos e sobrancelhas, luvas 3D com `3` costuras dorsais visíveis na vista traseira e facetas radiais na base inferior).
-  - **Rigging & Animações (`assets/blender/omnimic_rigged.blend` + `assets/models/omnimic.glb`):**
+  - **Rigging, Props & Animações (`assets/blender/omnimic_rigged.blend` + `assets/models/omnimic.glb`):**
     - Braços subdivididos em `16` segmentos ao longo de X com *Dual Quaternion* (`use_deform_preserve_volume = True`) e pesos suaves entre `Torso_Yoke -> UpperArm -> Forearm -> Hand` + punho (`Cuff`) compartilhado para impedir qualquer deslocamento da mão.
-    - Armature `OmniMic_Rig` (`18` ossos: `Root`, `Stand_Base`, `Torso_Yoke`, `Head`, olhos/pupilas/sobrancelhas `NegX`/`PosX`, `Mouth`, `Jaw_Lip` e cadeias conectadas `UpperArm -> Forearm -> Hand` L/R).
-    - **7 animações fluidas exportadas no `.glb`:** `idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning` e `sleeping`, validadas quadro a quadro contra colisão com a cabeça (`min_head_clear >= 8,4 cm`), deriva de punho (`<= 1,9 mm`) e arcos orgânicos de cotovelo (`18,7°–52,6°`, sem travas rígidas de `90°`).
+    - Armature `OmniMic_Rig` (`22` ossos: `Root`, `Stand_Base`, `Torso_Yoke`, `Head`, olhos/pupilas/sobrancelhas `NegX`/`PosX`, `Mouth`, `Jaw_Lip`, cadeias conectadas `UpperArm -> Forearm -> Hand` L/R e `4` ossos de props: `Prop_Notepad`, `Prop_Pencil`, `Prop_MiniMic` e `Prop_Trophy`).
+    - **4 Props low-poly no mesmo shader `NG_PS1_Bayer4x4` + `Outline_Solidify`:** bloquinho amarelo pautado (`Prop_Notepad`) + lápis hexagonal (`Prop_Pencil`) no `transcribing`, mini microfone direcional com anel LED ciano (`Prop_MiniMic`) no `listening`, e troféu estrela dourado (`Prop_Trophy`) no `celebrating`.
+    - **7 animações detalhadas exportadas no `.glb`:** `idle` (96f), `greeting` (76f), `listening` (80f com mão em concha na lateral/orelha + mini-mic apontado para o monitor), `transcribing` (80f escrevendo 3 linhas no bloquinho com acompanhamento ocular), `celebrating` (72f com troféu + saltos), `warning` (64f) e `sleeping` (96f com micro-cochilo), validadas quadro a quadro contra colisão com a cabeça (`min_head_clear >= 6,2 cm`), deriva de punho (`<= 2,8 mm`) e arcos orgânicos de cotovelo (`17,2°–54,0°`, sem travas rígidas de `90°`).
   - **Diretriz consolidada (não repetir abordagens descartadas):** sprites 2D estáticos animados por escala/rotação, modelagem manual por `LatheGeometry` em Three.js e geradores web gratuitos com limite de exportação/polígonos foram descartados em favor do modelo próprio em **Blender** com *rigging* esquelético real.
 
 #### Catálogo de Estados & Balão de Fala (Estilo Windows XP)
