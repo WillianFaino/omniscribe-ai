@@ -66,25 +66,29 @@ omniscribe-ai/
 - **Descoberta de dispositivos (`listar_dispositivos_audio`)**: lista dispositivos WASAPI de loopback e microfones via `pyaudiowpatch` (com fallback para `pyaudio` ou lista mock caso indisponível).
 - **Captura (`AudioEngine`)**:
   - Threads separadas para `_capture_loopback_loop` e `_capture_mic_loop`.
-  - Modo mudo (`set_mic_muted`) e noise gate dinâmico (`set_noise_gate`, limiar padrão `0.015`).
+  - Modo mudo (`set_mic_muted`) e **noise gate suave** (`_apply_mic_noise_gate`, limiar padrão `0.015`, atenuação suave `0.15x` e *hold* de `150 ms` para preservar consoantes e falas baixas).
   - Thread `_vu_meter_loop` enviando RMS em dB normalizado (`0.0` a `1.0`) para a GUI.
-  - Thread `_slicer_loop` fatiando blocos periodicamente (padrão `180s`, selecionável na UI entre 1, 3 ou 5 minutos) e no encerramento (`stop_recording(finalize_block=True)`).
-- **Processamento WAV (`_create_block_file`)**:
-  - Reamostra ambos os canais para **16 kHz mono** via `resample_to_16k` (`np.interp`).
-  - Alinha os comprimentos com zero-padding e gera WAV **estéreo 16-bit PCM (`16000 Hz`)**:
-    - **Canal Esquerdo (L)**: Áudio do sistema (Loopback).
-    - **Canal Direito (R)**: Microfone local.
+  - Thread `_slicer_loop` fatiando blocos com **espera inteligente de pausa natural (até `4s`)** após `block_duration_seconds` (`180s` padrão) e mantendo **buffer circular de overlap de `2,5s`** entre blocos consecutivos e no encerramento (`stop_recording(finalize_block=True)`).
+- **Processamento DSP & WAV (`_create_block_file`)**:
+  - Reamostragem anti-aliasing para **16 kHz** via `resample_to_16k` (`scipy.signal.resample_poly` com fallback FIR passa-baixa janela Hamming em NumPy).
+  - Pré-processamento acústico (`enhance_speech_audio`): remoção de offset DC, filtro passa-alta linear-phase `~80 Hz`, normalização dinâmica por janelas (AGC suave RMS/pico com guarda de silêncio) e *limiter soft-knee* anti-clipping em `-1 dBFS`.
+  - **Detecção automática de modo**:
+    - **Mono Presencial (`1 canal`, `16000 Hz`)**: quando `_loopback_stream is None` e `_mic_stream is not None`.
+    - **Estéreo Online (`2 canais`, `16000 Hz`)**: Canal Esquerdo (L) = Loopback / Sistema, Canal Direito (R) = Microfone local.
 
 ### 3.3 Pipeline Gemini (`src/gemini_service.py`)
-- `start_session(title)` cria `atas_reunioes/AAAA/MM/transcricao_YYYYMMDD_HHMM[_titulo].md` e `ata_executiva_YYYYMMDD_HHMM[_titulo].md`, iniciando a thread `GeminiWorker`.
+- `start_session(title, context_notes="")` cria `atas_reunioes/AAAA/MM/transcricao_YYYYMMDD_HHMM[_titulo].md` e `ata_executiva_YYYYMMDD_HHMM[_titulo].md`, extrai palavras-chave/glossário prioritário e inicia a thread `GeminiWorker`.
 - Cada bloco WAV enfileirado (`enqueue_block`) passa por `_process_single_block`:
-  1. Faz upload do `.wav` pela Files API (`self._client.files.upload`).
-  2. Envia os últimos 8 turnos de fala como contexto + `TRANSCRIPTION_SYSTEM_PROMPT` para `gemini-2.5-flash`.
-  3. Registra áudio e tokens no `UsageTracker`.
-  4. Anexa a transcrição ao arquivo Markdown e atualiza a GUI (`on_transcription_update`).
-  5. **Segurança**: o `.wav` local só é removido após escrita confirmada com sucesso; em caso de falha, é preservado em disco.
-  6. O arquivo remoto na nuvem é removido no bloco `finally` (`self._client.files.delete`).
-- Ao receber a sentinela `None` via `finish_session()`, `_generate_executive_minutes()` sintetiza a Ata Executiva usando `MINUTES_SYSTEM_PROMPT` em 5 seções obrigatórias (Resumo Executivo, Principais Tópicos, Decisões Tomadas, Tabela de Plano de Ação e Pendências).
+  1. Detecta automaticamente pelo cabeçalho `wave` se o WAV possui `1 canal` (selecionando `PRESENTIAL_TRANSCRIPTION_PROMPT` para diarização acústica em sala única com marcação `⚡ [Falas Sobrepostas]:`) ou `2 canais` (selecionando `TRANSCRIPTION_SYSTEM_PROMPT` estritamente separado L/R).
+  2. Faz upload do `.wav` pela Files API (`self._client.files.upload`).
+  3. Envia contexto recente (últimos 8 turnos) + vocabulário prioritário + prompt especializado para `gemini-2.5-flash` com `types.GenerateContentConfig(temperature=0.0, top_p=0.95)`.
+  4. Registra áudio e tokens no `UsageTracker`.
+  5. Anexa a transcrição ao arquivo Markdown e atualiza a GUI (`on_transcription_update`).
+  6. **Segurança**: o `.wav` local só é removido após escrita confirmada com sucesso; em caso de falha, é preservado em disco.
+  7. O arquivo remoto na nuvem é removido no bloco `finally` (`self._client.files.delete`).
+- Ao receber a sentinela `None` via `finish_session()`, `_generate_executive_minutes()`:
+  1. Executa **segunda passada fono-semântica** (`_refine_transcript_phonetics`, apenas texto, `temperature=0.0`, registrada no `UsageTracker`) para corrigir erros fonéticos pelo contexto global, unificar retroativamente nomes de participantes descobertos tardiamente e remover duplicações do overlap de `2,5s`.
+  2. Atualiza o arquivo de transcrição revisado e sintetiza a Ata Executiva usando `MINUTES_SYSTEM_PROMPT` em 5 seções obrigatórias (Resumo Executivo, Principais Tópicos, Decisões Tomadas, Tabela de Plano de Ação e Pendências).
 
 ### 3.4 Monitoramento de Cotas e Custos (`src/usage_tracker.py`)
 - Persiste métricas em `atas_reunioes/usage_stats.json`.

@@ -1,7 +1,8 @@
 """Motor de áudio do OmniScribe AI com suporte a WASAPI Loopback (sistema/reuniões) e microfone local.
 
-Realiza captura dual sincronizada, resampling para 16kHz mono via NumPy,
-noise gate configurável, intercalação em WAV estéreo e cálculo de VU meter em tempo real.
+Realiza captura dual sincronizada ou mono presencial, resampling anti-aliasing para 16 kHz,
+pré-processamento acústico (HPF 80 Hz + AGC suave com limiter -1 dBFS), noise gate suave,
+fatiamento em pausas naturais com overlap de 2,5s e cálculo de VU meter em tempo real.
 """
 
 from __future__ import annotations
@@ -16,6 +17,14 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+# Importação defensiva do scipy para resampling polifásico de alta precisão
+try:
+    from scipy.signal import resample_poly as _scipy_resample_poly
+    HAS_SCIPY_SIGNAL = True
+except ImportError:
+    _scipy_resample_poly = None
+    HAS_SCIPY_SIGNAL = False
 
 # Importação defensiva de pyaudiowpatch com fallback para pyaudio padrão
 try:
@@ -33,6 +42,11 @@ logger = logging.getLogger("omniscribe.audio_engine")
 
 TARGET_SAMPLE_RATE = 16000  # Taxa padrão otimizada para modelos de voz do Gemini
 DEFAULT_CHUNK_FRAMES = 2048
+NOISE_GATE_ATTENUATION_GAIN = 0.15
+NOISE_GATE_HOLD_SECONDS = 0.15
+BLOCK_OVERLAP_SECONDS = 2.5
+PAUSE_WAIT_MAX_SECONDS = 4.0
+PAUSE_RMS_THRESHOLD = 0.22
 
 
 def listar_dispositivos_audio() -> Tuple[List[Dict], List[Dict]]:
@@ -163,20 +177,163 @@ def listar_dispositivos_audio() -> Tuple[List[Dict], List[Dict]]:
 
 
 def resample_to_16k(audio_mono: np.ndarray, orig_rate: int, target_rate: int = TARGET_SAMPLE_RATE) -> np.ndarray:
-    """Reamostra um vetor mono int16 para target_rate usando np.interp (rápido e sem dependências externas)."""
-    if orig_rate == target_rate or len(audio_mono) == 0:
-        return audio_mono
+    """Reamostra um vetor mono int16 para target_rate com filtragem anti-aliasing.
+
+    Usa `scipy.signal.resample_poly` quando disponível; caso contrário, aplica um
+    filtro passa-baixa FIR com janela de Hamming em NumPy antes da decimação.
+    """
+    if orig_rate == target_rate or len(audio_mono) == 0 or orig_rate <= 0 or target_rate <= 0:
+        return np.asarray(audio_mono, dtype=np.int16)
 
     duration = len(audio_mono) / float(orig_rate)
     num_target_samples = int(round(duration * target_rate))
     if num_target_samples == 0:
         return np.empty(0, dtype=np.int16)
 
-    orig_times = np.linspace(0.0, duration, len(audio_mono), endpoint=False)
+    samples_f = audio_mono.astype(np.float64)
+
+    if HAS_SCIPY_SIGNAL and _scipy_resample_poly is not None:
+        divisor = math.gcd(int(target_rate), int(orig_rate))
+        up = int(target_rate) // divisor
+        down = int(orig_rate) // divisor
+        resampled = _scipy_resample_poly(samples_f, up, down)
+        if len(resampled) > num_target_samples:
+            resampled = resampled[:num_target_samples]
+        elif len(resampled) < num_target_samples:
+            resampled = np.pad(resampled, (0, num_target_samples - len(resampled)), mode="edge")
+        return np.clip(np.round(resampled), -32768, 32767).astype(np.int16)
+
+    # Fallback NumPy: filtro passa-baixa FIR com janela de Hamming anti-aliasing antes de decimar
+    if target_rate < orig_rate and len(samples_f) >= 8:
+        fc = 0.45 * (float(target_rate) / float(orig_rate))
+        ratio = float(orig_rate) / float(target_rate)
+        num_taps = min(127, max(41, int(round(16.0 * ratio)) | 1))
+        if len(samples_f) < num_taps:
+            num_taps = max(5, (len(samples_f) - 1) | 1)
+
+        n = np.arange(num_taps, dtype=np.float64) - (num_taps - 1) / 2.0
+        kernel = 2.0 * fc * np.sinc(2.0 * fc * n) * np.hamming(num_taps)
+        kernel /= np.sum(kernel)
+
+        pad = num_taps // 2
+        padded = np.pad(samples_f, pad, mode="edge")
+        samples_f = np.convolve(padded, kernel, mode="valid")
+
+    orig_times = np.linspace(0.0, duration, len(samples_f), endpoint=False)
     target_times = np.linspace(0.0, duration, num_target_samples, endpoint=False)
 
-    resampled = np.interp(target_times, orig_times, audio_mono.astype(np.float32))
-    return np.clip(resampled, -32768, 32767).astype(np.int16)
+    resampled = np.interp(target_times, orig_times, samples_f)
+    return np.clip(np.round(resampled), -32768, 32767).astype(np.int16)
+
+
+def _apply_highpass_fft(samples: np.ndarray, sample_rate: int, cutoff_hz: float = 80.0) -> np.ndarray:
+    """Aplica filtro passa-alta linear-phase (~80 Hz) via FIR Hamming e convolução FFT."""
+    if len(samples) < 32 or sample_rate <= cutoff_hz * 2.5:
+        return samples
+
+    # Escolhe ordem ímpar proporcional à taxa de amostragem (~601 taps em 16 kHz)
+    num_taps = min(1201, max(101, int(round(0.0375 * sample_rate)) | 1))
+    max_taps = (len(samples) // 2) * 2 - 1
+    if max_taps < 15:
+        return samples
+    num_taps = min(num_taps, max_taps) | 1
+
+    fc = cutoff_hz / float(sample_rate)
+    m = np.arange(num_taps, dtype=np.float64) - (num_taps - 1) / 2.0
+    kernel_lp = 2.0 * fc * np.sinc(2.0 * fc * m) * np.hamming(num_taps)
+    kernel_lp /= np.sum(kernel_lp)
+
+    # Inversão espectral para obter passa-alta complementar (delta - LPF)
+    kernel_hp = -kernel_lp
+    kernel_hp[num_taps // 2] += 1.0
+
+    pad = num_taps // 2
+    padded = np.pad(samples, pad, mode="edge")
+    nfft = 1 << math.ceil(math.log2(len(padded) + num_taps - 1))
+    filtered_full = np.fft.irfft(
+        np.fft.rfft(padded, n=nfft) * np.fft.rfft(kernel_hp, n=nfft),
+        n=nfft,
+    )
+    return filtered_full[num_taps - 1 : num_taps - 1 + len(samples)]
+
+
+def enhance_speech_audio(samples_int16: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Pré-processa áudio de fala para máxima clareza em reuniões presenciais e online.
+
+    Etapas aplicadas:
+    1. Remoção de offset DC e filtragem passa-alta suave (~80 Hz) para eliminar ruído grave.
+    2. Normalização dinâmica por janelas (AGC suave de RMS/pico) com guarda de piso de ruído.
+    3. Limiter soft-knee anti-clipping em -1 dBFS.
+    """
+    arr = np.asarray(samples_int16, dtype=np.int16)
+    if len(arr) == 0 or sample_rate <= 0:
+        return arr.copy()
+
+    # Evita trabalho desnecessário em blocos digitais totalmente silenciosos
+    if not np.any(arr):
+        return arr.copy()
+
+    x = arr.astype(np.float64) / 32768.0
+    x -= np.mean(x)
+    x = _apply_highpass_fft(x, sample_rate, cutoff_hz=80.0)
+
+    # Parâmetros do AGC por janelas de 100 ms e limiter em -1 dBFS
+    target_rms = 10.0 ** (-18.0 / 20.0)   # ~0.1259 (-18 dBFS)
+    peak_limit = 10.0 ** (-1.0 / 20.0)    # ~0.8913 (-1 dBFS)
+    silence_rms = 10.0 ** (-48.0 / 20.0)  # ~0.0040 (não amplifica piso de silêncio)
+    max_gain = 10.0 ** (16.0 / 20.0)      # +16 dB máx. para participantes distantes na sala
+    min_gain = 0.25
+
+    win_len = max(1, int(round(0.10 * sample_rate)))
+    num_samples = len(x)
+    num_frames = max(1, math.ceil(num_samples / float(win_len)))
+
+    raw_gains = np.ones(num_frames, dtype=np.float64)
+    frame_centers = np.zeros(num_frames, dtype=np.float64)
+
+    for idx in range(num_frames):
+        start = idx * win_len
+        end = min(num_samples, start + win_len)
+        seg = x[start:end]
+        frame_centers[idx] = 0.5 * (start + end - 1)
+
+        frm_rms = float(np.sqrt(np.mean(seg * seg)))
+        frm_peak = float(np.max(np.abs(seg)))
+
+        if frm_rms < silence_rms:
+            raw_gains[idx] = 1.0
+        else:
+            desired = min(max_gain, max(min_gain, target_rms / max(frm_rms, 1e-8)))
+            peak_cap = peak_limit / max(frm_peak, 1e-8)
+            raw_gains[idx] = min(desired, peak_cap)
+
+    # Suavização assimétrica: ataque rápido ao reduzir ganho, liberação gradual ao elevar
+    smooth_gains = np.empty_like(raw_gains)
+    smooth_gains[0] = raw_gains[0]
+    for idx in range(1, num_frames):
+        prev_g = smooth_gains[idx - 1]
+        curr_g = raw_gains[idx]
+        alpha = 0.65 if curr_g < prev_g else 0.22
+        smooth_gains[idx] = prev_g + alpha * (curr_g - prev_g)
+
+    if num_frames == 1:
+        gain_env = np.full(num_samples, smooth_gains[0], dtype=np.float64)
+    else:
+        gain_env = np.interp(np.arange(num_samples, dtype=np.float64), frame_centers, smooth_gains)
+
+    y = x * gain_env
+
+    # Limiter soft-knee em -1 dBFS para preservar transientes sem clipping duro
+    knee = 0.85 * peak_limit
+    headroom = peak_limit - knee
+    abs_y = np.abs(y)
+    over_mask = abs_y > knee
+    if np.any(over_mask):
+        overshoot = (abs_y[over_mask] - knee) / headroom
+        y[over_mask] = np.sign(y[over_mask]) * (knee + headroom * np.tanh(overshoot))
+
+    y = np.clip(y, -peak_limit, peak_limit)
+    return np.clip(np.round(y * 32768.0), -32768, 32767).astype(np.int16)
 
 
 def calc_rms_normalized(samples_int16: np.ndarray) -> float:
@@ -234,10 +391,16 @@ class AudioEngine:
 
         self._raw_loop_chunks: List[np.ndarray] = []
         self._raw_mic_chunks: List[np.ndarray] = []
+        self._overlap_loop_raw: np.ndarray = np.empty(0, dtype=np.int16)
+        self._overlap_mic_raw: np.ndarray = np.empty(0, dtype=np.int16)
         self._buffer_lock = threading.Lock()
 
         self._current_zoom_rms = 0.0
         self._current_mic_rms = 0.0
+        self._last_loop_chunk_time = 0.0
+        self._last_mic_chunk_time = 0.0
+        self._mic_gate_gain = 1.0
+        self._mic_gate_last_open_time = 0.0
         self._block_index = 0
         self._start_time = 0.0
 
@@ -276,8 +439,14 @@ class AudioEngine:
         self._start_time = time.time()
         self._raw_loop_chunks = []
         self._raw_mic_chunks = []
+        self._overlap_loop_raw = np.empty(0, dtype=np.int16)
+        self._overlap_mic_raw = np.empty(0, dtype=np.int16)
         self._current_zoom_rms = 0.0
         self._current_mic_rms = 0.0
+        self._last_loop_chunk_time = 0.0
+        self._last_mic_chunk_time = 0.0
+        self._mic_gate_gain = 1.0
+        self._mic_gate_last_open_time = time.time()
 
         try:
             self._pyaudio_instance = pyaudio.PyAudio()
@@ -396,6 +565,7 @@ class AudioEngine:
 
                 with self._buffer_lock:
                     self._raw_loop_chunks.append(samples)
+                    self._last_loop_chunk_time = time.time()
 
             except Exception as e:
                 if self.is_recording:
@@ -403,6 +573,46 @@ class AudioEngine:
                 time.sleep(0.01)
 
         logger.debug("Finalizado loop de captura de áudio do Loopback.")
+
+    def _apply_mic_noise_gate(
+        self, samples: np.ndarray, rms: float, now: Optional[float] = None
+    ) -> Tuple[np.ndarray, float]:
+        """Aplica noise gate suave com janela de hold (~150ms) e atenuação 0.15x em vez de corte seco."""
+        if not self.noise_gate_enabled or len(samples) == 0:
+            self._mic_gate_gain = 1.0
+            return samples, rms
+
+        ts = time.time() if now is None else now
+        if rms >= self.noise_gate_threshold:
+            self._mic_gate_last_open_time = ts
+            target_gain = 1.0
+        elif (ts - self._mic_gate_last_open_time) <= NOISE_GATE_HOLD_SECONDS:
+            target_gain = 1.0
+        else:
+            target_gain = NOISE_GATE_ATTENUATION_GAIN
+
+        prev_gain = self._mic_gate_gain
+        self._mic_gate_gain = target_gain
+
+        if prev_gain == 1.0 and target_gain == 1.0:
+            return samples, rms
+
+        n = len(samples)
+        if target_gain > prev_gain:
+            # Ataque rápido (~128 amostras) preserva consoantes iniciais
+            ramp_len = min(128, n)
+            env = np.empty(n, dtype=np.float32)
+            env[:ramp_len] = np.linspace(prev_gain, target_gain, ramp_len, dtype=np.float32)
+            if ramp_len < n:
+                env[ramp_len:] = target_gain
+        elif target_gain < prev_gain:
+            # Fechamento progressivo ao longo do frame evita degraus abruptos
+            env = np.linspace(prev_gain, target_gain, n, dtype=np.float32)
+        else:
+            env = target_gain
+
+        attenuated = np.clip(np.round(samples.astype(np.float32) * env), -32768, 32767).astype(np.int16)
+        return attenuated, calc_rms_normalized(attenuated)
 
     def _capture_mic_loop(self) -> None:
         """Loop de captura contínua do microfone local."""
@@ -431,17 +641,15 @@ class AudioEngine:
                 if self.is_mic_muted:
                     samples = np.zeros_like(samples)
                     self._current_mic_rms = 0.0
+                    self._mic_gate_gain = 0.0
                 else:
                     rms = calc_rms_normalized(samples)
-                    # Noise gate: zera o bloco se o nível RMS estiver abaixo do limiar
-                    if self.noise_gate_enabled and rms < self.noise_gate_threshold:
-                        samples = np.zeros_like(samples)
-                        rms = 0.0
-
-                    self._current_mic_rms = max(rms, self._current_mic_rms * 0.82)
+                    samples, gated_rms = self._apply_mic_noise_gate(samples, rms)
+                    self._current_mic_rms = max(gated_rms, self._current_mic_rms * 0.82)
 
                 with self._buffer_lock:
                     self._raw_mic_chunks.append(samples)
+                    self._last_mic_chunk_time = time.time()
 
             except Exception as e:
                 if self.is_recording:
@@ -471,97 +679,190 @@ class AudioEngine:
             except Exception:
                 pass
 
+    def _tail_rms(self, chunks: List[np.ndarray], sample_rate: int, window_sec: float = 0.20) -> float:
+        """Calcula o RMS normalizado dos últimos `window_sec` segundos de um buffer de chunks."""
+        if not chunks or sample_rate <= 0:
+            return 0.0
+        need_samples = max(1, int(round(window_sec * sample_rate)))
+        collected: List[np.ndarray] = []
+        total = 0
+        for chunk in reversed(chunks):
+            collected.append(chunk)
+            total += len(chunk)
+            if total >= need_samples:
+                break
+        tail = np.concatenate(collected[::-1])[-need_samples:]
+        return calc_rms_normalized(tail)
+
+    def _is_natural_pause(self, now: Optional[float] = None) -> bool:
+        """Retorna True se os fluxos ativos estiverem em janela de baixa energia (pausa natural)."""
+        ts = time.time() if now is None else now
+        with self._buffer_lock:
+            loop_active_speech = False
+            if self._loopback_stream is not None and self._raw_loop_chunks:
+                recent_loop = (ts - self._last_loop_chunk_time) <= 0.35 if self._last_loop_chunk_time > 0 else True
+                if recent_loop:
+                    loop_rms = self._tail_rms(self._raw_loop_chunks, self._loopback_rate)
+                    loop_active_speech = loop_rms > PAUSE_RMS_THRESHOLD
+
+            mic_active_speech = False
+            if self._mic_stream is not None and not self.is_mic_muted and self._raw_mic_chunks:
+                recent_mic = (ts - self._last_mic_chunk_time) <= 0.35 if self._last_mic_chunk_time > 0 else True
+                if recent_mic:
+                    mic_rms = self._tail_rms(self._raw_mic_chunks, self._mic_rate)
+                    mic_active_speech = mic_rms > PAUSE_RMS_THRESHOLD
+
+        return not (loop_active_speech or mic_active_speech)
+
     def _slicer_loop(self) -> None:
-        """Monitora o acúmulo de áudio e fatiamento automático a cada N segundos."""
-        logger.debug("Iniciando fatiador periódico de blocos de áudio.")
+        """Monitora o acúmulo de áudio e fatia em pausas naturais (espera até 4s) após block_duration_seconds."""
+        logger.debug("Iniciando fatiador inteligente de blocos de áudio.")
         last_slice_time = time.time()
+        pending_slice_since: Optional[float] = None
 
         while self.is_recording:
-            time.sleep(0.5)
-            elapsed = time.time() - last_slice_time
+            time.sleep(0.2)
+            now = time.time()
+            elapsed = now - last_slice_time
             if elapsed >= self.block_duration_seconds:
-                self._create_block_file(is_final=False)
-                last_slice_time = time.time()
+                if pending_slice_since is None:
+                    pending_slice_since = now
+
+                wait_elapsed = now - pending_slice_since
+                if self._is_natural_pause(now=now) or wait_elapsed >= PAUSE_WAIT_MAX_SECONDS:
+                    self._create_block_file(is_final=False)
+                    last_slice_time = time.time()
+                    pending_slice_since = None
 
     def _create_block_file(self, is_final: bool = False) -> Optional[Path]:
-        """Extrai os dados acumulados, reamostra para 16kHz, intercala em estéreo e salva em WAV."""
+        """Extrai áudio acumulado com overlap de 2,5s, reamostra a 16 kHz, aplica DSP e salva Mono/Estéreo WAV."""
         with self._buffer_lock:
             if not self._raw_loop_chunks and not self._raw_mic_chunks:
                 logger.debug("Nenhum dado de áudio no buffer para fatiar.")
                 return None
 
             if self._raw_loop_chunks:
-                loop_raw = np.concatenate(self._raw_loop_chunks)
+                new_loop_raw = np.concatenate(self._raw_loop_chunks)
                 self._raw_loop_chunks = []
             else:
-                loop_raw = np.empty(0, dtype=np.int16)
+                new_loop_raw = np.empty(0, dtype=np.int16)
 
             if self._raw_mic_chunks:
-                mic_raw = np.concatenate(self._raw_mic_chunks)
+                new_mic_raw = np.concatenate(self._raw_mic_chunks)
                 self._raw_mic_chunks = []
             else:
-                mic_raw = np.empty(0, dtype=np.int16)
+                new_mic_raw = np.empty(0, dtype=np.int16)
 
-        # Duração em segundos do sinal original
-        dur_loop = len(loop_raw) / float(self._loopback_rate) if self._loopback_rate > 0 else 0.0
-        dur_mic = len(mic_raw) / float(self._mic_rate) if self._mic_rate > 0 else 0.0
-        max_duration = max(dur_loop, dur_mic)
+        # Duração em segundos do sinal recém-capturado (antes do prefixo de overlap)
+        new_dur_loop = len(new_loop_raw) / float(self._loopback_rate) if self._loopback_rate > 0 else 0.0
+        new_dur_mic = len(new_mic_raw) / float(self._mic_rate) if self._mic_rate > 0 else 0.0
+        new_max_duration = max(new_dur_loop, new_dur_mic)
 
-        if max_duration < 1.0 and not is_final:
-            # Trecho muito curto, descarta se não for o encerramento da reunião
+        if new_max_duration < 1.0 and not is_final:
             return None
 
-        # Reamostra ambos para 16kHz mono (se um canal estiver vazio, preenche com silêncio)
-        if len(loop_raw) > 0:
-            loop_16k = resample_to_16k(loop_raw, self._loopback_rate, TARGET_SAMPLE_RATE)
+        # Injeta buffer circular de 2,5s do bloco anterior para continuidade semântica na fronteira
+        if len(self._overlap_loop_raw) > 0:
+            loop_raw = np.concatenate([self._overlap_loop_raw, new_loop_raw]) if len(new_loop_raw) > 0 else self._overlap_loop_raw
         else:
-            mic_resampled_len = int(round(dur_mic * TARGET_SAMPLE_RATE))
-            loop_16k = np.zeros(mic_resampled_len, dtype=np.int16)
+            loop_raw = new_loop_raw
 
-        if len(mic_raw) > 0:
-            mic_16k = resample_to_16k(mic_raw, self._mic_rate, TARGET_SAMPLE_RATE)
+        if len(self._overlap_mic_raw) > 0:
+            mic_raw = np.concatenate([self._overlap_mic_raw, new_mic_raw]) if len(new_mic_raw) > 0 else self._overlap_mic_raw
         else:
-            mic_16k = np.zeros(len(loop_16k), dtype=np.int16)
+            mic_raw = new_mic_raw
 
-        # Sincroniza e iguala o comprimento de amostras dos dois canais
-        target_len = max(len(loop_16k), len(mic_16k))
-        if target_len == 0:
-            return None
+        # Atualiza ou limpa os prefixos de overlap para o próximo bloco
+        if is_final:
+            self._overlap_loop_raw = np.empty(0, dtype=np.int16)
+            self._overlap_mic_raw = np.empty(0, dtype=np.int16)
+        else:
+            loop_ov_samples = int(round(BLOCK_OVERLAP_SECONDS * self._loopback_rate)) if self._loopback_rate > 0 else 0
+            mic_ov_samples = int(round(BLOCK_OVERLAP_SECONDS * self._mic_rate)) if self._mic_rate > 0 else 0
+            self._overlap_loop_raw = (
+                loop_raw[-loop_ov_samples:].copy()
+                if (len(new_loop_raw) > 0 and loop_ov_samples > 0)
+                else np.empty(0, dtype=np.int16)
+            )
+            self._overlap_mic_raw = (
+                mic_raw[-mic_ov_samples:].copy()
+                if (len(new_mic_raw) > 0 and mic_ov_samples > 0)
+                else np.empty(0, dtype=np.int16)
+            )
 
-        if len(loop_16k) < target_len:
-            loop_16k = np.pad(loop_16k, (0, target_len - len(loop_16k)), mode="constant")
-        elif len(loop_16k) > target_len:
-            loop_16k = loop_16k[:target_len]
-
-        if len(mic_16k) < target_len:
-            mic_16k = np.pad(mic_16k, (0, target_len - len(mic_16k)), mode="constant")
-        elif len(mic_16k) > target_len:
-            mic_16k = mic_16k[:target_len]
-
-        # Canal Esquerdo (L): Zoom / Sistema
-        # Canal Direito (R): Microfone local
-        stereo_array = np.empty((target_len, 2), dtype=np.int16)
-        stereo_array[:, 0] = loop_16k
-        stereo_array[:, 1] = mic_16k
+        is_presencial_mono = self._loopback_stream is None and self._mic_stream is not None
 
         self._block_index += 1
         block_num = self._block_index
         timestamp_str = time.strftime("%Y%m%d_%H%M%S")
         wav_path = self.temp_dir / f"block_{timestamp_str}_{block_num:03d}.wav"
 
+        if is_presencial_mono:
+            # Modo Presencial (Mic-Only): gera WAV Mono 16 kHz após HPF 80 Hz + AGC + Limiter
+            if len(mic_raw) == 0:
+                return None
+            mic_16k = resample_to_16k(mic_raw, self._mic_rate, TARGET_SAMPLE_RATE)
+            mic_16k = enhance_speech_audio(mic_16k, TARGET_SAMPLE_RATE)
+            target_len = len(mic_16k)
+            if target_len == 0:
+                return None
+            nchannels = 1
+            pcm_bytes = mic_16k.tobytes()
+        else:
+            # Modo Reunião Online (Estéreo): L = Loopback, R = Microfone
+            dur_loop = len(loop_raw) / float(self._loopback_rate) if self._loopback_rate > 0 else 0.0
+            dur_mic = len(mic_raw) / float(self._mic_rate) if self._mic_rate > 0 else 0.0
+
+            if len(loop_raw) > 0:
+                loop_16k = enhance_speech_audio(
+                    resample_to_16k(loop_raw, self._loopback_rate, TARGET_SAMPLE_RATE),
+                    TARGET_SAMPLE_RATE,
+                )
+            else:
+                loop_16k = np.zeros(int(round(dur_mic * TARGET_SAMPLE_RATE)), dtype=np.int16)
+
+            if len(mic_raw) > 0:
+                mic_16k = enhance_speech_audio(
+                    resample_to_16k(mic_raw, self._mic_rate, TARGET_SAMPLE_RATE),
+                    TARGET_SAMPLE_RATE,
+                )
+            else:
+                mic_16k = np.zeros(len(loop_16k), dtype=np.int16)
+
+            target_len = max(len(loop_16k), len(mic_16k))
+            if target_len == 0:
+                return None
+
+            if len(loop_16k) < target_len:
+                loop_16k = np.pad(loop_16k, (0, target_len - len(loop_16k)), mode="constant")
+            elif len(loop_16k) > target_len:
+                loop_16k = loop_16k[:target_len]
+
+            if len(mic_16k) < target_len:
+                mic_16k = np.pad(mic_16k, (0, target_len - len(mic_16k)), mode="constant")
+            elif len(mic_16k) > target_len:
+                mic_16k = mic_16k[:target_len]
+
+            stereo_array = np.empty((target_len, 2), dtype=np.int16)
+            stereo_array[:, 0] = loop_16k
+            stereo_array[:, 1] = mic_16k
+            nchannels = 2
+            pcm_bytes = stereo_array.tobytes()
+
         try:
             with wave.open(str(wav_path), "wb") as wf:
-                wf.setnchannels(2)
+                wf.setnchannels(nchannels)
                 wf.setsampwidth(2)  # 16-bit
                 wf.setframerate(TARGET_SAMPLE_RATE)
-                wf.writeframes(stereo_array.tobytes())
+                wf.writeframes(pcm_bytes)
 
             block_duration = target_len / float(TARGET_SAMPLE_RATE)
-            end_time = time.time() - self._start_time
+            end_time = (time.time() - self._start_time) if self._start_time > 0.0 else block_duration
             start_time = max(0.0, end_time - block_duration)
 
+            mode_desc = "Mono/Presencial" if nchannels == 1 else "Estéreo/Online"
             logger.info(
-                f"Bloco {block_num} gerado com sucesso: {wav_path.name} "
+                f"Bloco {block_num} ({mode_desc}) gerado com sucesso: {wav_path.name} "
                 f"({block_duration:.1f}s, [{start_time:.0f}s -> {end_time:.0f}s])"
             )
 
