@@ -31,7 +31,11 @@ omniscribe-ai/
 ├── assets/
 │   ├── blender/
 │   │   ├── omnimic_mascot.blend   # Cena inicial com rascunhos OmniMic_Detailed e OmniMic_V2_Exact
-│   │   └── omnimic_tpose.blend    # Modelo principal OmniMic_TPOSE em T-pose pronto para rigging
+│   │   ├── omnimic_tpose.blend    # Modelo principal OmniMic_TPOSE em T-pose pronto para rigging
+│   │   ├── omnimic_rigged.blend   # Cena rigada (OmniMic_Rig, 18 ossos) + 7 animações em NLA
+│   │   └── rig_omnimic.py         # Script reprodutível de rigging, curvas Bezier e QA geométrico
+│   ├── models/
+│   │   └── omnimic.glb            # Exportação GLB v2 (~805 KB) com skinning e 7 Actions embutidas
 │   └── references/
 │       ├── omnimic_var1_more_serrilhado.jpg  # Referência visual aprovada (PS1 low-poly + Bayer dithering)
 │       └── omnimic_tpose_{front,back,left,right,top,bottom}.jpg  # Turnaround ortográfico 6 vistas em T-pose
@@ -106,6 +110,10 @@ omniscribe-ai/
   - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
   - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
   - Shader retrô PS1 em grupo `NG_PS1_Bayer4x4` (`ShaderToRGB -> Ambient Occlusion -> Layer Weight -> matriz Bayer 4x4` em `GridScale = 384.0`) alinhado ao compositor `Compositor_PS1` (`Pixelate Size = 2`), além de `Outline_Solidify` com backface culling e geometria refinada (expressão calma/preguiçosa nos olhos e sobrancelhas, luvas 3D com `3` costuras dorsais visíveis na vista traseira e facetas radiais na base inferior).
+  - **Rigging & Animações (`assets/blender/omnimic_rigged.blend` + `assets/models/omnimic.glb`):**
+    - Braços subdivididos em `16` segmentos ao longo de X com *Dual Quaternion* (`use_deform_preserve_volume = True`) e pesos suaves entre `Torso_Yoke -> UpperArm -> Forearm -> Hand` + punho (`Cuff`) compartilhado para impedir qualquer deslocamento da mão.
+    - Armature `OmniMic_Rig` (`18` ossos: `Root`, `Stand_Base`, `Torso_Yoke`, `Head`, olhos/pupilas/sobrancelhas `NegX`/`PosX`, `Mouth`, `Jaw_Lip` e cadeias conectadas `UpperArm -> Forearm -> Hand` L/R).
+    - **7 animações fluidas exportadas no `.glb`:** `idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning` e `sleeping`, validadas quadro a quadro contra colisão com a cabeça (`min_head_clear >= 8,4 cm`), deriva de punho (`<= 1,9 mm`) e arcos orgânicos de cotovelo (`18,7°–52,6°`, sem travas rígidas de `90°`).
   - **Diretriz consolidada (não repetir abordagens descartadas):** sprites 2D estáticos animados por escala/rotação, modelagem manual por `LatheGeometry` em Three.js e geradores web gratuitos com limite de exportação/polígonos foram descartados em favor do modelo próprio em **Blender** com *rigging* esquelético real.
 
 #### Catálogo de Estados & Balão de Fala (Estilo Windows XP)
@@ -171,8 +179,8 @@ python src/main.py
 
 ## 6. Estado Atual do Git e Pontos de Atenção
 
-- **Branch base**: `main` (sincronizada com `origin/main` no commit `18b42c8`, após o merge do PR #4 `feature/omnimic-tpose-3d-assets`).
-- **Próxima etapa planejada (3D)**: rigging/armature, weight painting e animações de estados sobre `OmniMic_TPOSE` em `assets/blender/omnimic_tpose.blend`, além da eventual integração/exportação para o app.
+- **Branch base**: `main` (sincronizada com `origin/main` no commit `a26d751`, após o merge do PR #5 `docs/update-handoff-roadmap`).
+- **Próxima etapa planejada (3D)**: integrar `assets/models/omnimic.glb` no widget flutuante `OmniMicWidget` (`WebView2` + `Three.js` preservando o visual PS1/Win95 ou pipeline de renderização dedicado), substituindo o renderizador procedural provisório em `src/mascot_3d.py`.
 - **Dependência externa principal**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal na primeira execução).
 - **Observações técnicas conhecidas no código atual**:
   - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).
