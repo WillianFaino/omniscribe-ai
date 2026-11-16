@@ -75,9 +75,11 @@ omniscribe-ai/
   - **Detecção automática de modo**:
     - **Mono Presencial (`1 canal`, `16000 Hz`)**: quando `_loopback_stream is None` e `_mic_stream is not None`.
     - **Estéreo Online (`2 canais`, `16000 Hz`)**: Canal Esquerdo (L) = Loopback / Sistema, Canal Direito (R) = Microfone local.
+  - **Gravação Oficial Contínua (`session_wav_path`)**: ao informar `session_wav_path` em `start_recording`, os frames inéditos de cada bloco (descontado o prefixo de overlap de 2,5s) são gravados continuamente em `atas_reunioes/AAAA/MM/audio_YYYYMMDD_HHMM[_titulo].wav` para reprodução e reprocessamento futuro.
+  - **Reprocessamento (`slice_wav_for_retranscription`)**: fatia um `.wav` salvo em blocos de `16 kHz` (com corte em pausa natural ±2s e overlap de 2,5s) mantendo o áudio original intacto.
 
 ### 3.3 Pipeline Gemini (`src/gemini_service.py`)
-- `start_session(title, context_notes="")` cria `atas_reunioes/AAAA/MM/transcricao_YYYYMMDD_HHMM[_titulo].md` e `ata_executiva_YYYYMMDD_HHMM[_titulo].md`, extrai palavras-chave/glossário prioritário e inicia a thread `GeminiWorker`.
+- `start_session(title, context_notes="", source_audio_path=None)` cria `atas_reunioes/AAAA/MM/transcricao_YYYYMMDD_HHMM[_titulo].md`, `ata_executiva_YYYYMMDD_HHMM[_titulo].md` e define `audio_YYYYMMDD_HHMM[_titulo].wav` (via `get_session_audio_path()`), extrai palavras-chave/glossário prioritário e inicia a thread `GeminiWorker`.
 - Cada bloco WAV enfileirado (`enqueue_block`) passa por `_process_single_block`:
   1. Detecta automaticamente pelo cabeçalho `wave` se o WAV possui `1 canal` (selecionando `PRESENTIAL_TRANSCRIPTION_PROMPT` para diarização acústica em sala única com marcação `⚡ [Falas Sobrepostas]:`) ou `2 canais` (selecionando `TRANSCRIPTION_SYSTEM_PROMPT` estritamente separado L/R).
   2. Faz upload do `.wav` pela Files API (`self._client.files.upload`).
@@ -101,7 +103,8 @@ omniscribe-ai/
 - Modais auxiliares:
   - `ApiKeyModal`: configuração e persistência da `GEMINI_API_KEY` no `.env`.
   - `UsageModal`: visualização de requisições do dia, barra de cota Free Tier, tokens e custo estimado.
-  - `HistoryModal`: listagem e abertura de atas/transcrições salvas em `atas_reunioes/`.
+  - `HistoryModal`: listagem de atas (`.md`) e gravações oficiais em áudio (`.wav`, excluindo `temp_blocks`), permitindo visualizar documentos, abrir o áudio no player do sistema (`▶ Ouvir`) e iniciar re-transcrição.
+  - `RetranscribeModal` + `ZoomTranscriberApp.start_retranscription`: configura título, glossário/nomes, tamanho do bloco e re-processamento acústico sobre qualquer `.wav` salvo (ou selecionado no disco), gerando nova transcrição e nova Ata Executiva sem sobrescrever versões anteriores.
 
 ### 3.6 Mascote 3D OmniMic (`src/mascot_3d.py` e `src/mascot_widget.py`)
 - **Renderização (`OmniMic3DRenderer`)**: malha articulada `Mesh3D` (`OmniMic #03-A Ultra Low-Poly`) renderizada em software (`128x144` ampliada com `NEAREST` para `192x216`), usando Painter's Algorithm, backface culling e iluminação flat-shading estilo Windows 95.

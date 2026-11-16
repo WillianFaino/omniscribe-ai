@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -18,7 +19,12 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from audio_engine import AudioEngine, listar_dispositivos_audio
+from audio_engine import (
+    AudioEngine,
+    get_wav_info,
+    listar_dispositivos_audio,
+    slice_wav_for_retranscription,
+)
 from mascot_widget import OmniMicWidget
 from gemini_service import (
     GeminiService,
@@ -65,6 +71,150 @@ def open_folder_in_explorer(folder_path: Path) -> None:
             subprocess.run(["xdg-open", str(folder_path)], check=False)
     except Exception as e:
         logger.error(f"Erro ao abrir pasta {folder_path}: {e}")
+
+
+def open_file_in_os(file_path: Path) -> None:
+    """Abre um arquivo (ex.: .wav) no aplicativo padrão do sistema operacional."""
+    file_path = Path(file_path).resolve()
+    if not file_path.exists():
+        return
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(file_path))
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["open", str(file_path)], check=False)
+        else:
+            import subprocess
+            subprocess.run(["xdg-open", str(file_path)], check=False)
+    except Exception as e:
+        logger.error(f"Erro ao abrir arquivo {file_path}: {e}")
+
+
+def infer_title_from_audio_name(wav_path: Path) -> str:
+    """Extrai um título legível a partir do nome `audio_YYYYMMDD_HHMM_Titulo.wav`."""
+    stem = wav_path.stem
+    cleaned = re.sub(r"^audio_\d{8}_\d{4}_?", "", stem)
+    cleaned = re.sub(r"_+", " ", cleaned).strip()
+    return cleaned or stem
+
+
+class RetranscribeModal(ctk.CTkToplevel):
+    """Modal para configurar e iniciar a re-transcrição de um áudio WAV salvo."""
+
+    def __init__(self, parent: "ZoomTranscriberApp", wav_path: Path):
+        super().__init__(parent)
+        self.parent = parent
+        self.wav_path = Path(wav_path).resolve()
+        self.wav_info = get_wav_info(self.wav_path)
+
+        self.title("Re-transcrever Áudio Salvo - OmniScribe AI")
+        self.geometry("560x390")
+        self.resizable(False, False)
+        self.configure(fg_color=THEME_BG)
+        self.grab_set()
+
+        ch_label = "Mono (Presencial)" if self.wav_info["channels"] == 1 else "Estéreo (Online L/R)"
+        dur_label = format_seconds(self.wav_info["duration_seconds"])
+        sr_hz = self.wav_info["sample_rate"]
+
+        lbl_head = ctk.CTkLabel(
+            self,
+            text="🔄 Re-transcrever Reunião Gravada",
+            font=ctk.CTkFont(size=17, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        )
+        lbl_head.pack(anchor="w", padx=24, pady=(18, 4))
+
+        lbl_meta = ctk.CTkLabel(
+            self,
+            text=f"Arquivo: {self.wav_path.name}  •  Duração: {dur_label}  •  {ch_label} ({sr_hz} Hz)",
+            font=ctk.CTkFont(size=12),
+            text_color="#38bdf8",
+        )
+        lbl_meta.pack(anchor="w", padx=24, pady=(0, 14))
+
+        form = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
+        form.pack(fill="x", padx=24, pady=4)
+        form.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(form, text="Título da Nova Ata:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=14, pady=(14, 8), sticky="w"
+        )
+        self.entry_title = ctk.CTkEntry(form, fg_color=THEME_INPUT, border_color=THEME_BORDER)
+        self.entry_title.insert(0, infer_title_from_audio_name(self.wav_path))
+        self.entry_title.grid(row=0, column=1, padx=14, pady=(14, 8), sticky="ew")
+
+        ctk.CTkLabel(form, text="Glossário / Nomes:", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=14, pady=8, sticky="w"
+        )
+        self.entry_context = ctk.CTkEntry(
+            form,
+            placeholder_text="Ex: Participantes: Carlos, Juliana; Termos: BI, Deploy, WASAPI",
+            fg_color=THEME_INPUT,
+            border_color=THEME_BORDER,
+        )
+        self.entry_context.grid(row=1, column=1, padx=14, pady=8, sticky="ew")
+
+        ctk.CTkLabel(form, text="Tamanho do Bloco:", font=ctk.CTkFont(weight="bold")).grid(
+            row=2, column=0, padx=14, pady=8, sticky="w"
+        )
+        self.opt_block = ctk.CTkOptionMenu(form, values=["1 minuto", "3 minutos", "5 minutos"])
+        self.opt_block.set("3 minutos")
+        self.opt_block.grid(row=2, column=1, padx=14, pady=8, sticky="w")
+
+        self.chk_enhance = ctk.CTkCheckBox(
+            form,
+            text="Aplicar filtro passa-alta (~80 Hz) e normalização dinâmica (recomendado para WAV externo)",
+            font=ctk.CTkFont(size=12),
+        )
+        if sr_hz != 16000:
+            self.chk_enhance.select()
+        self.chk_enhance.grid(row=3, column=0, columnspan=2, padx=14, pady=(6, 14), sticky="w")
+
+        lbl_note = ctk.CTkLabel(
+            self,
+            text="Serão gerados novos arquivos transcricao_*.md e ata_executiva_*.md sem sobrescrever os anteriores.",
+            font=ctk.CTkFont(size=11),
+            text_color=THEME_TEXT_DIM,
+        )
+        lbl_note.pack(anchor="w", padx=24, pady=(8, 10))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=24, pady=(4, 16))
+
+        ctk.CTkButton(
+            btn_row,
+            text="Cancelar",
+            fg_color="#4b5563",
+            hover_color="#374151",
+            width=110,
+            command=self.destroy,
+        ).pack(side="left")
+
+        ctk.CTkButton(
+            btn_row,
+            text="🔄 Iniciar Re-transcrição e Nova Ata",
+            fg_color=COLOR_SUCCESS,
+            hover_color="#059669",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            command=self._confirm,
+        ).pack(side="right")
+
+    def _confirm(self) -> None:
+        title = self.entry_title.get().strip() or infer_title_from_audio_name(self.wav_path)
+        context_notes = self.entry_context.get().strip()
+        block_str = self.opt_block.get()
+        block_seconds = 60 if "1" in block_str else (300 if "5" in block_str else 180)
+        apply_enh = bool(self.chk_enhance.get())
+        self.destroy()
+        self.parent.start_retranscription(
+            wav_path=self.wav_path,
+            title=title,
+            context_notes=context_notes,
+            block_seconds=block_seconds,
+            apply_enhancement=apply_enh,
+        )
 
 
 class ApiKeyModal(ctk.CTkToplevel):
@@ -301,7 +451,7 @@ class HistoryModal(ctk.CTkToplevel):
 
         lbl_sub = ctk.CTkLabel(
             top_frame,
-            text="Selecione qualquer ata executiva ou transcrição salva para visualizar imediatamente no aplicativo.",
+            text="Visualize atas/transcrições salvas, ouça gravações oficiais em áudio (.wav) ou re-transcreva para gerar uma nova Ata.",
             font=ctk.CTkFont(size=12),
             text_color=THEME_TEXT_MUTED,
         )
@@ -318,7 +468,7 @@ class HistoryModal(ctk.CTkToplevel):
 
         btn_browse = ctk.CTkButton(
             bot_frame,
-            text="📂 Procurar outro arquivo (.md)...",
+            text="📂 Procurar arquivo (.md / .wav)...",
             font=ctk.CTkFont(size=12),
             fg_color="#374151",
             hover_color="#4b5563",
@@ -346,7 +496,7 @@ class HistoryModal(ctk.CTkToplevel):
         if not atas_root.exists():
             lbl_empty = ctk.CTkLabel(
                 self.scroll_list,
-                text="Nenhuma ata gravada ainda.\nSuas gravações concluídas aparecerão aqui automaticamente!",
+                text="Nenhuma ata ou gravação salva ainda.\nSuas gravações concluídas aparecerão aqui automaticamente!",
                 font=ctk.CTkFont(size=13),
                 text_color="#9ca3af",
                 justify="center",
@@ -354,13 +504,18 @@ class HistoryModal(ctk.CTkToplevel):
             lbl_empty.pack(pady=40)
             return
 
-        files = [f for f in atas_root.glob("**/*.md") if f.is_file() and not f.name.startswith(".")]
+        files = [
+            f
+            for pattern in ("**/*.md", "**/*.wav")
+            for f in atas_root.glob(pattern)
+            if f.is_file() and not f.name.startswith(".") and "temp_blocks" not in f.parts
+        ]
         files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
 
         if not files:
             lbl_empty = ctk.CTkLabel(
                 self.scroll_list,
-                text="Nenhum arquivo Markdown encontrado na pasta de atas.",
+                text="Nenhuma ata ou gravação (.md/.wav) encontrada na pasta de atas.",
                 font=ctk.CTkFont(size=13),
                 text_color="#9ca3af",
             )
@@ -370,20 +525,40 @@ class HistoryModal(ctk.CTkToplevel):
         for f in files:
             self._create_item_card(f)
 
+    @staticmethod
+    def _find_matching_audio(md_path: Path) -> Optional[Path]:
+        """Localiza o arquivo `audio_*.wav` correspondente a uma ata/transcrição na mesma pasta."""
+        name = md_path.name
+        if name.startswith("ata_executiva_"):
+            cand = md_path.parent / (name.replace("ata_executiva_", "audio_", 1).rsplit(".", 1)[0] + ".wav")
+            if cand.exists():
+                return cand
+        elif name.startswith("transcricao_"):
+            cand = md_path.parent / (name.replace("transcricao_", "audio_", 1).rsplit(".", 1)[0] + ".wav")
+            if cand.exists():
+                return cand
+        return None
+
     def _create_item_card(self, file_path: Path) -> None:
         filename = file_path.name
+        is_wav = file_path.suffix.lower() == ".wav"
         is_ata = "ata_executiva" in filename
         is_transc = "transcricao" in filename
 
         mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
         date_str = mtime.strftime("%d/%m/%Y às %H:%M")
+        size_bytes = file_path.stat().st_size
+        size_label = f"{size_bytes / (1024 * 1024):.1f} MB" if size_bytes >= 1024 * 1024 else f"{size_bytes // 1024 + 1} KB"
 
         card = ctk.CTkFrame(self.scroll_list, fg_color="#182235", border_color=THEME_BORDER, border_width=1, corner_radius=8)
         card.pack(fill="x", padx=4, pady=4)
         card.grid_columnconfigure(1, weight=1)
 
-        # Ícone e Badge
-        if is_ata:
+        if is_wav:
+            badge_text = "ÁUDIO WAV"
+            badge_color = "#0891b2"
+            icon = "🔊"
+        elif is_ata:
             badge_text = "ATA EXECUTIVA"
             badge_color = "#059669"
             icon = "📋"
@@ -403,7 +578,7 @@ class HistoryModal(ctk.CTkToplevel):
             text_color="#ffffff",
             fg_color=badge_color,
             corner_radius=4,
-            width=110,
+            width=116,
             height=24,
         )
         badge.grid(row=0, column=0, padx=10, pady=10, sticky="w")
@@ -419,25 +594,74 @@ class HistoryModal(ctk.CTkToplevel):
         )
         lbl_fname.pack(anchor="w")
 
+        if is_wav:
+            w_info = get_wav_info(file_path)
+            ch_txt = "Mono" if w_info["channels"] == 1 else "Estéreo L/R"
+            meta_txt = f"Duração: {format_seconds(w_info['duration_seconds'])} • {ch_txt} ({w_info['sample_rate']} Hz) • {size_label} • {date_str}"
+        else:
+            meta_txt = f"Modificado em: {date_str} • Tamanho: {size_label}"
+
         lbl_date = ctk.CTkLabel(
             info_frame,
-            text=f"Modificado em: {date_str} • Tamanho: {file_path.stat().st_size // 1024 + 1} KB",
+            text=meta_txt,
             font=ctk.CTkFont(size=11),
             text_color="#9ca3af",
         )
         lbl_date.pack(anchor="w")
 
-        btn_load = ctk.CTkButton(
-            card,
-            text="Visualizar",
-            width=100,
-            height=30,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#3b82f6",
-            hover_color="#1d4ed8",
-            command=lambda p=file_path: self._select_file(p),
-        )
-        btn_load.grid(row=0, column=2, padx=12, pady=10, sticky="e")
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.grid(row=0, column=2, padx=10, pady=10, sticky="e")
+
+        if is_wav:
+            ctk.CTkButton(
+                actions,
+                text="▶ Ouvir",
+                width=74,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#374151",
+                hover_color="#4b5563",
+                command=lambda p=file_path: open_file_in_os(p),
+            ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                actions,
+                text="🔄 Re-transcrever",
+                width=126,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#0891b2",
+                hover_color="#0e7490",
+                command=lambda p=file_path: self._open_retranscribe(p),
+            ).pack(side="left")
+        else:
+            paired_wav = self._find_matching_audio(file_path)
+            if paired_wav is not None:
+                ctk.CTkButton(
+                    actions,
+                    text="🔄 Áudio",
+                    width=80,
+                    height=30,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color="#0891b2",
+                    hover_color="#0e7490",
+                    command=lambda p=paired_wav: self._open_retranscribe(p),
+                ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                actions,
+                text="Visualizar",
+                width=96,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#3b82f6",
+                hover_color="#1d4ed8",
+                command=lambda p=file_path: self._select_file(p),
+            ).pack(side="left")
+
+    def _open_retranscribe(self, wav_path: Path) -> None:
+        self.destroy()
+        RetranscribeModal(self.parent, wav_path)
 
     def _select_file(self, file_path: Path) -> None:
         self.parent.load_document(file_path)
@@ -447,12 +671,21 @@ class HistoryModal(ctk.CTkToplevel):
         atas_root = get_base_dir() / "atas_reunioes"
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="Selecione um arquivo de Ata ou Transcrição",
+            title="Selecione uma Ata (.md) ou Gravação (.wav)",
             initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
-            filetypes=[("Documentos Markdown", "*.md"), ("Todos os Arquivos", "*.*")],
+            filetypes=[
+                ("Atas e Gravações", "*.md *.wav"),
+                ("Gravações WAV", "*.wav"),
+                ("Documentos Markdown", "*.md"),
+                ("Todos os Arquivos", "*.*"),
+            ],
         )
         if chosen:
-            self._select_file(Path(chosen))
+            chosen_path = Path(chosen)
+            if chosen_path.suffix.lower() == ".wav":
+                self._open_retranscribe(chosen_path)
+            else:
+                self._select_file(chosen_path)
 
 
 class ZoomTranscriberApp(ctk.CTk):
@@ -466,8 +699,9 @@ class ZoomTranscriberApp(ctk.CTk):
         self.minsize(960, 700)
         self.configure(fg_color=THEME_BG)
 
-        # Estado da gravação
+        # Estado da gravação / re-transcrição
         self.is_recording = False
+        self.is_retranscribing = False
         self.recording_start_time = 0.0
         self.block_count = 0
 
@@ -645,9 +879,21 @@ class ZoomTranscriberApp(ctk.CTk):
         self.opt_block_duration.set("3 minutos")
         self.opt_block_duration.grid(row=1, column=3, padx=(6, 14), pady=8, sticky="ew")
 
-        # Linha 2: Checkboxes de Controle de Áudio
+        # Linha 2: Glossário / Nomes opcionais para diarização e vocabulário técnico
+        lbl_context = ctk.CTkLabel(config_frame, text="Glossário / Nomes:", font=ctk.CTkFont(weight="bold"))
+        lbl_context.grid(row=2, column=0, padx=(14, 8), pady=(2, 8), sticky="w")
+
+        self.entry_context_notes = ctk.CTkEntry(
+            config_frame,
+            placeholder_text="Opcional — Ex: Participantes: Carlos, Juliana; Siglas: OmniScribe, BI, WASAPI",
+            fg_color=THEME_INPUT,
+            border_color=THEME_BORDER,
+        )
+        self.entry_context_notes.grid(row=2, column=1, columnspan=3, padx=(6, 14), pady=(2, 8), sticky="ew")
+
+        # Linha 3: Checkboxes de Controle de Áudio
         toggles_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        toggles_frame.grid(row=2, column=0, columnspan=4, padx=14, pady=(4, 12), sticky="ew")
+        toggles_frame.grid(row=3, column=0, columnspan=4, padx=14, pady=(2, 12), sticky="ew")
 
         self.chk_noise_gate = ctk.CTkCheckBox(
             toggles_frame,
@@ -1068,8 +1314,24 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui("[AVISO] Chave salva no .env, mas validação com Gemini falhou.")
 
     # ---------------- CONTROLE DE GRAVAÇÃO ----------------
+    def _set_session_controls_state(self, idle: bool, recording: bool = False) -> None:
+        """Alterna o estado habilitado/desabilitado dos controles durante gravação ou re-transcrição."""
+        field_state = "normal" if idle else "disabled"
+        self.btn_start.configure(state=field_state)
+        self.btn_stop.configure(state="normal" if recording else "disabled")
+        self.opt_loopback.configure(state=field_state)
+        self.opt_mic.configure(state=field_state)
+        self.btn_refresh_devices.configure(state=field_state)
+        self.opt_block_duration.configure(state=field_state)
+        self.entry_meeting_title.configure(state=field_state)
+        self.entry_context_notes.configure(state=field_state)
+
     def _start_recording(self) -> None:
         """Inicia a gravação da reunião e o pipeline de transcrição."""
+        if self.is_recording or self.is_retranscribing:
+            self._log_gui("[AVISO] Já existe uma gravação ou re-transcrição em andamento.")
+            return
+
         # Validação da chave Gemini
         if not self.gemini_service.api_key:
             self._open_api_key_dialog()
@@ -1094,15 +1356,18 @@ class ZoomTranscriberApp(ctk.CTk):
         elif "5" in block_dur_str:
             block_seconds = 300
 
-        # Inicia sessão no Gemini Service
+        # Inicia sessão no Gemini Service (gerando caminhos de transcrição, ata e áudio oficial)
         meeting_title = self.entry_meeting_title.get().strip() or "Reunião de Alinhamento"
-        transc_path, _ = self.gemini_service.start_session(meeting_title)
+        context_notes = self.entry_context_notes.get().strip()
+        self.gemini_service.start_session(meeting_title, context_notes=context_notes)
+        session_audio_path = self.gemini_service.get_session_audio_path()
 
-        # Inicia captura no motor de áudio
+        # Inicia captura no motor de áudio com gravação contínua oficial
         started = self.audio_engine.start_recording(
             loopback_index=loop_index,
             mic_index=mic_index,
             block_duration_seconds=block_seconds,
+            session_wav_path=session_audio_path,
         )
 
         if not started:
@@ -1114,13 +1379,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.block_count = 0
 
         # Atualiza estado visual dos controles
-        self.btn_start.configure(state="disabled")
-        self.btn_stop.configure(state="normal")
-        self.opt_loopback.configure(state="disabled")
-        self.opt_mic.configure(state="disabled")
-        self.btn_refresh_devices.configure(state="disabled")
-        self.opt_block_duration.configure(state="disabled")
-        self.entry_meeting_title.configure(state="disabled")
+        self._set_session_controls_state(idle=False, recording=True)
 
         self.lbl_status.configure(text="● Gravando...", text_color="#ef4444")
         self.txt_transcription.delete("1.0", "end")
@@ -1134,6 +1393,8 @@ class ZoomTranscriberApp(ctk.CTk):
             self.mascot.start_listening()
 
         self._log_gui(f"[GRAVAÇÃO] Iniciada: Bloco={block_seconds}s, Loopback={selected_loop_str}, Mic={selected_mic_str}")
+        if session_audio_path:
+            self._log_gui(f"[ÁUDIO] Gravação oficial será salva em: {session_audio_path.name}")
 
     def _stop_recording(self) -> None:
         """Interrompe a gravação e solicita a consolidação da Ata Executiva."""
@@ -1159,24 +1420,119 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui("[GRAVAÇÃO] Encerrando motor de áudio e descarregando buffers...")
             self.audio_engine.stop_recording(finalize_block=True)
 
+            saved_audio = self.audio_engine.session_wav_path
+            if saved_audio and saved_audio.exists():
+                self._log_gui(f"[ÁUDIO] Gravação oficial preservada em: {saved_audio.name}")
+
             self._log_gui("[GRAVAÇÃO] Finalizando fila do Gemini e gerando Ata...")
             self.gemini_service.finish_session()
 
-            def reenable_controls():
-                self.btn_start.configure(state="normal")
-                self.opt_loopback.configure(state="normal")
-                self.opt_mic.configure(state="normal")
-                self.btn_refresh_devices.configure(state="normal")
-                self.opt_block_duration.configure(state="normal")
-                self.entry_meeting_title.configure(state="normal")
-
-            self.after(0, reenable_controls)
+            self.after(0, lambda: self._set_session_controls_state(idle=True))
             self._log_gui("[GRAVAÇÃO] Gravação finalizada com sucesso.")
 
         except Exception as e:
             logger.exception(f"Erro ao encerrar gravação: {e}")
             self._log_gui(f"[ERRO] Falha no encerramento da gravação: {e}")
-            self.after(0, lambda: self.btn_start.configure(state="normal"))
+            self.after(0, lambda: self._set_session_controls_state(idle=True))
+
+    # ---------------- RE-TRANSCRIÇÃO DE ÁUDIO SALVO ----------------
+    def start_retranscription(
+        self,
+        wav_path: Path,
+        title: str,
+        context_notes: str = "",
+        block_seconds: int = 180,
+        apply_enhancement: Optional[bool] = None,
+    ) -> None:
+        """Fatia um WAV salvo anteriormente, re-transcreve via Gemini e gera uma nova Ata Executiva."""
+        if self.is_recording or self.is_retranscribing:
+            self._log_gui("[AVISO] Aguarde a conclusão da gravação ou re-transcrição atual.")
+            return
+
+        if not self.gemini_service.api_key:
+            self._open_api_key_dialog()
+            return
+
+        wav_path = Path(wav_path).resolve()
+        if not wav_path.exists():
+            self._log_gui(f"[ERRO] Arquivo de áudio não encontrado: {wav_path}")
+            return
+
+        self.is_retranscribing = True
+        self.block_count = 0
+        self._set_session_controls_state(idle=False, recording=False)
+
+        self.lbl_status.configure(text="🔄 Re-transcrevendo áudio...", text_color="#38bdf8")
+        self.txt_transcription.delete("1.0", "end")
+        self.txt_transcription.insert(
+            "end",
+            f"=== Re-transcrição de Áudio Salvo: {title} ===\n"
+            f"Arquivo fonte: {wav_path.name}\n\n",
+        )
+        self.tabview.set("Transcrição ao Vivo")
+
+        if self.mascot:
+            self.mascot.trigger_transcribing(4.0, "Re-transcrevendo gravação salva...")
+
+        threading.Thread(
+            target=self._async_retranscribe_worker,
+            args=(wav_path, title, context_notes, block_seconds, apply_enhancement),
+            daemon=True,
+            name="AsyncRetranscribeWorker",
+        ).start()
+
+    def _async_retranscribe_worker(
+        self,
+        wav_path: Path,
+        title: str,
+        context_notes: str,
+        block_seconds: int,
+        apply_enhancement: Optional[bool],
+    ) -> None:
+        """Executa o fatiamento do WAV e acompanha a fila de re-transcrição sem travar a interface."""
+        try:
+            self._log_gui(f"[RE-TRANSCRIÇÃO] Iniciando reprocessamento de: {wav_path.name}")
+            transc_path, minute_path = self.gemini_service.start_session(
+                title=title,
+                context_notes=context_notes,
+                source_audio_path=wav_path,
+            )
+            self._log_gui(f"[RE-TRANSCRIÇÃO] Novos arquivos: {transc_path.name} / {minute_path.name}")
+
+            blocks = slice_wav_for_retranscription(
+                source_wav_path=wav_path,
+                temp_dir=self.temp_dir,
+                block_duration_seconds=block_seconds,
+                apply_enhancement=apply_enhancement,
+            )
+
+            if not blocks:
+                self._log_gui("[AVISO] Arquivo WAV vazio ou sem frames válidos para re-transcrever.")
+                self.gemini_service.finish_session()
+            else:
+                self._log_gui(f"[RE-TRANSCRIÇÃO] Áudio dividido em {len(blocks)} bloco(s) com overlap de 2,5s.")
+                for b_path, b_idx, b_start, b_end, b_final in blocks:
+                    self.gemini_service.enqueue_block(
+                        wav_path=b_path,
+                        block_index=b_idx,
+                        start_seconds=b_start,
+                        end_seconds=b_end,
+                        is_final=b_final,
+                    )
+                self.gemini_service.finish_session()
+
+            worker = getattr(self.gemini_service, "_worker_thread", None)
+            if worker and worker.is_alive():
+                worker.join()
+
+            self._log_gui("[RE-TRANSCRIÇÃO] Re-transcrição e nova Ata Executiva concluídas!")
+
+        except Exception as e:
+            logger.exception(f"Erro na re-transcrição de {wav_path}: {e}")
+            self._log_gui(f"[ERRO] Falha ao re-transcrever {wav_path.name}: {e}")
+        finally:
+            self.is_retranscribing = False
+            self.after(0, lambda: self._set_session_controls_state(idle=True))
 
     def _update_timer(self) -> None:
         """Atualiza o contador de tempo decorrido da reunião a cada segundo."""

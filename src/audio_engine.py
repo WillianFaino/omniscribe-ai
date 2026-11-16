@@ -336,6 +336,151 @@ def enhance_speech_audio(samples_int16: np.ndarray, sample_rate: int) -> np.ndar
     return np.clip(np.round(y * 32768.0), -32768, 32767).astype(np.int16)
 
 
+def get_wav_info(wav_path: Path) -> Dict:
+    """Lê metadados básicos de um arquivo WAV (canais, taxa, duração e tamanho)."""
+    wav_path = Path(wav_path)
+    info = {
+        "channels": 1,
+        "sample_rate": TARGET_SAMPLE_RATE,
+        "frames": 0,
+        "duration_seconds": 0.0,
+        "size_bytes": wav_path.stat().st_size if wav_path.exists() else 0,
+    }
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            ch = int(wf.getnchannels())
+            sr = int(wf.getframerate())
+            frames = int(wf.getnframes())
+            info["channels"] = ch
+            info["sample_rate"] = sr
+            info["frames"] = frames
+            info["duration_seconds"] = (frames / float(sr)) if sr > 0 else 0.0
+    except Exception as e:
+        logger.debug(f"Não foi possível ler metadados de {wav_path}: {e}")
+    return info
+
+
+def _find_pause_cut_frame(audio_array: np.ndarray, nominal_frame: int, sample_rate: int, search_window_sec: float = 2.0) -> int:
+    """Encontra o ponto de menor energia (~150 ms) ao redor do corte nominal para não partir palavras."""
+    total_frames = len(audio_array)
+    radius = int(round(search_window_sec * sample_rate))
+    start = max(0, nominal_frame - radius)
+    end = min(total_frames, nominal_frame + radius)
+    win = max(1, int(round(0.15 * sample_rate)))
+    if end - start <= win:
+        return min(total_frames, nominal_frame)
+
+    segment = audio_array[start:end].astype(np.float32)
+    if segment.ndim > 1:
+        mono_energy = np.mean(segment * segment, axis=1)
+    else:
+        mono_energy = segment * segment
+
+    # Soma móvel via cumsum em O(N) para localizar a janela de 150 ms mais silenciosa
+    csum = np.cumsum(np.insert(mono_energy, 0, 0.0))
+    win_energy = csum[win:] - csum[:-win]
+    best_rel = int(np.argmin(win_energy)) + win // 2
+    return min(total_frames, max(1, start + best_rel))
+
+
+def slice_wav_for_retranscription(
+    source_wav_path: Path,
+    temp_dir: Path,
+    block_duration_seconds: int = 180,
+    overlap_seconds: float = BLOCK_OVERLAP_SECONDS,
+    apply_enhancement: Optional[bool] = None,
+) -> List[Tuple[Path, int, float, float, bool]]:
+    """Fatia um WAV salvo em blocos temporários (16 kHz) com pausa inteligente e overlap de 2,5s para re-transcrição.
+
+    Retorna uma lista de tuplas: `(block_wav_path, block_index, start_seconds, end_seconds, is_final)`.
+    """
+    source_wav_path = Path(source_wav_path)
+    temp_dir = Path(temp_dir)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+
+    with wave.open(str(source_wav_path), "rb") as wf:
+        nchannels = int(wf.getnchannels())
+        sampwidth = int(wf.getsampwidth())
+        orig_rate = int(wf.getframerate())
+        total_frames = int(wf.getnframes())
+        if sampwidth != 2:
+            raise ValueError(f"Formato PCM não suportado ({sampwidth * 8}-bit); esperado WAV 16-bit.")
+        if total_frames == 0 or orig_rate <= 0:
+            return []
+        raw_bytes = wf.readframes(total_frames)
+
+    samples = np.frombuffer(raw_bytes, dtype=np.int16)
+    if nchannels > 1:
+        samples = samples.reshape(-1, nchannels)
+    out_channels = 1 if nchannels == 1 else 2
+    if nchannels > 2:
+        # Preserva apenas L/R se houver mais canais
+        samples = samples[:, :2]
+
+    should_enhance = (orig_rate != TARGET_SAMPLE_RATE) if apply_enhancement is None else bool(apply_enhancement)
+    step_frames = max(orig_rate * 10, int(round(max(30, block_duration_seconds) * orig_rate)))
+    ov_frames = int(round(max(0.0, overlap_seconds) * orig_rate))
+    min_tail_frames = int(round(5.0 * orig_rate))
+
+    tasks: List[Tuple[Path, int, float, float, bool]] = []
+    timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+    cursor = 0
+    block_idx = 0
+
+    while cursor < total_frames:
+        block_idx += 1
+        start_frame = max(0, cursor - ov_frames) if block_idx > 1 else 0
+        nominal_end = cursor + step_frames
+
+        if nominal_end >= total_frames or (total_frames - nominal_end) <= min_tail_frames:
+            end_frame = total_frames
+        else:
+            end_frame = _find_pause_cut_frame(samples, nominal_end, orig_rate)
+            if end_frame <= cursor + orig_rate * 5:
+                end_frame = min(total_frames, nominal_end)
+
+        is_final = end_frame >= total_frames
+        chunk = samples[start_frame:end_frame]
+
+        if out_channels == 1:
+            mono = chunk if chunk.ndim == 1 else chunk[:, 0]
+            out_16k = resample_to_16k(mono, orig_rate, TARGET_SAMPLE_RATE)
+            if should_enhance:
+                out_16k = enhance_speech_audio(out_16k, TARGET_SAMPLE_RATE)
+            pcm_bytes = out_16k.tobytes()
+        else:
+            ch_l = resample_to_16k(chunk[:, 0], orig_rate, TARGET_SAMPLE_RATE)
+            ch_r = resample_to_16k(chunk[:, 1], orig_rate, TARGET_SAMPLE_RATE)
+            if should_enhance:
+                ch_l = enhance_speech_audio(ch_l, TARGET_SAMPLE_RATE)
+                ch_r = enhance_speech_audio(ch_r, TARGET_SAMPLE_RATE)
+            tlen = max(len(ch_l), len(ch_r))
+            stereo = np.empty((tlen, 2), dtype=np.int16)
+            stereo[:, 0] = ch_l[:tlen] if len(ch_l) >= tlen else np.pad(ch_l, (0, tlen - len(ch_l)))
+            stereo[:, 1] = ch_r[:tlen] if len(ch_r) >= tlen else np.pad(ch_r, (0, tlen - len(ch_r)))
+            pcm_bytes = stereo.tobytes()
+
+        block_path = temp_dir / f"retrans_{timestamp_str}_{block_idx:03d}.wav"
+        with wave.open(str(block_path), "wb") as bwf:
+            bwf.setnchannels(out_channels)
+            bwf.setsampwidth(2)
+            bwf.setframerate(TARGET_SAMPLE_RATE)
+            bwf.writeframes(pcm_bytes)
+
+        tasks.append(
+            (
+                block_path,
+                block_idx,
+                start_frame / float(orig_rate),
+                end_frame / float(orig_rate),
+                is_final,
+            )
+        )
+        cursor = end_frame
+
+    return tasks
+
+
 def calc_rms_normalized(samples_int16: np.ndarray) -> float:
     """Calcula o valor RMS normalizado de 0.0 a 1.0 com escala logarítmica para visualização precisa em VU meters."""
     if len(samples_int16) == 0:
@@ -404,6 +549,11 @@ class AudioEngine:
         self._block_index = 0
         self._start_time = 0.0
 
+        self.session_wav_path: Optional[Path] = None
+        self._session_wave_writer: Optional[wave.Wave_write] = None
+        self._session_wav_channels: int = 0
+        self._session_frames_written: int = 0
+
     def set_noise_gate(self, enabled: bool) -> None:
         """Habilita ou desabilita o noise gate dinamicamente."""
         self.noise_gate_enabled = enabled
@@ -419,6 +569,7 @@ class AudioEngine:
         loopback_index: Optional[int],
         mic_index: Optional[int],
         block_duration_seconds: int = 180,
+        session_wav_path: Optional[Path] = None,
     ) -> bool:
         """Inicia a gravação sincronizada (suporta Loopback, Microfone ou Ambos)."""
         if self.is_recording:
@@ -447,6 +598,10 @@ class AudioEngine:
         self._last_mic_chunk_time = 0.0
         self._mic_gate_gain = 1.0
         self._mic_gate_last_open_time = time.time()
+        self.session_wav_path = Path(session_wav_path) if session_wav_path else None
+        self._session_wave_writer = None
+        self._session_wav_channels = 0
+        self._session_frames_written = 0
 
         try:
             self._pyaudio_instance = pyaudio.PyAudio()
@@ -762,13 +917,24 @@ class AudioEngine:
             return None
 
         # Injeta buffer circular de 2,5s do bloco anterior para continuidade semântica na fronteira
+        ov_dur_loop = (len(self._overlap_loop_raw) / float(self._loopback_rate)) if self._loopback_rate > 0 else 0.0
+        ov_dur_mic = (len(self._overlap_mic_raw) / float(self._mic_rate)) if self._mic_rate > 0 else 0.0
+        prev_ov_duration = max(ov_dur_loop, ov_dur_mic)
+        ov_frames_16k = int(round(prev_ov_duration * TARGET_SAMPLE_RATE))
+
         if len(self._overlap_loop_raw) > 0:
             loop_raw = np.concatenate([self._overlap_loop_raw, new_loop_raw]) if len(new_loop_raw) > 0 else self._overlap_loop_raw
+        elif prev_ov_duration > 0.0 and len(new_loop_raw) > 0 and self._loopback_rate > 0:
+            pad_ov = np.zeros(int(round(prev_ov_duration * self._loopback_rate)), dtype=np.int16)
+            loop_raw = np.concatenate([pad_ov, new_loop_raw])
         else:
             loop_raw = new_loop_raw
 
         if len(self._overlap_mic_raw) > 0:
             mic_raw = np.concatenate([self._overlap_mic_raw, new_mic_raw]) if len(new_mic_raw) > 0 else self._overlap_mic_raw
+        elif prev_ov_duration > 0.0 and len(new_mic_raw) > 0 and self._mic_rate > 0:
+            pad_ov = np.zeros(int(round(prev_ov_duration * self._mic_rate)), dtype=np.int16)
+            mic_raw = np.concatenate([pad_ov, new_mic_raw])
         else:
             mic_raw = new_mic_raw
 
@@ -807,6 +973,7 @@ class AudioEngine:
             if target_len == 0:
                 return None
             nchannels = 1
+            session_pcm_array = mic_16k
             pcm_bytes = mic_16k.tobytes()
         else:
             # Modo Reunião Online (Estéreo): L = Loopback, R = Microfone
@@ -847,7 +1014,11 @@ class AudioEngine:
             stereo_array[:, 0] = loop_16k
             stereo_array[:, 1] = mic_16k
             nchannels = 2
+            session_pcm_array = stereo_array
             pcm_bytes = stereo_array.tobytes()
+
+        # Anexa apenas os frames novos (sem repetir os 2,5s de overlap) na gravação oficial da sessão
+        self._append_to_session_wav(session_pcm_array, nchannels, ov_frames_16k)
 
         try:
             with wave.open(str(wav_path), "wb") as wf:
@@ -875,6 +1046,57 @@ class AudioEngine:
             logger.exception(f"Erro ao salvar arquivo WAV do bloco {block_num}: {e}")
             return None
 
+    def _append_to_session_wav(self, pcm_array: np.ndarray, nchannels: int, skip_prefix_frames: int) -> None:
+        """Grava continuamente apenas os frames inéditos do bloco no arquivo WAV oficial da reunião."""
+        if not self.session_wav_path or len(pcm_array) == 0:
+            return
+
+        start_idx = max(0, min(len(pcm_array), int(skip_prefix_frames)))
+        delta_frames = pcm_array[start_idx:]
+        if len(delta_frames) == 0:
+            return
+
+        try:
+            if self._session_wave_writer is None:
+                self.session_wav_path.parent.mkdir(parents=True, exist_ok=True)
+                wf = wave.open(str(self.session_wav_path), "wb")
+                wf.setnchannels(nchannels)
+                wf.setsampwidth(2)
+                wf.setframerate(TARGET_SAMPLE_RATE)
+                self._session_wave_writer = wf
+                self._session_wav_channels = nchannels
+
+            if self._session_wav_channels == nchannels:
+                self._session_wave_writer.writeframes(delta_frames.tobytes())
+                self._session_frames_written += len(delta_frames)
+        except Exception as e:
+            logger.exception(f"Erro ao gravar áudio contínuo da sessão em {self.session_wav_path}: {e}")
+
+    def _close_session_wave_writer(self) -> Optional[Path]:
+        """Fecha e finaliza o cabeçalho RIFF do arquivo WAV oficial da reunião."""
+        saved_path = self.session_wav_path
+        writer = self._session_wave_writer
+        self._session_wave_writer = None
+
+        if writer is not None:
+            try:
+                writer.close()
+                logger.info(
+                    f"Gravação oficial da reunião salva em: {saved_path} "
+                    f"({self._session_frames_written / float(TARGET_SAMPLE_RATE):.1f}s)"
+                )
+            except Exception as e:
+                logger.warning(f"Erro ao fechar WAV da sessão {saved_path}: {e}")
+
+        if saved_path and self._session_frames_written == 0 and saved_path.exists():
+            try:
+                saved_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+
+        return saved_path if (saved_path and saved_path.exists()) else None
+
     def stop_recording(self, finalize_block: bool = True) -> None:
         """Interrompe a captura de áudio com encerramento seguro e não bloqueante."""
         if not self.is_recording:
@@ -896,6 +1118,8 @@ class AudioEngine:
                 self._create_block_file(is_final=True)
             except Exception as e:
                 logger.exception(f"Erro ao empacotar bloco final: {e}")
+
+        self._close_session_wave_writer()
 
         # Fecha streams com verificações de estado seguro
         for attr in ["_loopback_stream", "_mic_stream"]:
