@@ -1,7 +1,7 @@
 # Handoff Técnico — OmniScribe AI
 
 > Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **OmniScribe AI**.
-> Última atualização: 15/11/2026 (baseado no commit `bbcacbd` na branch `main`).
+> Última atualização: 16/11/2026 (baseado no commit `18b42c8` na branch `main`).
 
 ---
 
@@ -106,6 +106,18 @@ omniscribe-ai/
   - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
   - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
   - Shader retrô PS1 em grupo `NG_PS1_Bayer4x4` (`ShaderToRGB -> Ambient Occlusion -> Layer Weight -> matriz Bayer 4x4` em `GridScale = 384.0`) alinhado ao compositor `Compositor_PS1` (`Pixelate Size = 2`), além de `Outline_Solidify` com backface culling e geometria refinada (expressão calma/preguiçosa nos olhos e sobrancelhas, luvas 3D com `3` costuras dorsais visíveis na vista traseira e facetas radiais na base inferior).
+  - **Diretriz consolidada (não repetir abordagens descartadas):** sprites 2D estáticos animados por escala/rotação, modelagem manual por `LatheGeometry` em Three.js e geradores web gratuitos com limite de exportação/polígonos foram descartados em favor do modelo próprio em **Blender** com *rigging* esquelético real.
+
+#### Catálogo de Estados & Balão de Fala (Estilo Windows XP)
+| Estado | Comportamento Esperado | Balão de Fala (`#FFFFE1`) |
+|---|---|---|
+| **Idle / Boas-vindas** | Acena com a mão articulada, pisca os olhos grandes, balança levemente | *"Olá! Pronto para anotar sua próxima reunião?"* |
+| **Ouvindo ao Vivo** | Inclina-se atento; indicador LED ciano pulsa conforme o `RMS` do áudio | *"Captando áudio... pode deixar comigo!"* |
+| **Transcrevendo / Gerando Ata** | Segura o bloquinho pautado amarelo e anota rápido com a caneta | *"Organizando os pontos principais na ata..."* |
+| **Falas Sobrepostas / Ruído** | Arregala os olhos, arqueia as sobrancelhas e foca atento | *"Opa, muita gente falando junto! Redobrando a atenção."* |
+| **Ata Concluída** | Ergue o troféu estrela dourado com brilhos comemorativos | *"Ata executiva pronta e salva!"* |
+| **Alerta de Cota / Sem Chave** | Alerta visual apontando para o rastreador de API / configuração | *"Atenção: limite da API próximo ou chave não configurada."* |
+| **Inativo / Soneca** | Fecha os olhos aos poucos após 45s e cochila; acorda ao clicar | Menu de clique direito: *"Ocultar assistente"* |
 
 ---
 
@@ -122,16 +134,44 @@ python src/main.py
 
 ### Build e Distribuição (Windows)
 - **`build_exe.bat`**: oferece backup automático de `atas_reunioes/` e `.env` de builds anteriores e gera:
-  - `[1]` `--onedir` (`dist/OmniScribe/OmniScribe.exe`) — inicialização rápida.
+  - `[1]` `--onedir` (`dist/OmniScribe/OmniScribe.exe`) — inicialização rápida (`~3,25s` / `APP_STARTUP_MS=3252`) e build enxuto reduzido para **1.155 arquivos** via `--hidden-import "google.genai"` e exclusões no PyInstaller.
   - `[2]` `--onefile` (`dist/OmniScribe.exe`).
   - `[3]` Instalador nativo (`dist/OmniScribe_Setup.exe` + cópia na raiz).
-- **`build_installer.bat`**: gera diretamente `dist/OmniScribe_Setup.exe` compilando `src/installer_native.cs` via `csc.exe` (.NET Framework 4.x) e acoplando `dist/app_data.zip` via `make_package.py` com assinatura `OMNISCRB`.
+- **`build_installer.bat`**: gera diretamente `dist/OmniScribe_Setup.exe` (**54,37 MB**, abertura verificada em **819 ms** sem extração prévia em `%TEMP%`) compilando `src/installer_native.cs` via `csc.exe` (.NET Framework 4.x) e acoplando `dist/app_data.zip` via `make_package.py` com assinatura `OMNISCRB`.
 
 ---
 
-## 5. Estado Atual do Git e Pontos de Atenção
+## 5. Roadmap Futuro (Ideias Mapeadas)
 
-- **Branch base**: `main` (sincronizada com `origin/main` no commit `bbcacbd`), com desenvolvimento do mascote 3D em `feature/omnimic-tpose-3d-assets`.
+### A. Melhorias na Captação de Voz & Diarização
+1. **Identificação Consistente por Voz (Speaker Profiles):** *voice enrollment* rápido (5–10s) ou confirmação interativa no primeiro trecho para manter nomes fixos dos participantes ao longo de toda a reunião.
+2. **Separação Estrita de Canais (Mic vs. Loopback):** processar/marcar explicitamente o canal do microfone (`Você`) separado do áudio do sistema (`Remoto`) antes do envio ao Gemini, melhorando a precisão em falas sobrepostas (*cross-talk*).
+3. **VAD (Voice Activity Detection) + Overlap nos Cortes:** cortar blocos em pausas naturais de fala com pequena janela de sobreposição para não perder sílabas nas fronteiras.
+4. **Pré-processamento de Áudio:** normalização automática de ganho (AGC) e filtro de ruído ambiente.
+
+### B. Melhorias na Interface (UI/UX)
+1. **Renomeação em Lote de Participantes:** clicar em `Participante A` na transcrição e substituir todas as ocorrências pelo nome real na transcrição e na ata.
+2. **VU Meter Duplo ao Vivo:** barras independentes para **Microfone** e **Sistema**, com alerta suave caso o microfone esteja mutado durante uma reunião ativa.
+3. **Busca, Filtros e Exportação Avançada:** pesquisa no histórico de gravações e exportação direta em `.md`, `.docx` e `.pdf`.
+4. **Player Sincronizado com Timestamps:** clicar em uma fala da transcrição para reproduzir exatamente aquele trecho do áudio salvo.
+
+### C. Transcrição Híbrida (Modo Online e Totalmente Offline)
+1. **Seletor de Modo na Interface (`Online` vs. `Offline`):** alternância rápida para reuniões confidenciais, ambientes sem internet ou cota esgotada.
+2. **Pipeline Local Offline:** ASR local (`faster-whisper` ou `whisper.cpp` com modelos quantizados sob demanda), diarização local (`Mic` vs. `Loopback` + embeddings locais) e geração de ata via LLM local (`Ollama` / `llama.cpp`) ou fallback estruturado.
+
+### D. Armazenamento Portátil em SQLite por Gravação
+1. **Arquivo Único Autocontido (`.omniscribe` / `.db`):** empacotar áudio comprimido (**Opus/Ogg** ou **MP3** em `BLOB`), metadados, segmentos de transcrição e ata executiva em um único banco SQLite por reunião (reduzindo espaço em disco frente a `.wav` bruto).
+2. **Compartilhamento Direto:** permitir abrir e compartilhar o arquivo `.omniscribe`/`.db` entre usuários do OmniScribe com áudio, transcrição e ata completos.
+
+### E. Upload e Transcrição de Arquivos de Áudio e Vídeo
+1. **Importação Direta (Drag-and-Drop / Seletor):** aceitar `.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`, `.mp3`, `.wav`, `.m4a`, `.ogg` e `.flac` pela tela inicial.
+2. **Extração & Segmentação Automática:** converter a faixa de áudio (via `ffmpeg` ou `av`/`pydub`) para chunks de `16 kHz` com barra de progresso e aplicar o mesmo pipeline de diarização e geração de Ata Executiva.
+
+---
+
+## 6. Estado Atual do Git e Pontos de Atenção
+
+- **Branch base**: `main` (sincronizada com `origin/main` no commit `18b42c8`, após o merge do PR #4 `feature/omnimic-tpose-3d-assets`).
 - **Próxima etapa planejada (3D)**: rigging/armature, weight painting e animações de estados sobre `OmniMic_TPOSE` em `assets/blender/omnimic_tpose.blend`, além da eventual integração/exportação para o app.
 - **Dependência externa principal**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal na primeira execução).
 - **Observações técnicas conhecidas no código atual**:
