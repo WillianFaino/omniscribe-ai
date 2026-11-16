@@ -481,6 +481,65 @@ def slice_wav_for_retranscription(
     return tasks
 
 
+def record_mic_sample(
+    mic_index: int,
+    duration_seconds: float = 5.0,
+    target_rate: int = TARGET_SAMPLE_RATE,
+) -> np.ndarray:
+    """Captura uma amostra curta do microfone selecionado em 16 kHz mono int16 (para cadastro de voiceprint)."""
+    if pyaudio is None:
+        raise RuntimeError("PyAudio/pyaudiowpatch não está instalado no ambiente.")
+
+    p = pyaudio.PyAudio()
+    stream = None
+    chunks: List[np.ndarray] = []
+    try:
+        mic_info = p.get_device_info_by_index(int(mic_index))
+        mic_channels = max(1, min(int(mic_info.get("maxInputChannels", 1)), 2))
+        mic_rate = int(mic_info.get("defaultSampleRate", 44100))
+
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=mic_channels,
+            rate=mic_rate,
+            input=True,
+            input_device_index=int(mic_index),
+            frames_per_buffer=DEFAULT_CHUNK_FRAMES,
+        )
+
+        total_frames_needed = max(DEFAULT_CHUNK_FRAMES, int(round(max(1.0, duration_seconds) * mic_rate)))
+        frames_read = 0
+        while frames_read < total_frames_needed:
+            data = stream.read(DEFAULT_CHUNK_FRAMES, exception_on_overflow=False)
+            if not data:
+                continue
+            arr = np.frombuffer(data, dtype=np.int16)
+            if mic_channels > 1:
+                arr = arr.reshape(-1, mic_channels).mean(axis=1).astype(np.int16)
+            chunks.append(arr)
+            frames_read += len(arr)
+
+        if not chunks:
+            return np.empty(0, dtype=np.int16)
+        raw = np.concatenate(chunks)[:total_frames_needed]
+        return resample_to_16k(raw, mic_rate, target_rate)
+    finally:
+        if stream is not None:
+            try:
+                if hasattr(stream, "is_active") and stream.is_active():
+                    stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
 def calc_rms_normalized(samples_int16: np.ndarray) -> float:
     """Calcula o valor RMS normalizado de 0.0 a 1.0 com escala logarítmica para visualização precisa em VU meters."""
     if len(samples_int16) == 0:

@@ -6,4 +6,5 @@ python-dotenv>=1.0.0
 pyinstaller>=6.0.0
 Pillow>=10.0.0
 packaging>=23.0
+sherpa-onnx>=2.0.0
 

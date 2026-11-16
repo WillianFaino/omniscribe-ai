@@ -25,6 +25,8 @@ temp_blocks/
 
 # Atas e Transcrições Geradas Localmente
 atas_reunioes/
+models/
+*.onnx
 .vscode/
 .idea/
 

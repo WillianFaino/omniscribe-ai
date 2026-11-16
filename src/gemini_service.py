@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
 from usage_tracker import UsageTracker
+from voiceprint_service import VoiceprintService
 
 # Importação defensiva do python-dotenv com parser nativo de fallback
 try:
@@ -295,8 +296,9 @@ Transcrição completa da reunião:
         if not defer_init:
             self._init_client()
 
-        # Rastreador persistente de cotas e custos
+        # Rastreador persistente de cotas e custos e serviço local de biometria vocal
         self.tracker = UsageTracker(get_base_dir() / "atas_reunioes")
+        self.voiceprint_service = VoiceprintService()
 
         # Metadados da reunião atual
         self.meeting_title = ""
@@ -505,12 +507,15 @@ Transcrição completa da reunião:
                 keywords.append(token)
 
         notes = (self.context_notes or "").strip()
-        if not keywords and not notes:
+        enrolled_names = [p["name"] for p in self.voiceprint_service.list_profiles()] if self.voiceprint_service else []
+        if not keywords and not notes and not enrolled_names:
             return ""
 
         parts = ["\n--- VOCABULÁRIO PRIORITÁRIO E CONTEXTO DA REUNIÃO ---"]
         if self.meeting_title:
             parts.append(f"Título da Reunião: {self.meeting_title}")
+        if enrolled_names:
+            parts.append(f"Locutores com Voiceprint Cadastrado: {', '.join(enrolled_names)}")
         if keywords:
             parts.append(f"Palavras-chave do Título: {', '.join(keywords)}")
         if notes:
@@ -568,6 +573,19 @@ Transcrição completa da reunião:
                     )
 
             vocab_section = self._build_priority_vocabulary_section()
+            biometric_hints = ""
+            if self.voiceprint_service and self.voiceprint_service.is_ready_for_matching():
+                try:
+                    biometric_hints = self.voiceprint_service.analyze_wav_speakers(
+                        task.wav_path,
+                        block_offset_seconds=task.start_seconds,
+                    )
+                    if biometric_hints:
+                        self._log(f"[BIOMETRIA] Bloco #{task.block_index}: pistas de voiceprint geradas localmente.")
+                except Exception as bio_err:
+                    logger.warning(f"Falha ao executar biometria vocal no bloco #{task.block_index}: {bio_err}")
+                    biometric_hints = ""
+
             overlap_hint = (
                 "Nota: Os ~2,5s iniciais deste bloco podem sobrepor o final do bloco anterior; mantenha a continuidade natural sem cortar palavras.\n"
                 if task.block_index > 1
@@ -578,6 +596,7 @@ Transcrição completa da reunião:
                 f"Trecho temporal: {time_range}.\n"
                 f"{overlap_hint}"
                 f"{vocab_section}"
+                f"{biometric_hints}"
                 f"{recent_context}"
                 f"{system_prompt}"
             )
