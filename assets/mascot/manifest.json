@@ -1,0 +1,46 @@
+{
+  "frame_w": 160,
+  "frame_h": 180,
+  "animations": {
+    "idle": {
+      "frames": 24,
+      "fps": 12,
+      "file": "idle.png"
+    },
+    "greeting": {
+      "frames": 20,
+      "fps": 12,
+      "file": "greeting.png"
+    },
+    "listening": {
+      "frames": 20,
+      "fps": 12,
+      "file": "listening.png"
+    },
+    "transcribing": {
+      "frames": 20,
+      "fps": 12,
+      "file": "transcribing.png"
+    },
+    "celebrating": {
+      "frames": 20,
+      "fps": 12,
+      "file": "celebrating.png"
+    },
+    "warning": {
+      "frames": 16,
+      "fps": 12,
+      "file": "warning.png"
+    },
+    "sleeping": {
+      "frames": 24,
+      "fps": 12,
+      "file": "sleeping.png"
+    },
+    "spin": {
+      "frames": 16,
+      "fps": 14,
+      "file": "spin.png"
+    }
+  }
+}

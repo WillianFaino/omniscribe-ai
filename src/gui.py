@@ -6,6 +6,7 @@ visualização em abas (Transcrição ao Vivo, Ata Executiva, Logs) e configura�
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -37,59 +38,61 @@ from gemini_service import (
 
 logger = logging.getLogger("omniscribe.gui")
 
-# Configurações globais de aparência
+# Configurações globais de aparência (Escuro como padrão; alternável para Claro em tempo real)
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
-# Paleta de Cores Profissional (Regra 60-30-10 & Dark Obsidian Theme)
-THEME_BG = "#0b0f19"          # Fundo base escuro e sofisticado (60%)
-THEME_CARD = "#111827"        # Containers e cartões modulares (30%)
-THEME_BORDER = "#1f2937"      # Bordas sutis de contraste elegante
-THEME_INPUT = "#070b12"       # Entradas e editores de texto
-THEME_TEXT_PRIMARY = "#f8fafc"# Texto primário
-THEME_TEXT_MUTED = "#94a3b8"  # Texto secundário suave
-THEME_TEXT_DIM = "#64748b"    # Metadados e rótulos discretos
+# Paleta Semântica Dupla (Light, Dark) compatível nativamente com CustomTkinter
+THEME_BG = ("#f1f5f9", "#0b0f19")            # Fundo base (60%)
+THEME_CARD = ("#ffffff", "#111827")          # Cartões principais (30%)
+THEME_CARD_ALT = ("#f8fafc", "#182235")      # Cartões secundários / itens
+THEME_BORDER = ("#cbd5e1", "#1f2937")        # Bordas sutis
+THEME_INPUT = ("#f8fafc", "#070b12")         # Campos de entrada e texto
+THEME_TEXT_PRIMARY = ("#0f172a", "#f8fafc")  # Texto principal
+THEME_TEXT_MUTED = ("#475569", "#94a3b8")    # Texto secundário
+THEME_TEXT_DIM = ("#64748b", "#64748b")      # Metadados discretos
 
-COLOR_PRIMARY = "#3b82f6"     # Azul vibrante (10% acento)
-COLOR_SUCCESS = "#10b981"     # Esmeralda para Iniciar Gravação
-COLOR_DANGER = "#ef4444"      # Vermelho Carmesim para Parar
-COLOR_INDIGO = "#6366f1"      # Índigo para Consumo & Cotas
-COLOR_PURPLE = "#8b5cf6"      # Roxo para Histórico
+BTN_NEUTRAL = ("#e2e8f0", "#1f2937")
+BTN_NEUTRAL_HOVER = ("#cbd5e1", "#374151")
+
+COLOR_PRIMARY = ("#2563eb", "#3b82f6")       # Acento principal (10%)
+COLOR_PRIMARY_HOVER = ("#1d4ed8", "#2563eb")
+COLOR_PRIMARY_SOFT = ("#dbeafe", "#1e293b")
+COLOR_SUCCESS = ("#059669", "#10b981")
+COLOR_DANGER = ("#dc2626", "#ef4444")
+COLOR_TEAL = ("#0e7490", "#0891b2")
+COLOR_INDIGO = ("#4f46e5", "#6366f1")
+COLOR_PURPLE = ("#7c3aed", "#8b5cf6")
+
+
+def _open_path_in_os(target_path: Path) -> None:
+    """Abre um arquivo ou pasta no aplicativo/explorador padrão do sistema operacional."""
+    resolved = Path(target_path).resolve()
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(resolved))
+        elif sys.platform == "darwin":
+            import subprocess
+            subprocess.run(["open", str(resolved)], check=False)
+        else:
+            import subprocess
+            subprocess.run(["xdg-open", str(resolved)], check=False)
+    except Exception as e:
+        logger.error(f"Erro ao abrir caminho {resolved}: {e}")
 
 
 def open_folder_in_explorer(folder_path: Path) -> None:
-    """Abre uma pasta no Windows Explorer ou explorador padrão do sistema operacional."""
-    folder_path = folder_path.resolve()
-    folder_path.mkdir(parents=True, exist_ok=True)
-    try:
-        if sys.platform == "win32":
-            os.startfile(str(folder_path))
-        elif sys.platform == "darwin":
-            import subprocess
-            subprocess.run(["open", str(folder_path)], check=False)
-        else:
-            import subprocess
-            subprocess.run(["xdg-open", str(folder_path)], check=False)
-    except Exception as e:
-        logger.error(f"Erro ao abrir pasta {folder_path}: {e}")
+    """Abre uma pasta no explorador padrão do sistema operacional."""
+    folder = Path(folder_path).resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    _open_path_in_os(folder)
 
 
 def open_file_in_os(file_path: Path) -> None:
     """Abre um arquivo (ex.: .wav) no aplicativo padrão do sistema operacional."""
-    file_path = Path(file_path).resolve()
-    if not file_path.exists():
-        return
-    try:
-        if sys.platform == "win32":
-            os.startfile(str(file_path))
-        elif sys.platform == "darwin":
-            import subprocess
-            subprocess.run(["open", str(file_path)], check=False)
-        else:
-            import subprocess
-            subprocess.run(["xdg-open", str(file_path)], check=False)
-    except Exception as e:
-        logger.error(f"Erro ao abrir arquivo {file_path}: {e}")
+    fpath = Path(file_path).resolve()
+    if fpath.exists():
+        _open_path_in_os(fpath)
 
 
 def infer_title_from_audio_name(wav_path: Path) -> str:
@@ -308,9 +311,10 @@ class VoiceProfilesModal(ctk.CTkToplevel):
         self.enroll_tabs = ctk.CTkTabview(
             self,
             fg_color=THEME_CARD,
-            segmented_button_fg_color="#070b12",
+            segmented_button_fg_color=THEME_INPUT,
             segmented_button_selected_color=COLOR_PRIMARY,
-            segmented_button_unselected_color="#1f2937",
+            segmented_button_unselected_color=BTN_NEUTRAL,
+            text_color=THEME_TEXT_PRIMARY,
             height=245,
         )
         self.enroll_tabs.grid(row=2, column=0, padx=20, pady=6, sticky="ew")
@@ -333,8 +337,8 @@ class VoiceProfilesModal(ctk.CTkToplevel):
             tab_mic,
             text="",
             font=ctk.CTkFont(size=13, weight="bold"),
-            fg_color="#0f172a",
-            text_color="#e2e8f0",
+            fg_color=THEME_CARD_ALT,
+            text_color=THEME_TEXT_PRIMARY,
             corner_radius=8,
             wraplength=640,
             justify="center",
@@ -511,7 +515,7 @@ class VoiceProfilesModal(ctk.CTkToplevel):
         )
         self.btn_export_all.pack(side="left")
 
-        self.scroll_profiles = ctk.CTkScrollableFrame(list_card, fg_color="#0f172a", corner_radius=8)
+        self.scroll_profiles = ctk.CTkScrollableFrame(list_card, fg_color=THEME_INPUT, corner_radius=8)
         self.scroll_profiles.grid(row=1, column=0, padx=12, pady=(0, 10), sticky="nsew")
         self.scroll_profiles.grid_columnconfigure(0, weight=1)
 
@@ -577,14 +581,14 @@ class VoiceProfilesModal(ctk.CTkToplevel):
             return
 
         for prof in profiles:
-            row = ctk.CTkFrame(self.scroll_profiles, fg_color="#182235", corner_radius=6)
+            row = ctk.CTkFrame(self.scroll_profiles, fg_color=THEME_CARD_ALT, border_color=THEME_BORDER, border_width=1, corner_radius=6)
             row.pack(fill="x", padx=4, pady=3)
             row.grid_columnconfigure(0, weight=1)
             meta = (
                 f"👤 {prof['name']}   •   {prof['samples_count']} amostra(s)   •   "
                 f"{prof['total_speech_seconds']:.1f}s de fala útil"
             )
-            ctk.CTkLabel(row, text=meta, font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(
+            ctk.CTkLabel(row, text=meta, font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME_TEXT_PRIMARY, anchor="w").grid(
                 row=0, column=0, padx=10, pady=8, sticky="w"
             )
             row_btns = ctk.CTkFrame(row, fg_color="transparent")
@@ -1058,6 +1062,189 @@ class UsageModal(ctk.CTkToplevel):
         lbl_val.grid(row=row, column=1, padx=14, pady=5, sticky="e")
 
 
+def find_matching_audio(md_path: Path) -> Optional[Path]:
+    """Localiza o arquivo `audio_*.wav` correspondente a uma ata/transcrição na mesma pasta."""
+    name = md_path.name
+    if name.startswith("ata_executiva_"):
+        cand = md_path.parent / (name.replace("ata_executiva_", "audio_", 1).rsplit(".", 1)[0] + ".wav")
+        if cand.exists():
+            return cand
+    elif name.startswith("transcricao_"):
+        cand = md_path.parent / (name.replace("transcricao_", "audio_", 1).rsplit(".", 1)[0] + ".wav")
+        if cand.exists():
+            return cand
+    return None
+
+
+def render_history_cards_into(
+    scroll_container: ctk.CTkScrollableFrame,
+    filter_mode: str,
+    on_view_md,
+    on_retranscribe_wav,
+) -> None:
+    """Popula um container rolável com cartões de gravações .wav, atas e transcrições."""
+    for child in scroll_container.winfo_children():
+        child.destroy()
+
+    atas_root = get_base_dir() / "atas_reunioes"
+    if not atas_root.exists():
+        ctk.CTkLabel(
+            scroll_container,
+            text="Nenhuma ata ou gravação salva ainda.\nSuas reuniões aparecerão aqui automaticamente!",
+            font=ctk.CTkFont(size=13),
+            text_color=THEME_TEXT_MUTED,
+            justify="center",
+        ).pack(pady=40)
+        return
+
+    patterns = ("**/*.md", "**/*.wav")
+    if "Áudios" in filter_mode:
+        patterns = ("**/*.wav",)
+    elif "Atas" in filter_mode or "Transcrições" in filter_mode:
+        patterns = ("**/*.md",)
+
+    files = [
+        f
+        for pat in patterns
+        for f in atas_root.glob(pat)
+        if f.is_file() and not f.name.startswith(".") and "temp_blocks" not in f.parts
+    ]
+    if "Atas" in filter_mode:
+        files = [f for f in files if "ata_executiva" in f.name]
+    elif "Transcrições" in filter_mode:
+        files = [f for f in files if "transcricao" in f.name]
+
+    files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+
+    if not files:
+        ctk.CTkLabel(
+            scroll_container,
+            text="Nenhum item encontrado para este filtro.",
+            font=ctk.CTkFont(size=13),
+            text_color=THEME_TEXT_MUTED,
+        ).pack(pady=40)
+        return
+
+    for file_path in files:
+        filename = file_path.name
+        is_wav = file_path.suffix.lower() == ".wav"
+        is_ata = "ata_executiva" in filename
+        is_transc = "transcricao" in filename
+
+        mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+        date_str = mtime.strftime("%d/%m/%Y às %H:%M")
+        size_bytes = file_path.stat().st_size
+        size_label = f"{size_bytes / (1024 * 1024):.1f} MB" if size_bytes >= 1024 * 1024 else f"{size_bytes // 1024 + 1} KB"
+
+        card = ctk.CTkFrame(
+            scroll_container,
+            fg_color=THEME_CARD_ALT,
+            border_color=THEME_BORDER,
+            border_width=1,
+            corner_radius=8,
+        )
+        card.pack(fill="x", padx=4, pady=4)
+        card.grid_columnconfigure(1, weight=1)
+
+        if is_wav:
+            badge_text, badge_color, icon = "ÁUDIO WAV", COLOR_TEAL, "🔊"
+        elif is_ata:
+            badge_text, badge_color, icon = "ATA EXECUTIVA", COLOR_SUCCESS, "📋"
+        elif is_transc:
+            badge_text, badge_color, icon = "TRANSCRIÇÃO", COLOR_PRIMARY, "🎙️"
+        else:
+            badge_text, badge_color, icon = "DOCUMENTO", ("#64748b", "#4b5563"), "📄"
+
+        ctk.CTkLabel(
+            card,
+            text=f"{icon} {badge_text}",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#ffffff",
+            fg_color=badge_color,
+            corner_radius=5,
+            width=116,
+            height=24,
+        ).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+
+        info_frame = ctk.CTkFrame(card, fg_color="transparent")
+        info_frame.grid(row=0, column=1, padx=6, pady=8, sticky="w")
+
+        ctk.CTkLabel(
+            info_frame,
+            text=filename,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(anchor="w")
+
+        if is_wav:
+            w_info = get_wav_info(file_path)
+            ch_txt = "Mono" if w_info["channels"] == 1 else "Estéreo L/R"
+            meta_txt = (
+                f"Duração: {format_seconds(w_info['duration_seconds'])} • {ch_txt} "
+                f"({w_info['sample_rate']} Hz) • {size_label} • {date_str}"
+            )
+        else:
+            meta_txt = f"Modificado em: {date_str} • Tamanho: {size_label}"
+
+        ctk.CTkLabel(
+            info_frame,
+            text=meta_txt,
+            font=ctk.CTkFont(size=11),
+            text_color=THEME_TEXT_MUTED,
+        ).pack(anchor="w")
+
+        actions = ctk.CTkFrame(card, fg_color="transparent")
+        actions.grid(row=0, column=2, padx=10, pady=10, sticky="e")
+
+        if is_wav:
+            ctk.CTkButton(
+                actions,
+                text="▶ Ouvir",
+                width=74,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=BTN_NEUTRAL,
+                hover_color=BTN_NEUTRAL_HOVER,
+                text_color=THEME_TEXT_PRIMARY,
+                command=lambda p=file_path: open_file_in_os(p),
+            ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                actions,
+                text="🔄 Re-transcrever",
+                width=126,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLOR_TEAL,
+                hover_color="#0e7490",
+                command=lambda p=file_path: on_retranscribe_wav(p),
+            ).pack(side="left")
+        else:
+            paired_wav = find_matching_audio(file_path)
+            if paired_wav is not None:
+                ctk.CTkButton(
+                    actions,
+                    text="🔄 Áudio",
+                    width=80,
+                    height=30,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color=COLOR_TEAL,
+                    hover_color="#0e7490",
+                    command=lambda p=paired_wav: on_retranscribe_wav(p),
+                ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                actions,
+                text="Visualizar",
+                width=96,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLOR_PRIMARY,
+                hover_color=COLOR_PRIMARY_HOVER,
+                command=lambda p=file_path: on_view_md(p),
+            ).pack(side="left")
+
+
 class HistoryModal(ctk.CTkToplevel):
     """Modal visual para listar, buscar e carregar atas e transcrições anteriores."""
 
@@ -1128,174 +1315,12 @@ class HistoryModal(ctk.CTkToplevel):
         self._populate_list()
 
     def _populate_list(self) -> None:
-        base_dir = get_base_dir()
-        atas_root = base_dir / "atas_reunioes"
-
-        if not atas_root.exists():
-            lbl_empty = ctk.CTkLabel(
-                self.scroll_list,
-                text="Nenhuma ata ou gravação salva ainda.\nSuas gravações concluídas aparecerão aqui automaticamente!",
-                font=ctk.CTkFont(size=13),
-                text_color="#9ca3af",
-                justify="center",
-            )
-            lbl_empty.pack(pady=40)
-            return
-
-        files = [
-            f
-            for pattern in ("**/*.md", "**/*.wav")
-            for f in atas_root.glob(pattern)
-            if f.is_file() and not f.name.startswith(".") and "temp_blocks" not in f.parts
-        ]
-        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-
-        if not files:
-            lbl_empty = ctk.CTkLabel(
-                self.scroll_list,
-                text="Nenhuma ata ou gravação (.md/.wav) encontrada na pasta de atas.",
-                font=ctk.CTkFont(size=13),
-                text_color="#9ca3af",
-            )
-            lbl_empty.pack(pady=40)
-            return
-
-        for f in files:
-            self._create_item_card(f)
-
-    @staticmethod
-    def _find_matching_audio(md_path: Path) -> Optional[Path]:
-        """Localiza o arquivo `audio_*.wav` correspondente a uma ata/transcrição na mesma pasta."""
-        name = md_path.name
-        if name.startswith("ata_executiva_"):
-            cand = md_path.parent / (name.replace("ata_executiva_", "audio_", 1).rsplit(".", 1)[0] + ".wav")
-            if cand.exists():
-                return cand
-        elif name.startswith("transcricao_"):
-            cand = md_path.parent / (name.replace("transcricao_", "audio_", 1).rsplit(".", 1)[0] + ".wav")
-            if cand.exists():
-                return cand
-        return None
-
-    def _create_item_card(self, file_path: Path) -> None:
-        filename = file_path.name
-        is_wav = file_path.suffix.lower() == ".wav"
-        is_ata = "ata_executiva" in filename
-        is_transc = "transcricao" in filename
-
-        mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
-        date_str = mtime.strftime("%d/%m/%Y às %H:%M")
-        size_bytes = file_path.stat().st_size
-        size_label = f"{size_bytes / (1024 * 1024):.1f} MB" if size_bytes >= 1024 * 1024 else f"{size_bytes // 1024 + 1} KB"
-
-        card = ctk.CTkFrame(self.scroll_list, fg_color="#182235", border_color=THEME_BORDER, border_width=1, corner_radius=8)
-        card.pack(fill="x", padx=4, pady=4)
-        card.grid_columnconfigure(1, weight=1)
-
-        if is_wav:
-            badge_text = "ÁUDIO WAV"
-            badge_color = "#0891b2"
-            icon = "🔊"
-        elif is_ata:
-            badge_text = "ATA EXECUTIVA"
-            badge_color = "#059669"
-            icon = "📋"
-        elif is_transc:
-            badge_text = "TRANSCRIÇÃO"
-            badge_color = "#2563eb"
-            icon = "🎙️"
-        else:
-            badge_text = "DOCUMENTO"
-            badge_color = "#4b5563"
-            icon = "📄"
-
-        badge = ctk.CTkLabel(
-            card,
-            text=f"{icon} {badge_text}",
-            font=ctk.CTkFont(size=10, weight="bold"),
-            text_color="#ffffff",
-            fg_color=badge_color,
-            corner_radius=4,
-            width=116,
-            height=24,
+        render_history_cards_into(
+            self.scroll_list,
+            filter_mode="Tudo",
+            on_view_md=self._select_file,
+            on_retranscribe_wav=self._open_retranscribe,
         )
-        badge.grid(row=0, column=0, padx=10, pady=10, sticky="w")
-
-        info_frame = ctk.CTkFrame(card, fg_color="transparent")
-        info_frame.grid(row=0, column=1, padx=6, pady=8, sticky="w")
-
-        lbl_fname = ctk.CTkLabel(
-            info_frame,
-            text=filename,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#f3f4f6",
-        )
-        lbl_fname.pack(anchor="w")
-
-        if is_wav:
-            w_info = get_wav_info(file_path)
-            ch_txt = "Mono" if w_info["channels"] == 1 else "Estéreo L/R"
-            meta_txt = f"Duração: {format_seconds(w_info['duration_seconds'])} • {ch_txt} ({w_info['sample_rate']} Hz) • {size_label} • {date_str}"
-        else:
-            meta_txt = f"Modificado em: {date_str} • Tamanho: {size_label}"
-
-        lbl_date = ctk.CTkLabel(
-            info_frame,
-            text=meta_txt,
-            font=ctk.CTkFont(size=11),
-            text_color="#9ca3af",
-        )
-        lbl_date.pack(anchor="w")
-
-        actions = ctk.CTkFrame(card, fg_color="transparent")
-        actions.grid(row=0, column=2, padx=10, pady=10, sticky="e")
-
-        if is_wav:
-            ctk.CTkButton(
-                actions,
-                text="▶ Ouvir",
-                width=74,
-                height=30,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                fg_color="#374151",
-                hover_color="#4b5563",
-                command=lambda p=file_path: open_file_in_os(p),
-            ).pack(side="left", padx=(0, 6))
-
-            ctk.CTkButton(
-                actions,
-                text="🔄 Re-transcrever",
-                width=126,
-                height=30,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                fg_color="#0891b2",
-                hover_color="#0e7490",
-                command=lambda p=file_path: self._open_retranscribe(p),
-            ).pack(side="left")
-        else:
-            paired_wav = self._find_matching_audio(file_path)
-            if paired_wav is not None:
-                ctk.CTkButton(
-                    actions,
-                    text="🔄 Áudio",
-                    width=80,
-                    height=30,
-                    font=ctk.CTkFont(size=11, weight="bold"),
-                    fg_color="#0891b2",
-                    hover_color="#0e7490",
-                    command=lambda p=paired_wav: self._open_retranscribe(p),
-                ).pack(side="left", padx=(0, 6))
-
-            ctk.CTkButton(
-                actions,
-                text="Visualizar",
-                width=96,
-                height=30,
-                font=ctk.CTkFont(size=12, weight="bold"),
-                fg_color="#3b82f6",
-                hover_color="#1d4ed8",
-                command=lambda p=file_path: self._select_file(p),
-            ).pack(side="left")
 
     def _open_retranscribe(self, wav_path: Path) -> None:
         self.destroy()
@@ -1327,14 +1352,25 @@ class HistoryModal(ctk.CTkToplevel):
 
 
 class ZoomTranscriberApp(ctk.CTk):
-    """Aplicação Principal de Transcrição e Geração de Atas."""
+    """Aplicação Principal v2.0 com abas limpas, tema Escuro/Claro e mascote OmniMic atualizado."""
+
+    TAB_REC = "🎙️ Gravação"
+    TAB_ATA = "📋 Ata"
+    TAB_HIST = "🗂️ Histórico"
+    TAB_CFG = "⚙️ Config & Voz"
+
+    MODE_ONLINE = "🌐 Online (Sistema+Mic)"
+    MODE_PRESENCIAL = "🏢 Presencial (Só Mic)"
 
     def __init__(self):
         super().__init__()
 
+        self.theme_mode = self._load_theme_preference()
+        ctk.set_appearance_mode(self.theme_mode)
+
         self.title("OmniScribe AI - Universal Meeting Transcriber & Minute Generator")
-        self.geometry("1020x760")
-        self.minsize(960, 700)
+        self.geometry("1040x760")
+        self.minsize(960, 680)
         self.configure(fg_color=THEME_BG)
 
         # Estado da gravação / re-transcrição
@@ -1342,9 +1378,11 @@ class ZoomTranscriberApp(ctk.CTk):
         self.is_retranscribing = False
         self.recording_start_time = 0.0
         self.block_count = 0
+        self._logs_expanded = False
+        self._api_key_visible = False
 
         # Mapeamentos de hardware de áudio
-        self.loopback_map: Dict[str, int] = {}
+        self.loopback_map: Dict[str, Optional[int]] = {}
         self.mic_map: Dict[str, Optional[int]] = {}
 
         # Diretório temporário para blocos de áudio
@@ -1366,517 +1404,914 @@ class ZoomTranscriberApp(ctk.CTk):
             on_block_ready=self._handle_block_ready,
         )
 
-        # Constrói componentes da interface gráfica
+        # Constrói componentes da interface gráfica limpa v2.0
         self._build_ui()
 
         # Pinta a janela imediatamente antes de carregar áudio/SDK pesado
         self.update()
 
-        # Inicia temporizador de interface
         self._timer_running = False
-
-        # Carrega dispositivos WASAPI, cliente Gemini e validação de API key após renderização
         self.mascot: Optional[OmniMicWidget] = None
+
         self.after(60, self._refresh_audio_devices)
-        self.after(120, self.gemini_service._init_client)
+        self.after(120, self._deferred_init_services)
         self.after(200, self._check_initial_api_key)
         self.after(280, self._init_mascot)
 
+    @staticmethod
+    def _ui_settings_path() -> Path:
+        return get_base_dir() / "atas_reunioes" / "ui_settings.json"
+
+    def _load_theme_preference(self) -> str:
+        try:
+            cfg_path = self._ui_settings_path()
+            if cfg_path.exists():
+                data = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if str(data.get("theme", "")).lower() == "light":
+                    return "Light"
+        except Exception:
+            pass
+        return "Dark"
+
+    def _save_theme_preference(self) -> None:
+        try:
+            cfg_path = self._ui_settings_path()
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(json.dumps({"theme": self.theme_mode}, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _deferred_init_services(self) -> None:
+        self.gemini_service._init_client()
+        self._refresh_usage_panel()
+        self._refresh_voiceprint_summary()
+        self._update_hw_summary_label()
+
     def _build_ui(self) -> None:
-        """Constrói o layout responsivo e profissional da janela."""
+        """Constrói o layout minimalista com barra superior de 4 abas e alternador Escuro/Claro."""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(3, weight=1)  # Abas ocupam todo o espaço vertical restante dinamicamente
+        self.grid_rowconfigure(1, weight=1)
 
-        # ---------------- 1. CABEÇALHO SUPERIOR ----------------
-        header_frame = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
-        header_frame.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
-        header_frame.grid_columnconfigure(0, weight=1)
-
-        title_container = ctk.CTkFrame(header_frame, fg_color="transparent")
-        title_container.grid(row=0, column=0, padx=16, pady=10, sticky="w")
-
-        title_badge_row = ctk.CTkFrame(title_container, fg_color="transparent")
-        title_badge_row.pack(anchor="w")
-
-        lbl_app_title = ctk.CTkLabel(
-            title_badge_row,
-            text="🎙️ OmniScribe AI",
-            font=ctk.CTkFont(size=21, weight="bold"),
-            text_color=THEME_TEXT_PRIMARY,
+        # ---------------- 1. BARRA SUPERIOR MINIMALISTA ----------------
+        topbar = ctk.CTkFrame(
+            self,
+            fg_color=THEME_CARD,
+            border_color=THEME_BORDER,
+            border_width=1,
+            corner_radius=12,
+            height=60,
         )
-        lbl_app_title.pack(side="left")
+        topbar.grid(row=0, column=0, padx=16, pady=(12, 8), sticky="ew")
+        topbar.grid_columnconfigure(1, weight=1)
 
-        lbl_badge = ctk.CTkLabel(
-            title_badge_row,
-            text="PRO v1.2",
+        brand_box = ctk.CTkFrame(topbar, fg_color="transparent")
+        brand_box.grid(row=0, column=0, padx=16, pady=10, sticky="w")
+
+        ctk.CTkLabel(
+            brand_box,
+            text="🎙️ OmniScribe AI",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            brand_box,
+            text="v2.0",
             font=ctk.CTkFont(size=11, weight="bold"),
-            fg_color="#1e293b",
-            text_color="#38bdf8",
-            corner_radius=6,
+            fg_color=COLOR_PRIMARY_SOFT,
+            text_color=COLOR_PRIMARY,
+            corner_radius=8,
             padx=8,
             pady=2,
+        ).pack(side="left", padx=(8, 0))
+
+        self.nav_tabs = ctk.CTkSegmentedButton(
+            topbar,
+            values=[self.TAB_REC, self.TAB_ATA, self.TAB_HIST, self.TAB_CFG],
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=THEME_INPUT,
+            selected_color=COLOR_PRIMARY,
+            selected_hover_color=COLOR_PRIMARY_HOVER,
+            unselected_color=THEME_INPUT,
+            unselected_hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=34,
+            command=self._on_nav_change,
         )
-        lbl_badge.pack(side="left", padx=(10, 0))
+        self.nav_tabs.set(self.TAB_REC)
+        self.nav_tabs.grid(row=0, column=1, padx=12, pady=10)
 
-        lbl_app_subtitle = ctk.CTkLabel(
-            title_container,
-            text="Captura Dual WASAPI • Diarização Inteligente Multi-Voz • Atas Executivas com Gemini 2.5 Flash",
-            font=ctk.CTkFont(size=12),
-            text_color=THEME_TEXT_MUTED,
-        )
-        lbl_app_subtitle.pack(anchor="w", pady=(2, 0))
+        top_utils = ctk.CTkFrame(topbar, fg_color="transparent")
+        top_utils.grid(row=0, column=2, padx=16, pady=10, sticky="e")
 
-        header_actions = ctk.CTkFrame(header_frame, fg_color="transparent")
-        header_actions.grid(row=0, column=1, padx=16, pady=10, sticky="e")
-
-        self.btn_voiceprints = ctk.CTkButton(
-            header_actions,
-            text="🗣️ Perfis de Voz",
+        self.btn_theme_toggle = ctk.CTkButton(
+            top_utils,
+            text="☀️ Claro" if self.theme_mode == "Dark" else "🌙 Escuro",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#0891b2",
-            hover_color="#0e7490",
-            width=126,
-            command=self._open_voiceprints_modal,
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=92,
+            height=32,
+            corner_radius=8,
+            command=self._toggle_theme,
         )
-        self.btn_voiceprints.pack(side="left", padx=(0, 8))
+        self.btn_theme_toggle.pack(side="left", padx=(0, 8))
 
-        self.btn_header_history = ctk.CTkButton(
-            header_actions,
-            text="📜 Histórico",
+        self.btn_toggle_mascot = ctk.CTkButton(
+            top_utils,
+            text="🤖 OmniMic",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=COLOR_PURPLE,
-            hover_color="#7c3aed",
-            width=104,
-            command=self._open_history_modal,
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=102,
+            height=32,
+            corner_radius=8,
+            command=self._toggle_mascot,
         )
-        self.btn_header_history.pack(side="left", padx=(0, 8))
+        self.btn_toggle_mascot.pack(side="left")
 
-        self.btn_usage = ctk.CTkButton(
-            header_actions,
-            text="📊 Consumo & Cotas",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=COLOR_INDIGO,
-            hover_color="#4f46e5",
-            width=134,
-            command=self._open_usage_modal,
+        # ---------------- 2. CONTAINER DAS 4 PÁGINAS ----------------
+        self.page_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.page_container.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="nsew")
+        self.page_container.grid_columnconfigure(0, weight=1)
+        self.page_container.grid_rowconfigure(0, weight=1)
+
+        self.pages: Dict[str, ctk.CTkFrame] = {}
+        self._build_recording_page()
+        self._build_minutes_page()
+        self._build_history_page()
+        self._build_settings_page()
+
+        self._switch_tab(self.TAB_REC)
+
+    def _build_recording_page(self) -> None:
+        """Aba 1: Gravação limpa, focada apenas na reunião e transcrição ao vivo."""
+        page = ctk.CTkFrame(self.page_container, fg_color="transparent")
+        page.grid(row=0, column=0, sticky="nsew")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(2, weight=1)
+        self.pages[self.TAB_REC] = page
+
+        # Cartão de controle principal
+        sess_card = ctk.CTkFrame(
+            page, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
         )
-        self.btn_usage.pack(side="left", padx=(0, 8))
+        sess_card.grid(row=0, column=0, sticky="ew")
+        sess_card.grid_columnconfigure((0, 1), weight=1)
 
-        self.btn_config_key = ctk.CTkButton(
-            header_actions,
-            text="🔑 API Key",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=COLOR_PRIMARY,
-            hover_color="#2563eb",
-            width=98,
-            command=self._open_api_key_dialog,
-        )
-        self.btn_config_key.pack(side="left")
+        # Linha 0: Título, Glossário e Modo de Captação
+        inputs_row = ctk.CTkFrame(sess_card, fg_color="transparent")
+        inputs_row.grid(row=0, column=0, columnspan=2, padx=16, pady=(14, 10), sticky="ew")
+        inputs_row.grid_columnconfigure((0, 1), weight=1)
 
-        # ---------------- 2. CONFIGURAÇÕES & DISPOSITIVOS ----------------
-        config_frame = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
-        config_frame.grid(row=1, column=0, padx=16, pady=6, sticky="ew")
-        config_frame.grid_columnconfigure((1, 3), weight=1)
-
-        # Linha 0: Dispositivos de Áudio
-        lbl_loop = ctk.CTkLabel(config_frame, text="Áudio Sistema / Reunião (L):", font=ctk.CTkFont(weight="bold"))
-        lbl_loop.grid(row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w")
-
-        loop_box_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        loop_box_frame.grid(row=0, column=1, padx=6, pady=(12, 6), sticky="ew")
-        loop_box_frame.grid_columnconfigure(0, weight=1)
-
-        self.opt_loopback = ctk.CTkOptionMenu(loop_box_frame, values=["Procurando dispositivos..."])
-        self.opt_loopback.grid(row=0, column=0, sticky="ew")
-
-        self.btn_refresh_devices = ctk.CTkButton(
-            loop_box_frame,
-            text="↻",
-            width=36,
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#374151",
-            hover_color="#4b5563",
-            command=self._refresh_audio_devices,
-        )
-        self.btn_refresh_devices.grid(row=0, column=1, padx=(6, 0))
-
-        lbl_mic = ctk.CTkLabel(config_frame, text="Microfone Local (R):", font=ctk.CTkFont(weight="bold"))
-        lbl_mic.grid(row=0, column=2, padx=(14, 8), pady=(12, 6), sticky="w")
-
-        self.opt_mic = ctk.CTkOptionMenu(config_frame, values=["Procurando dispositivos..."])
-        self.opt_mic.grid(row=0, column=3, padx=(6, 14), pady=(12, 6), sticky="ew")
-
-        # Linha 1: Título da Reunião e Duração dos Blocos
-        lbl_title = ctk.CTkLabel(config_frame, text="Título da Sessão:", font=ctk.CTkFont(weight="bold"))
-        lbl_title.grid(row=1, column=0, padx=(14, 8), pady=8, sticky="w")
-
+        title_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
+        title_col.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+        ctk.CTkLabel(
+            title_col, text="TÍTULO DA REUNIÃO", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
+        ).pack(anchor="w", pady=(0, 4))
         self.entry_meeting_title = ctk.CTkEntry(
-            config_frame,
-            placeholder_text="Ex: Alinhamento Semanal BI / React Podcast Tech",
+            title_col,
+            placeholder_text="Ex: Alinhamento Semanal BI / Reunião Presencial",
             fg_color=THEME_INPUT,
             border_color=THEME_BORDER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=36,
         )
-        self.entry_meeting_title.grid(row=1, column=1, padx=6, pady=8, sticky="ew")
+        self.entry_meeting_title.pack(fill="x")
 
-        lbl_block = ctk.CTkLabel(config_frame, text="Tamanho do Bloco:", font=ctk.CTkFont(weight="bold"))
-        lbl_block.grid(row=1, column=2, padx=(14, 8), pady=8, sticky="w")
-
-        self.opt_block_duration = ctk.CTkOptionMenu(
-            config_frame,
-            values=["1 minuto", "3 minutos", "5 minutos"],
-        )
-        self.opt_block_duration.set("3 minutos")
-        self.opt_block_duration.grid(row=1, column=3, padx=(6, 14), pady=8, sticky="ew")
-
-        # Linha 2: Glossário / Nomes opcionais para diarização e vocabulário técnico
-        lbl_context = ctk.CTkLabel(config_frame, text="Glossário / Nomes:", font=ctk.CTkFont(weight="bold"))
-        lbl_context.grid(row=2, column=0, padx=(14, 8), pady=(2, 8), sticky="w")
-
+        ctx_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
+        ctx_col.grid(row=0, column=1, padx=(0, 10), sticky="ew")
+        ctk.CTkLabel(
+            ctx_col, text="GLOSSÁRIO / NOMES (OPCIONAL)", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
+        ).pack(anchor="w", pady=(0, 4))
         self.entry_context_notes = ctk.CTkEntry(
-            config_frame,
-            placeholder_text="Opcional — Ex: Participantes: Carlos, Juliana; Siglas: OmniScribe, BI, WASAPI",
+            ctx_col,
+            placeholder_text="Ex: Carlos, Juliana; BI, Deploy, WASAPI",
             fg_color=THEME_INPUT,
             border_color=THEME_BORDER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=36,
         )
-        self.entry_context_notes.grid(row=2, column=1, columnspan=3, padx=(6, 14), pady=(2, 8), sticky="ew")
+        self.entry_context_notes.pack(fill="x")
 
-        # Linha 3: Checkboxes de Controle de Áudio
-        toggles_frame = ctk.CTkFrame(config_frame, fg_color="transparent")
-        toggles_frame.grid(row=3, column=0, columnspan=4, padx=14, pady=(2, 12), sticky="ew")
-
-        self.chk_noise_gate = ctk.CTkCheckBox(
-            toggles_frame,
-            text="Ativar Noise Gate no Microfone (elimina ruído de fundo)",
-            command=self._on_toggle_noise_gate,
-            font=ctk.CTkFont(size=12),
+        mode_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
+        mode_col.grid(row=0, column=2, sticky="e")
+        ctk.CTkLabel(
+            mode_col, text="MODO DE CAPTAÇÃO", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
+        ).pack(anchor="w", pady=(0, 4))
+        self.seg_capture_mode = ctk.CTkSegmentedButton(
+            mode_col,
+            values=[self.MODE_ONLINE, self.MODE_PRESENCIAL],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=THEME_INPUT,
+            selected_color=COLOR_PRIMARY,
+            selected_hover_color=COLOR_PRIMARY_HOVER,
+            unselected_color=THEME_INPUT,
+            unselected_hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=36,
+            command=self._on_capture_mode_change,
         )
-        self.chk_noise_gate.select()
-        self.chk_noise_gate.pack(side="left", padx=(0, 20))
+        self.seg_capture_mode.set(self.MODE_ONLINE)
+        self.seg_capture_mode.pack()
 
-        self.chk_mic_mute = ctk.CTkCheckBox(
-            toggles_frame,
-            text="Mutar Microfone em tempo real (Modo Ausente / Silencioso)",
-            command=self._on_toggle_mic_mute,
-            font=ctk.CTkFont(size=12),
-        )
-        self.chk_mic_mute.pack(side="left", padx=10)
+        # Linha 1: Botão Único Principal + Timer + Status + VU compactos
+        sep = ctk.CTkFrame(sess_card, height=1, fg_color=THEME_BORDER)
+        sep.grid(row=1, column=0, columnspan=2, padx=16, sticky="ew")
 
-        # ---------------- 3. PAINEL DE CONTROLES & VU METERS ----------------
-        control_frame = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
-        control_frame.grid(row=2, column=0, padx=16, pady=6, sticky="ew")
-        control_frame.grid_columnconfigure(1, weight=1)
+        action_row = ctk.CTkFrame(sess_card, fg_color="transparent")
+        action_row.grid(row=2, column=0, columnspan=2, padx=16, pady=12, sticky="ew")
+        action_row.grid_columnconfigure(1, weight=1)
 
-        # Lado Esquerdo: Botões e Cronômetro
-        left_ctrl = ctk.CTkFrame(control_frame, fg_color="transparent")
-        left_ctrl.grid(row=0, column=0, padx=16, pady=12, sticky="w")
+        left_act = ctk.CTkFrame(action_row, fg_color="transparent")
+        left_act.grid(row=0, column=0, sticky="w")
 
-        self.btn_start = ctk.CTkButton(
-            left_ctrl,
+        self.btn_rec_action = ctk.CTkButton(
+            left_act,
             text="▶ Iniciar Gravação",
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=COLOR_SUCCESS,
             hover_color="#059669",
-            width=165,
-            height=42,
-            corner_radius=8,
-            command=self._start_recording,
+            width=195,
+            height=40,
+            corner_radius=9,
+            command=self._toggle_recording_action,
         )
-        self.btn_start.pack(side="left", padx=(0, 10))
-
-        self.btn_stop = ctk.CTkButton(
-            left_ctrl,
-            text="⏹ Encerrar e Gerar Ata",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color=COLOR_DANGER,
-            hover_color="#dc2626",
-            width=185,
-            height=42,
-            corner_radius=8,
-            state="disabled",
-            command=self._stop_recording,
-        )
-        self.btn_stop.pack(side="left", padx=(0, 14))
+        self.btn_rec_action.pack(side="left", padx=(0, 14))
 
         self.lbl_timer = ctk.CTkLabel(
-            left_ctrl,
+            left_act,
             text="⏱ 00:00:00",
             font=ctk.CTkFont(family="Consolas", size=22, weight="bold"),
-            text_color="#38bdf8",
+            text_color=COLOR_PRIMARY,
         )
         self.lbl_timer.pack(side="left", padx=(0, 14))
 
         self.lbl_status = ctk.CTkLabel(
-            left_ctrl,
-            text="● Pronto para Iniciar",
+            left_act,
+            text="● Pronto para iniciar",
             font=ctk.CTkFont(size=12, weight="bold"),
             text_color=COLOR_SUCCESS,
         )
-        self.lbl_status.pack(side="left", padx=4)
+        self.lbl_status.pack(side="left")
 
-        # Lado Direito: VU Meters em Tempo Real
-        vu_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
-        vu_frame.grid(row=0, column=1, padx=16, pady=10, sticky="e")
+        vu_box = ctk.CTkFrame(action_row, fg_color="transparent")
+        vu_box.grid(row=0, column=1, sticky="e")
 
-        # VU Sistema (L)
-        vu_zoom_row = ctk.CTkFrame(vu_frame, fg_color="transparent")
-        vu_zoom_row.pack(anchor="e", pady=2)
-        self.lbl_vu_zoom = ctk.CTkLabel(vu_zoom_row, text="Sistema (L):", font=ctk.CTkFont(size=11, weight="bold"), width=75, anchor="e")
-        self.lbl_vu_zoom.pack(side="left")
-        self.bar_vu_zoom = ctk.CTkProgressBar(vu_zoom_row, width=150, height=12, progress_color="#38bdf8", fg_color="#1f2937", corner_radius=6)
+        self.vu_zoom_row = ctk.CTkFrame(vu_box, fg_color="transparent")
+        self.vu_zoom_row.pack(anchor="e", pady=2)
+        ctk.CTkLabel(
+            self.vu_zoom_row, text="Sistema", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED, width=54, anchor="e"
+        ).pack(side="left")
+        self.bar_vu_zoom = ctk.CTkProgressBar(
+            self.vu_zoom_row, width=130, height=9, progress_color=COLOR_PRIMARY, fg_color=THEME_INPUT, corner_radius=6
+        )
         self.bar_vu_zoom.set(0.0)
         self.bar_vu_zoom.pack(side="left", padx=6)
-        self.lbl_vu_zoom_val = ctk.CTkLabel(vu_zoom_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=32)
+        self.lbl_vu_zoom_val = ctk.CTkLabel(
+            self.vu_zoom_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=30
+        )
         self.lbl_vu_zoom_val.pack(side="left")
 
-        # VU Mic (R)
-        vu_mic_row = ctk.CTkFrame(vu_frame, fg_color="transparent")
+        vu_mic_row = ctk.CTkFrame(vu_box, fg_color="transparent")
         vu_mic_row.pack(anchor="e", pady=2)
-        self.lbl_vu_mic = ctk.CTkLabel(vu_mic_row, text="Mic (R):", font=ctk.CTkFont(size=11, weight="bold"), width=75, anchor="e")
-        self.lbl_vu_mic.pack(side="left")
-        self.bar_vu_mic = ctk.CTkProgressBar(vu_mic_row, width=150, height=12, progress_color=COLOR_SUCCESS, fg_color="#1f2937", corner_radius=6)
+        ctk.CTkLabel(
+            vu_mic_row, text="Mic", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED, width=54, anchor="e"
+        ).pack(side="left")
+        self.bar_vu_mic = ctk.CTkProgressBar(
+            vu_mic_row, width=130, height=9, progress_color=COLOR_SUCCESS, fg_color=THEME_INPUT, corner_radius=6
+        )
         self.bar_vu_mic.set(0.0)
         self.bar_vu_mic.pack(side="left", padx=6)
-        self.lbl_vu_mic_val = ctk.CTkLabel(vu_mic_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=32)
+        self.lbl_vu_mic_val = ctk.CTkLabel(
+            vu_mic_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=30
+        )
         self.lbl_vu_mic_val.pack(side="left")
 
-        # ---------------- 4. ÁREA DE VISUALIZAÇÃO EM ABAS ----------------
-        self.tabview = ctk.CTkTabview(
-            self,
-            corner_radius=10,
-            fg_color=THEME_CARD,
-            segmented_button_fg_color="#070b12",
-            segmented_button_selected_color=COLOR_PRIMARY,
-            segmented_button_selected_hover_color="#2563eb",
-            segmented_button_unselected_color="#1f2937",
-            segmented_button_unselected_hover_color="#374151",
-            text_color="#f8fafc",
-        )
-        self.tabview.grid(row=3, column=0, padx=16, pady=(6, 8), sticky="nsew")
+        # Linha discreta de resumo do hardware + atalho para Config & Voz
+        meta_bar = ctk.CTkFrame(page, fg_color="transparent")
+        meta_bar.grid(row=1, column=0, pady=(8, 6), sticky="ew")
+        meta_bar.grid_columnconfigure(0, weight=1)
 
-        # Aba 1: Transcrição ao Vivo
-        tab_transcription = self.tabview.add("Transcrição ao Vivo")
-        tab_transcription.grid_columnconfigure(0, weight=1)
-        tab_transcription.grid_rowconfigure(1, weight=1)
-
-        tb_trans = ctk.CTkFrame(tab_transcription, fg_color="transparent")
-        tb_trans.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 6))
-        tb_trans.grid_columnconfigure(0, weight=1)
-
-        lbl_t_info = ctk.CTkLabel(
-            tb_trans,
-            text="⚡ Diarização acústica ativa • Canal L (Sistema) & Canal R (Você) • Falas sobrepostas preservadas",
-            font=ctk.CTkFont(size=12),
+        self.lbl_hw_summary = ctk.CTkLabel(
+            meta_bar,
+            text="Hardware: detectando... • Blocos de 3 min",
+            font=ctk.CTkFont(size=11),
             text_color=THEME_TEXT_MUTED,
         )
-        lbl_t_info.grid(row=0, column=0, sticky="w")
+        self.lbl_hw_summary.grid(row=0, column=0, sticky="w")
+
+        ctk.CTkButton(
+            meta_bar,
+            text="Ajustar hardware ou voiceprints →",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color="transparent",
+            hover_color=THEME_CARD_ALT,
+            text_color=COLOR_PRIMARY,
+            height=22,
+            width=210,
+            command=lambda: self._switch_tab(self.TAB_CFG),
+        ).grid(row=0, column=1, sticky="e")
+
+        # Transcrição ao Vivo (ampla e limpa)
+        trans_card = ctk.CTkFrame(
+            page, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
+        )
+        trans_card.grid(row=2, column=0, sticky="nsew")
+        trans_card.grid_columnconfigure(0, weight=1)
+        trans_card.grid_rowconfigure(1, weight=1)
+
+        trans_head = ctk.CTkFrame(trans_card, fg_color="transparent")
+        trans_head.grid(row=0, column=0, padx=16, pady=(12, 6), sticky="ew")
+        trans_head.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            trans_head,
+            text="Transcrição ao Vivo",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).grid(row=0, column=0, sticky="w")
 
         self.btn_copy_trans = ctk.CTkButton(
-            tb_trans,
-            text="📋 Copiar Transcrição",
+            trans_head,
+            text="📋 Copiar Texto",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#1f2937",
-            hover_color="#374151",
-            border_color="#374151",
-            border_width=1,
-            width=160,
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=136,
             height=28,
             command=self._copy_transcription,
         )
         self.btn_copy_trans.grid(row=0, column=1, sticky="e")
 
         self.txt_transcription = ctk.CTkTextbox(
-            tab_transcription,
+            trans_card,
             font=ctk.CTkFont(family="Segoe UI", size=13),
             fg_color=THEME_INPUT,
             text_color=THEME_TEXT_PRIMARY,
             border_color=THEME_BORDER,
             border_width=1,
-            corner_radius=8,
+            corner_radius=9,
             wrap="word",
         )
-        self.txt_transcription.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        self.txt_transcription.grid(row=1, column=0, padx=14, pady=(0, 14), sticky="nsew")
         self.txt_transcription.insert(
             "end",
-            "A transcrição incremental com diarização de vozes aparecerá aqui à medida que os blocos forem gravados...\n"
+            "A transcrição incremental com diarização e voiceprints aparecerá aqui conforme os blocos forem gravados...\n",
         )
 
-        # Aba 2: Ata Executiva
-        tab_minutes = self.tabview.add("Ata Executiva")
-        tab_minutes.grid_columnconfigure(0, weight=1)
-        tab_minutes.grid_rowconfigure(1, weight=1)
+    def _build_minutes_page(self) -> None:
+        """Aba 2: Leitura limpa da Ata Executiva gerada."""
+        page = ctk.CTkFrame(self.page_container, fg_color="transparent")
+        page.grid(row=0, column=0, sticky="nsew")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(0, weight=1)
+        self.pages[self.TAB_ATA] = page
 
-        tb_min = ctk.CTkFrame(tab_minutes, fg_color="transparent")
-        tb_min.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 6))
-        tb_min.grid_columnconfigure(0, weight=1)
+        card = ctk.CTkFrame(page, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12)
+        card.grid(row=0, column=0, sticky="nsew")
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure(1, weight=1)
 
-        lbl_m_info = ctk.CTkLabel(
-            tb_min,
-            text="📄 Síntese executiva formatada em Markdown com Plano de Ação e Decisões",
-            font=ctk.CTkFont(size=12),
+        head = ctk.CTkFrame(card, fg_color="transparent")
+        head.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
+        head.grid_columnconfigure(0, weight=1)
+
+        title_box = ctk.CTkFrame(head, fg_color="transparent")
+        title_box.grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            title_box,
+            text="📋 Ata Executiva da Reunião",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        self.lbl_ata_meta = ctk.CTkLabel(
+            title_box,
+            text="Síntese em 5 seções revisada automaticamente em segunda passada fono-semântica",
+            font=ctk.CTkFont(size=11),
             text_color=THEME_TEXT_MUTED,
         )
-        lbl_m_info.grid(row=0, column=0, sticky="w")
+        self.lbl_ata_meta.pack(anchor="w")
+
+        btn_row = ctk.CTkFrame(head, fg_color="transparent")
+        btn_row.grid(row=0, column=1, sticky="e")
+
+        self.btn_open_folder = ctk.CTkButton(
+            btn_row,
+            text="📂 Abrir Pasta",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=116,
+            height=32,
+            command=self._open_atas_folder,
+        )
+        self.btn_open_folder.pack(side="left", padx=(0, 8))
 
         self.btn_copy_min = ctk.CTkButton(
-            tb_min,
+            btn_row,
             text="📋 Copiar Ata Markdown",
             font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#1f2937",
-            hover_color="#374151",
-            border_color="#374151",
-            border_width=1,
-            width=170,
-            height=28,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            width=168,
+            height=32,
             command=self._copy_minutes,
         )
-        self.btn_copy_min.grid(row=0, column=1, sticky="e")
+        self.btn_copy_min.pack(side="left")
 
         self.txt_minutes = ctk.CTkTextbox(
-            tab_minutes,
+            card,
             font=ctk.CTkFont(family="Segoe UI", size=13),
             fg_color=THEME_INPUT,
             text_color=THEME_TEXT_PRIMARY,
             border_color=THEME_BORDER,
             border_width=1,
-            corner_radius=8,
+            corner_radius=9,
             wrap="word",
         )
-        self.txt_minutes.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        self.txt_minutes.grid(row=1, column=0, padx=14, pady=(0, 14), sticky="nsew")
         self.txt_minutes.insert(
             "end",
-            "Ao encerrar a reunião, a Ata Executiva consolidada em Markdown será exibida nesta aba.\n"
+            "Ao encerrar uma gravação ou re-transcrição, a Ata Executiva consolidada será exibida aqui.\n",
         )
 
-        # Aba 3: Logs do Sistema
-        tab_logs = self.tabview.add("Logs do Sistema")
-        tab_logs.grid_columnconfigure(0, weight=1)
-        tab_logs.grid_rowconfigure(1, weight=1)
+    def _build_history_page(self) -> None:
+        """Aba 3: Histórico nativo unificado de gravações .wav, Atas e Transcrições."""
+        page = ctk.CTkFrame(self.page_container, fg_color="transparent")
+        page.grid(row=0, column=0, sticky="nsew")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+        self.pages[self.TAB_HIST] = page
 
-        tb_logs = ctk.CTkFrame(tab_logs, fg_color="transparent")
-        tb_logs.grid(row=0, column=0, sticky="ew", padx=6, pady=(4, 6))
-        tb_logs.grid_columnconfigure(0, weight=1)
+        top = ctk.CTkFrame(page, fg_color="transparent")
+        top.grid(row=0, column=0, pady=(2, 10), sticky="ew")
+        top.grid_columnconfigure(0, weight=1)
 
-        lbl_l_info = ctk.CTkLabel(
-            tb_logs,
-            text="⚙️ Registro Operacional em Tempo Real",
+        self.seg_hist_filter = ctk.CTkSegmentedButton(
+            top,
+            values=["Tudo", "🔊 Áudios (.wav)", "📋 Atas", "🎙️ Transcrições"],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=THEME_CARD,
+            selected_color=COLOR_PRIMARY,
+            selected_hover_color=COLOR_PRIMARY_HOVER,
+            unselected_color=THEME_CARD,
+            unselected_hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=32,
+            command=lambda _v: self._refresh_history_tab(),
+        )
+        self.seg_hist_filter.set("Tudo")
+        self.seg_hist_filter.grid(row=0, column=0, sticky="w")
+
+        hist_btns = ctk.CTkFrame(top, fg_color="transparent")
+        hist_btns.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkButton(
+            hist_btns,
+            text="↻ Atualizar",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=96,
+            height=32,
+            command=self._refresh_history_tab,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            hist_btns,
+            text="📂 Abrir arquivo externo (.md / .wav)...",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=32,
+            command=self._browse_external_history_file,
+        ).pack(side="left")
+
+        self.hist_scroll = ctk.CTkScrollableFrame(
+            page,
+            fg_color=THEME_CARD,
+            border_color=THEME_BORDER,
+            border_width=1,
+            corner_radius=12,
+        )
+        self.hist_scroll.grid(row=1, column=0, sticky="nsew")
+        self.hist_scroll.grid_columnconfigure(0, weight=1)
+
+    def _build_settings_page(self) -> None:
+        """Aba 4: Configurações de Hardware, API/Cotas, Voiceprints e Logs recolhíveis."""
+        page = ctk.CTkFrame(self.page_container, fg_color="transparent")
+        page.grid(row=0, column=0, sticky="nsew")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(0, weight=1)
+        self.pages[self.TAB_CFG] = page
+
+        scroll = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        scroll.grid(row=0, column=0, sticky="nsew")
+        scroll.grid_columnconfigure((0, 1), weight=1)
+
+        # Card 1: Áudio & Captura
+        audio_card = ctk.CTkFrame(
+            scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
+        )
+        audio_card.grid(row=0, column=0, padx=(0, 7), pady=(0, 12), sticky="nsew")
+        audio_card.grid_columnconfigure(0, weight=1)
+
+        a_head = ctk.CTkFrame(audio_card, fg_color="transparent")
+        a_head.grid(row=0, column=0, padx=16, pady=(14, 8), sticky="ew")
+        a_head.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            a_head, text="🎧 Áudio & Captura (WASAPI)", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME_TEXT_PRIMARY
+        ).grid(row=0, column=0, sticky="w")
+        self.btn_refresh_devices = ctk.CTkButton(
+            a_head,
+            text="↻ Detectar",
+            width=86,
+            height=26,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            command=self._refresh_audio_devices,
+        )
+        self.btn_refresh_devices.grid(row=0, column=1, sticky="e")
+
+        a_body = ctk.CTkFrame(audio_card, fg_color="transparent")
+        a_body.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
+        a_body.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(a_body, text="Áudio do Sistema (Loopback L):", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(anchor="w")
+        self.opt_loopback = ctk.CTkOptionMenu(
+            a_body, values=["Procurando dispositivos..."], command=lambda _v: self._on_loopback_selected()
+        )
+        self.opt_loopback.pack(fill="x", pady=(3, 10))
+
+        ctk.CTkLabel(a_body, text="Microfone Local (R / Presencial):", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(anchor="w")
+        self.opt_mic = ctk.CTkOptionMenu(
+            a_body, values=["Procurando dispositivos..."], command=lambda _v: self._update_hw_summary_label()
+        )
+        self.opt_mic.pack(fill="x", pady=(3, 10))
+
+        blk_row = ctk.CTkFrame(a_body, fg_color="transparent")
+        blk_row.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(blk_row, text="Tamanho do Bloco:", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(side="left")
+        self.opt_block_duration = ctk.CTkOptionMenu(
+            blk_row, values=["1 minuto", "3 minutos", "5 minutos"], width=130, command=lambda _v: self._update_hw_summary_label()
+        )
+        self.opt_block_duration.set("3 minutos")
+        self.opt_block_duration.pack(side="right")
+
+        self.chk_noise_gate = ctk.CTkCheckBox(
+            a_body,
+            text="Ativar Noise Gate suave no microfone (hold 150 ms)",
+            command=self._on_toggle_noise_gate,
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_PRIMARY,
+        )
+        self.chk_noise_gate.select()
+        self.chk_noise_gate.pack(anchor="w", pady=(4, 4))
+
+        self.chk_mic_mute = ctk.CTkCheckBox(
+            a_body,
+            text="Mutar microfone em tempo real (Modo Ausente)",
+            command=self._on_toggle_mic_mute,
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_PRIMARY,
+        )
+        self.chk_mic_mute.pack(anchor="w")
+
+        # Card 2: Gemini API & Free Tier
+        api_card = ctk.CTkFrame(
+            scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
+        )
+        api_card.grid(row=0, column=1, padx=(7, 0), pady=(0, 12), sticky="nsew")
+        api_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            api_card, text="🔑 Gemini API & Cota Free Tier", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME_TEXT_PRIMARY
+        ).grid(row=0, column=0, padx=16, pady=(14, 10), sticky="w")
+
+        k_body = ctk.CTkFrame(api_card, fg_color="transparent")
+        k_body.grid(row=1, column=0, padx=16, pady=(0, 14), sticky="ew")
+        k_body.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(k_body, text="GEMINI_API_KEY:", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(anchor="w")
+        key_row = ctk.CTkFrame(k_body, fg_color="transparent")
+        key_row.pack(fill="x", pady=(3, 12))
+
+        self.entry_cfg_api_key = ctk.CTkEntry(
+            key_row,
+            placeholder_text="Cole sua chave AIza...",
+            show="•",
+            fg_color=THEME_INPUT,
+            border_color=THEME_BORDER,
+            text_color=THEME_TEXT_PRIMARY,
+        )
+        if self.gemini_service.api_key:
+            self.entry_cfg_api_key.insert(0, self.gemini_service.api_key)
+        self.entry_cfg_api_key.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        self.btn_toggle_key_vis = ctk.CTkButton(
+            key_row,
+            text="👁",
+            width=34,
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            command=self._toggle_cfg_key_visibility,
+        )
+        self.btn_toggle_key_vis.pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            key_row,
+            text="Salvar",
+            width=72,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_PRIMARY_HOVER,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._save_cfg_api_key,
+        ).pack(side="left")
+
+        self.lbl_usage_req = ctk.CTkLabel(
+            k_body, text="Requisições hoje: 0 / 1.500 (0.0%)", font=ctk.CTkFont(size=12, weight="bold"), text_color=THEME_TEXT_PRIMARY
+        )
+        self.lbl_usage_req.pack(anchor="w")
+
+        self.bar_usage_quota = ctk.CTkProgressBar(
+            k_body, height=10, progress_color=COLOR_PRIMARY, fg_color=THEME_INPUT, corner_radius=6
+        )
+        self.bar_usage_quota.set(0.0)
+        self.bar_usage_quota.pack(fill="x", pady=(6, 8))
+
+        self.lbl_usage_cost = ctk.CTkLabel(
+            k_body,
+            text="Reuniões: 0 • Áudio: 0 min • Custo ref.: US$ 0.0000 (R$ 0.00)",
+            font=ctk.CTkFont(size=11),
+            text_color=THEME_TEXT_MUTED,
+        )
+        self.lbl_usage_cost.pack(anchor="w")
+
+        # Card 3: Biometria Vocal (Voiceprints)
+        vp_card = ctk.CTkFrame(
+            scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
+        )
+        vp_card.grid(row=1, column=0, columnspan=2, pady=(0, 12), sticky="ew")
+        vp_card.grid_columnconfigure(0, weight=1)
+
+        vp_left = ctk.CTkFrame(vp_card, fg_color="transparent")
+        vp_left.grid(row=0, column=0, padx=16, pady=14, sticky="w")
+        ctk.CTkLabel(
+            vp_left, text="🗣️ Biometria Vocal (Voiceprints Locais ONNX)", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME_TEXT_PRIMARY
+        ).pack(anchor="w")
+        self.lbl_vp_summary = ctk.CTkLabel(
+            vp_left,
+            text="Verificando perfis cadastrados...",
             font=ctk.CTkFont(size=12),
             text_color=THEME_TEXT_MUTED,
         )
-        lbl_l_info.grid(row=0, column=0, sticky="w")
+        self.lbl_vp_summary.pack(anchor="w", pady=(2, 0))
 
-        btn_box_logs = ctk.CTkFrame(tb_logs, fg_color="transparent")
-        btn_box_logs.grid(row=0, column=1, sticky="e")
+        vp_btns = ctk.CTkFrame(vp_card, fg_color="transparent")
+        vp_btns.grid(row=0, column=1, padx=16, pady=14, sticky="e")
+
+        ctk.CTkButton(
+            vp_btns,
+            text="🎙️ Gerenciar / Cadastrar Perfis",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_TEAL,
+            hover_color="#0e7490",
+            height=34,
+            command=self._open_voiceprints_modal,
+        ).pack(side="left")
+
+        # Card 4: Logs Técnicos (Recolhível)
+        log_card = ctk.CTkFrame(
+            scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
+        )
+        log_card.grid(row=2, column=0, columnspan=2, sticky="ew")
+        log_card.grid_columnconfigure(0, weight=1)
+
+        log_head = ctk.CTkFrame(log_card, fg_color="transparent")
+        log_head.grid(row=0, column=0, padx=16, pady=12, sticky="ew")
+        log_head.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            log_head, text="🧾 Logs Técnicos do Sistema", font=ctk.CTkFont(size=13, weight="bold"), text_color=THEME_TEXT_PRIMARY
+        ).grid(row=0, column=0, sticky="w")
+
+        log_btns = ctk.CTkFrame(log_head, fg_color="transparent")
+        log_btns.grid(row=0, column=1, sticky="e")
 
         self.btn_copy_logs = ctk.CTkButton(
-            btn_box_logs,
-            text="📋 Copiar Logs",
-            font=ctk.CTkFont(size=11),
-            fg_color="#1f2937",
-            hover_color="#374151",
-            border_color="#374151",
-            border_width=1,
-            width=100,
+            log_btns,
+            text="📋 Copiar",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=82,
             height=26,
             command=self._copy_logs,
         )
         self.btn_copy_logs.pack(side="left", padx=(0, 6))
 
         self.btn_clear_logs = ctk.CTkButton(
-            btn_box_logs,
+            log_btns,
             text="🗑️ Limpar",
-            font=ctk.CTkFont(size=11),
-            fg_color="#1f2937",
-            hover_color="#374151",
-            border_color="#374151",
-            border_width=1,
-            width=80,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=76,
             height=26,
             command=lambda: self.txt_logs.delete("1.0", "end"),
         )
-        self.btn_clear_logs.pack(side="left")
+        self.btn_clear_logs.pack(side="left", padx=(0, 6))
+
+        self.btn_toggle_logs = ctk.CTkButton(
+            log_btns,
+            text="Expandir Logs ▾",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=120,
+            height=26,
+            command=self._toggle_logs_drawer,
+        )
+        self.btn_toggle_logs.pack(side="left")
 
         self.txt_logs = ctk.CTkTextbox(
-            tab_logs,
+            log_card,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color=THEME_INPUT,
-            text_color="#38bdf8",
+            text_color=COLOR_PRIMARY,
             border_color=THEME_BORDER,
             border_width=1,
             corner_radius=8,
+            height=170,
             wrap="word",
         )
-        self.txt_logs.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0, 6))
+        # Mantido oculto inicialmente para preservar interface limpa
 
-        # ---------------- 5. RODAPÉ ----------------
-        footer_frame = ctk.CTkFrame(self, fg_color="transparent")
-        footer_frame.grid(row=4, column=0, padx=16, pady=(4, 12), sticky="ew")
-        footer_frame.grid_columnconfigure(0, weight=1)
+    # ---------------- NAVEGAÇÃO, TEMA E ATUALIZAÇÕES ----------------
+    def _on_nav_change(self, tab_name: str) -> None:
+        self._switch_tab(tab_name)
 
-        self.lbl_footer_info = ctk.CTkLabel(
-            footer_frame,
-            text=f"📂 Diretório Base: {get_base_dir()}",
-            font=ctk.CTkFont(size=11),
-            text_color=THEME_TEXT_DIM,
+    def _switch_tab(self, tab_name: str) -> None:
+        if tab_name in self.pages:
+            self.nav_tabs.set(tab_name)
+            self.pages[tab_name].tkraise()
+            if tab_name == self.TAB_HIST:
+                self._refresh_history_tab()
+            elif tab_name == self.TAB_CFG:
+                self._refresh_usage_panel()
+                self._refresh_voiceprint_summary()
+
+    def _toggle_theme(self) -> None:
+        self.theme_mode = "Light" if self.theme_mode == "Dark" else "Dark"
+        ctk.set_appearance_mode(self.theme_mode)
+        self.btn_theme_toggle.configure(text="☀️ Claro" if self.theme_mode == "Dark" else "🌙 Escuro")
+        if self.mascot:
+            self.mascot.set_theme(self.theme_mode)
+        self._save_theme_preference()
+
+    def _toggle_logs_drawer(self) -> None:
+        self._logs_expanded = not self._logs_expanded
+        if self._logs_expanded:
+            self.txt_logs.grid(row=1, column=0, padx=14, pady=(0, 14), sticky="ew")
+            self.btn_toggle_logs.configure(text="Recolher Logs ▴")
+        else:
+            self.txt_logs.grid_forget()
+            self.btn_toggle_logs.configure(text="Expandir Logs ▾")
+
+    def _on_capture_mode_change(self, mode_val: str) -> None:
+        is_presencial = mode_val == self.MODE_PRESENCIAL
+        if is_presencial:
+            self.vu_zoom_row.pack_forget()
+        else:
+            if not self.vu_zoom_row.winfo_ismapped():
+                self.vu_zoom_row.pack(anchor="e", pady=2)
+        self._update_hw_summary_label()
+
+    def _on_loopback_selected(self) -> None:
+        sel = self.opt_loopback.get()
+        if self.loopback_map.get(sel) is None:
+            self.seg_capture_mode.set(self.MODE_PRESENCIAL)
+            self._on_capture_mode_change(self.MODE_PRESENCIAL)
+        else:
+            self._update_hw_summary_label()
+
+    def _update_hw_summary_label(self) -> None:
+        mode = self.seg_capture_mode.get()
+        mic_name = self.opt_mic.get()
+        loop_name = self.opt_loopback.get()
+        block_txt = self.opt_block_duration.get()
+        profs = self.gemini_service.voiceprint_service.list_profiles() if self.gemini_service.voiceprint_service else []
+        vp_txt = f"{len(profs)} voiceprint(s)" if profs else "sem voiceprints"
+
+        if mode == self.MODE_PRESENCIAL:
+            dev_txt = f"Microfone ({mic_name[:28]})"
+        else:
+            dev_txt = f"Sistema + Mic ({mic_name[:22]})"
+
+        self.lbl_hw_summary.configure(text=f"Captação: {dev_txt} • Blocos de {block_txt} • {vp_txt}")
+
+    def _refresh_usage_panel(self) -> None:
+        s = self.gemini_service.get_usage_summary()
+        self.lbl_usage_req.configure(
+            text=f"Requisições hoje: {s['today_requests']} / {s['free_limit']} ({s['daily_percent']:.1f}%)"
         )
-        self.lbl_footer_info.grid(row=0, column=0, sticky="w")
-
-        footer_btn_box = ctk.CTkFrame(footer_frame, fg_color="transparent")
-        footer_btn_box.grid(row=0, column=1, sticky="e")
-
-        self.btn_toggle_mascot = ctk.CTkButton(
-            footer_btn_box,
-            text="🎙️ OmniMic",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#1f2937",
-            hover_color="#374151",
-            border_color="#374151",
-            border_width=1,
-            width=110,
-            command=self._toggle_mascot,
+        self.bar_usage_quota.set(min(1.0, max(0.0, s["daily_percent"] / 100.0)))
+        self.lbl_usage_cost.configure(
+            text=(
+                f"Reuniões: {s['total_meetings']} • Áudio: {s['audio_time_str']} • "
+                f"Custo ref.: US$ {s['cost_usd']:.4f} (R$ {s['cost_brl']:.2f})"
+            )
         )
-        self.btn_toggle_mascot.pack(side="left", padx=(0, 8))
 
-        self.btn_open_folder = ctk.CTkButton(
-            footer_btn_box,
-            text="📁 Abrir Pasta das Atas",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#1f2937",
-            hover_color="#374151",
-            border_color="#374151",
-            border_width=1,
-            command=self._open_atas_folder,
+    def _refresh_voiceprint_summary(self) -> None:
+        vp = self.gemini_service.voiceprint_service
+        profs = vp.list_profiles()
+        names = ", ".join(p["name"] for p in profs[:4])
+        if len(profs) > 4:
+            names += f" (+{len(profs) - 4})"
+        model_ok = "✅ Modelos ONNX prontos" if vp.are_models_ready() else "⚠️ Modelos ONNX pendentes (~26 MB)"
+        prof_txt = f"{len(profs)} perfil(is) ativo(s): {names}" if profs else "Nenhum perfil cadastrado"
+        self.lbl_vp_summary.configure(text=f"{prof_txt} • {model_ok}")
+        self._update_hw_summary_label()
+
+    def _refresh_history_tab(self) -> None:
+        render_history_cards_into(
+            self.hist_scroll,
+            filter_mode=self.seg_hist_filter.get(),
+            on_view_md=self.load_document,
+            on_retranscribe_wav=lambda p: RetranscribeModal(self, p),
         )
-        self.btn_open_folder.pack(side="left")
+
+    def _browse_external_history_file(self) -> None:
+        atas_root = get_base_dir() / "atas_reunioes"
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Selecione uma Ata (.md) ou Gravação (.wav)",
+            initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
+            filetypes=[
+                ("Atas e Gravações", "*.md *.wav"),
+                ("Gravações WAV", "*.wav"),
+                ("Documentos Markdown", "*.md"),
+                ("Todos os Arquivos", "*.*"),
+            ],
+        )
+        if chosen:
+            chosen_path = Path(chosen)
+            if chosen_path.suffix.lower() == ".wav":
+                RetranscribeModal(self, chosen_path)
+            else:
+                self.load_document(chosen_path)
+
+    def _toggle_cfg_key_visibility(self) -> None:
+        self._api_key_visible = not self._api_key_visible
+        self.entry_cfg_api_key.configure(show="" if self._api_key_visible else "•")
+
+    def _save_cfg_api_key(self) -> None:
+        key = self.entry_cfg_api_key.get().strip()
+        if not key:
+            self._log_gui("[AVISO] Informe uma GEMINI_API_KEY válida antes de salvar.")
+            return
+        self._on_api_key_saved(key)
 
     def _copy_transcription(self) -> None:
-        """Copia o conteúdo da aba Transcrição para a Área de Transferência com feedback visual."""
         content = self.txt_transcription.get("1.0", "end-1c").strip()
         if content:
             self.clipboard_clear()
             self.clipboard_append(content)
             self.update()
             self.btn_copy_trans.configure(text="✅ Copiado!", fg_color=COLOR_SUCCESS)
-            self.after(1800, lambda: self.btn_copy_trans.configure(text="📋 Copiar Transcrição", fg_color="#1f2937"))
+            self.after(1800, lambda: self.btn_copy_trans.configure(text="📋 Copiar Texto", fg_color=BTN_NEUTRAL))
 
     def _copy_minutes(self) -> None:
-        """Copia o conteúdo da Ata Executiva para a Área de Transferência com feedback visual."""
         content = self.txt_minutes.get("1.0", "end-1c").strip()
         if content:
             self.clipboard_clear()
             self.clipboard_append(content)
             self.update()
             self.btn_copy_min.configure(text="✅ Copiado!", fg_color=COLOR_SUCCESS)
-            self.after(1800, lambda: self.btn_copy_min.configure(text="📋 Copiar Ata Markdown", fg_color="#1f2937"))
+            self.after(1800, lambda: self.btn_copy_min.configure(text="📋 Copiar Ata Markdown", fg_color=COLOR_PRIMARY))
 
     def _copy_logs(self) -> None:
-        """Copia os logs técnicos para a Área de Transferência."""
         content = self.txt_logs.get("1.0", "end-1c").strip()
         if content:
             self.clipboard_clear()
             self.clipboard_append(content)
             self.update()
             self.btn_copy_logs.configure(text="✅ Copiado!", fg_color=COLOR_SUCCESS)
-            self.after(1800, lambda: self.btn_copy_logs.configure(text="📋 Copiar Logs", fg_color="#1f2937"))
+            self.after(1800, lambda: self.btn_copy_logs.configure(text="📋 Copiar", fg_color=BTN_NEUTRAL))
 
     # ---------------- MÉTODOS DE HARDWARE E DISPOSITIVOS ----------------
     def _refresh_audio_devices(self) -> None:
@@ -1887,14 +2322,12 @@ class ZoomTranscriberApp(ctk.CTk):
         self._log_gui("Atualizando dispositivos de áudio WASAPI...")
         loop_devices, mic_devices = listar_dispositivos_audio()
 
-        # 1. Atualiza Saídas de Loopback
         self.loopback_map.clear()
         loop_options = ["Nenhum (Apenas Microfone / Ditado)"]
         self.loopback_map["Nenhum (Apenas Microfone / Ditado)"] = None
         default_loop_name = None
 
         for d in loop_devices:
-            # Formato legível e único incluindo o índice
             display_name = f"[{d['index']}] {d['name'][:46]}"
             self.loopback_map[display_name] = d["index"]
             loop_options.append(display_name)
@@ -1902,13 +2335,11 @@ class ZoomTranscriberApp(ctk.CTk):
                 default_loop_name = display_name
 
         self.opt_loopback.configure(values=loop_options)
-        # Prefere o dispositivo padrão de áudio se detectado, ou o primeiro
         self.opt_loopback.set(default_loop_name or (loop_options[1] if len(loop_options) > 1 else loop_options[0]))
 
-        # 2. Atualiza Entradas de Microfone
         self.mic_map.clear()
-        mic_options = ["Nenhum (Apenas Áudio do Zoom)"]
-        self.mic_map["Nenhum (Apenas Áudio do Zoom)"] = None
+        mic_options = ["Nenhum (Apenas Áudio do Sistema)"]
+        self.mic_map["Nenhum (Apenas Áudio do Sistema)"] = None
         default_mic_name = None
 
         for d in mic_devices:
@@ -1921,13 +2352,14 @@ class ZoomTranscriberApp(ctk.CTk):
         self.opt_mic.configure(values=mic_options)
         self.opt_mic.set(default_mic_name or mic_options[0])
 
+        self._update_hw_summary_label()
         self._log_gui(f"Dispositivos detectados: {len(loop_devices)} loopback(s), {len(mic_devices)} microfone(s).")
 
     def _init_mascot(self) -> None:
-        """Inicializa o mascote 3D OmniMic após a abertura da janela principal."""
+        """Inicializa o mascote 3D OmniMic atualizado após a abertura da janela principal."""
         if self.mascot is not None:
             return
-        self.mascot = OmniMicWidget(self)
+        self.mascot = OmniMicWidget(self, theme_mode=self.theme_mode)
         self.mascot.place_default()
 
     def _toggle_mascot(self) -> None:
@@ -1936,9 +2368,8 @@ class ZoomTranscriberApp(ctk.CTk):
         else:
             self.mascot.toggle_mascot()
 
-    # ---------------- GERENCIAMENTO DA CHAVE API ----------------
+    # ---------------- GERENCIAMENTO DA CHAVE API & MODAIS ----------------
     def _check_initial_api_key(self) -> None:
-        """Verifica na inicialização se há chave configurada no .env ou ambiente."""
         key = load_api_key_from_env()
         if not key:
             if self.mascot:
@@ -1946,38 +2377,67 @@ class ZoomTranscriberApp(ctk.CTk):
             self._open_api_key_dialog()
 
     def _open_api_key_dialog(self) -> None:
-        """Abre a janela modal para configurar a GEMINI_API_KEY."""
         ApiKeyModal(self, on_save_callback=self._on_api_key_saved)
 
     def _open_usage_modal(self) -> None:
-        """Abre o modal de monitoramento de cotas e custos da API."""
         UsageModal(self)
 
     def _open_voiceprints_modal(self) -> None:
-        """Abre o modal de gerenciamento e cadastro de voiceprints biométricos."""
-        VoiceProfilesModal(self)
+        modal = VoiceProfilesModal(self)
+        modal.bind("<Destroy>", lambda _e: self.after(50, self._refresh_voiceprint_summary))
+
+    def _open_history_modal(self) -> None:
+        HistoryModal(self)
 
     def _on_api_key_saved(self, new_key: str) -> None:
-        """Callback acionado quando o usuário salva a chave API."""
         success = self.gemini_service.update_api_key(new_key)
+        if hasattr(self, "entry_cfg_api_key"):
+            self.entry_cfg_api_key.delete(0, "end")
+            self.entry_cfg_api_key.insert(0, new_key.strip())
         if success:
             self._log_gui("[OK] GEMINI_API_KEY atualizada com sucesso.")
-            self.lbl_status.configure(text="Status: API configurada", text_color="#10b981")
+            self.lbl_status.configure(text="● API configurada", text_color=COLOR_SUCCESS)
         else:
             self._log_gui("[AVISO] Chave salva no .env, mas validação com Gemini falhou.")
 
     # ---------------- CONTROLE DE GRAVAÇÃO ----------------
     def _set_session_controls_state(self, idle: bool, recording: bool = False) -> None:
-        """Alterna o estado habilitado/desabilitado dos controles durante gravação ou re-transcrição."""
+        """Alterna controles durante gravação/re-transcrição mantendo botão único sincronizado."""
         field_state = "normal" if idle else "disabled"
-        self.btn_start.configure(state=field_state)
-        self.btn_stop.configure(state="normal" if recording else "disabled")
         self.opt_loopback.configure(state=field_state)
         self.opt_mic.configure(state=field_state)
         self.btn_refresh_devices.configure(state=field_state)
         self.opt_block_duration.configure(state=field_state)
         self.entry_meeting_title.configure(state=field_state)
         self.entry_context_notes.configure(state=field_state)
+        self.seg_capture_mode.configure(state=field_state)
+
+        if recording:
+            self.btn_rec_action.configure(
+                text="⏹ Encerrar e Gerar Ata",
+                fg_color=COLOR_DANGER,
+                hover_color="#dc2626",
+                state="normal",
+            )
+        elif not idle:
+            self.btn_rec_action.configure(
+                text="🔄 Processando...",
+                fg_color=COLOR_PRIMARY,
+                state="disabled",
+            )
+        else:
+            self.btn_rec_action.configure(
+                text="▶ Iniciar Gravação",
+                fg_color=COLOR_SUCCESS,
+                hover_color="#059669",
+                state="normal",
+            )
+
+    def _toggle_recording_action(self) -> None:
+        if self.is_recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
 
     def _start_recording(self) -> None:
         """Inicia a gravação da reunião e o pipeline de transcrição."""
@@ -1985,37 +2445,33 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui("[AVISO] Já existe uma gravação ou re-transcrição em andamento.")
             return
 
-        # Validação da chave Gemini
         if not self.gemini_service.api_key:
             self._open_api_key_dialog()
             return
 
-        # Obtenção dos índices selecionados
-        selected_loop_str = self.opt_loopback.get()
-        loop_index = self.loopback_map.get(selected_loop_str)
-
         selected_mic_str = self.opt_mic.get()
         mic_index = self.mic_map.get(selected_mic_str)
 
+        if self.seg_capture_mode.get() == self.MODE_PRESENCIAL:
+            selected_loop_str = "Desativado (Modo Presencial)"
+            loop_index = None
+        else:
+            selected_loop_str = self.opt_loopback.get()
+            loop_index = self.loopback_map.get(selected_loop_str)
+
         if loop_index is None and mic_index is None:
-            self._log_gui("[ERRO] Selecione ao menos um dispositivo (Loopback ou Microfone).")
+            self._log_gui("[ERRO] Selecione ao menos um dispositivo válido em Config & Voz.")
+            self._switch_tab(self.TAB_CFG)
             return
 
-        # Determinação do tamanho do bloco
         block_dur_str = self.opt_block_duration.get()
-        block_seconds = 180
-        if "1" in block_dur_str:
-            block_seconds = 60
-        elif "5" in block_dur_str:
-            block_seconds = 300
+        block_seconds = 60 if "1" in block_dur_str else (300 if "5" in block_dur_str else 180)
 
-        # Inicia sessão no Gemini Service (gerando caminhos de transcrição, ata e áudio oficial)
         meeting_title = self.entry_meeting_title.get().strip() or "Reunião de Alinhamento"
         context_notes = self.entry_context_notes.get().strip()
         self.gemini_service.start_session(meeting_title, context_notes=context_notes)
         session_audio_path = self.gemini_service.get_session_audio_path()
 
-        # Inicia captura no motor de áudio com gravação contínua oficial
         started = self.audio_engine.start_recording(
             loopback_index=loop_index,
             mic_index=mic_index,
@@ -2030,15 +2486,12 @@ class ZoomTranscriberApp(ctk.CTk):
         self.is_recording = True
         self.recording_start_time = time.time()
         self.block_count = 0
-
-        # Atualiza estado visual dos controles
         self._set_session_controls_state(idle=False, recording=True)
 
-        self.lbl_status.configure(text="● Gravando...", text_color="#ef4444")
+        self.lbl_status.configure(text="● Gravando...", text_color=COLOR_DANGER)
         self.txt_transcription.delete("1.0", "end")
         self.txt_transcription.insert("end", f"=== Início da Gravação: {meeting_title} ===\n\n")
 
-        # Inicia temporizador
         self._timer_running = True
         self._update_timer()
 
@@ -2050,25 +2503,21 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui(f"[ÁUDIO] Gravação oficial será salva em: {session_audio_path.name}")
 
     def _stop_recording(self) -> None:
-        """Interrompe a gravação e solicita a consolidação da Ata Executiva."""
         if not self.is_recording:
             return
 
         self.is_recording = False
         self._timer_running = False
-
-        self.btn_stop.configure(state="disabled")
-        self.lbl_status.configure(text="Status: Encerrando gravação...", text_color="#f59e0b")
+        self._set_session_controls_state(idle=False, recording=False)
+        self.lbl_status.configure(text="● Encerrando e consolidando...", text_color="#f59e0b")
 
         if self.mascot:
             self.mascot.stop_listening()
             self.mascot.trigger_transcribing(4.0, "Consolidando transcrição e gerando Ata...")
 
-        # Roda o encerramento em thread assíncrona para não travar a GUI
         threading.Thread(target=self._async_stop_recording, daemon=True, name="AsyncStopRecording").start()
 
     def _async_stop_recording(self) -> None:
-        """Processamento de encerramento em thread secundária."""
         try:
             self._log_gui("[GRAVAÇÃO] Encerrando motor de áudio e descarregando buffers...")
             self.audio_engine.stop_recording(finalize_block=True)
@@ -2082,7 +2531,6 @@ class ZoomTranscriberApp(ctk.CTk):
 
             self.after(0, lambda: self._set_session_controls_state(idle=True))
             self._log_gui("[GRAVAÇÃO] Gravação finalizada com sucesso.")
-
         except Exception as e:
             logger.exception(f"Erro ao encerrar gravação: {e}")
             self._log_gui(f"[ERRO] Falha no encerramento da gravação: {e}")
@@ -2097,7 +2545,6 @@ class ZoomTranscriberApp(ctk.CTk):
         block_seconds: int = 180,
         apply_enhancement: Optional[bool] = None,
     ) -> None:
-        """Fatia um WAV salvo anteriormente, re-transcreve via Gemini e gera uma nova Ata Executiva."""
         if self.is_recording or self.is_retranscribing:
             self._log_gui("[AVISO] Aguarde a conclusão da gravação ou re-transcrição atual.")
             return
@@ -2115,14 +2562,14 @@ class ZoomTranscriberApp(ctk.CTk):
         self.block_count = 0
         self._set_session_controls_state(idle=False, recording=False)
 
-        self.lbl_status.configure(text="🔄 Re-transcrevendo áudio...", text_color="#38bdf8")
+        self.lbl_status.configure(text="🔄 Re-transcrevendo áudio...", text_color=COLOR_PRIMARY)
         self.txt_transcription.delete("1.0", "end")
         self.txt_transcription.insert(
             "end",
             f"=== Re-transcrição de Áudio Salvo: {title} ===\n"
             f"Arquivo fonte: {wav_path.name}\n\n",
         )
-        self.tabview.set("Transcrição ao Vivo")
+        self._switch_tab(self.TAB_REC)
 
         if self.mascot:
             self.mascot.trigger_transcribing(4.0, "Re-transcrevendo gravação salva...")
@@ -2142,7 +2589,6 @@ class ZoomTranscriberApp(ctk.CTk):
         block_seconds: int,
         apply_enhancement: Optional[bool],
     ) -> None:
-        """Executa o fatiamento do WAV e acompanha a fila de re-transcrição sem travar a interface."""
         try:
             self._log_gui(f"[RE-TRANSCRIÇÃO] Iniciando reprocessamento de: {wav_path.name}")
             transc_path, minute_path = self.gemini_service.start_session(
@@ -2179,7 +2625,6 @@ class ZoomTranscriberApp(ctk.CTk):
                 worker.join()
 
             self._log_gui("[RE-TRANSCRIÇÃO] Re-transcrição e nova Ata Executiva concluídas!")
-
         except Exception as e:
             logger.exception(f"Erro na re-transcrição de {wav_path}: {e}")
             self._log_gui(f"[ERRO] Falha ao re-transcrever {wav_path.name}: {e}")
@@ -2188,7 +2633,6 @@ class ZoomTranscriberApp(ctk.CTk):
             self.after(0, lambda: self._set_session_controls_state(idle=True))
 
     def _update_timer(self) -> None:
-        """Atualiza o contador de tempo decorrido da reunião a cada segundo."""
         if self._timer_running:
             elapsed = time.time() - self.recording_start_time
             self.lbl_timer.configure(text=f"⏱ {format_seconds(elapsed)}")
@@ -2196,14 +2640,11 @@ class ZoomTranscriberApp(ctk.CTk):
 
     # ---------------- CALLBACKS THREAD-SAFE ----------------
     def _handle_rms_update(self, zoom_rms: float, mic_rms: float) -> None:
-        """Recebe níveis RMS do motor de áudio e atualiza os medidores VU na thread principal."""
         def update():
             self.bar_vu_zoom.set(zoom_rms)
             self.bar_vu_mic.set(mic_rms)
-            if hasattr(self, "lbl_vu_zoom_val"):
-                self.lbl_vu_zoom_val.configure(text=f"{int(zoom_rms * 100)}%")
-            if hasattr(self, "lbl_vu_mic_val"):
-                self.lbl_vu_mic_val.configure(text=f"{int(mic_rms * 100)}%")
+            self.lbl_vu_zoom_val.configure(text=f"{int(zoom_rms * 100)}%")
+            self.lbl_vu_mic_val.configure(text=f"{int(mic_rms * 100)}%")
             if self.mascot:
                 self.mascot.set_audio_rms(max(zoom_rms, mic_rms))
 
@@ -2217,7 +2658,6 @@ class ZoomTranscriberApp(ctk.CTk):
         end_seconds: float,
         is_final: bool,
     ) -> None:
-        """Recebe notificação de bloco WAV concluído e o envia para a fila do Gemini."""
         self.block_count = block_index
         self.gemini_service.enqueue_block(
             wav_path=wav_path,
@@ -2228,7 +2668,6 @@ class ZoomTranscriberApp(ctk.CTk):
         )
 
     def _handle_service_log(self, message: str) -> None:
-        """Anexa logs técnicos na Aba 3 com timestamp."""
         def append():
             timestamp = datetime.now().strftime("%H:%M:%S")
             self.txt_logs.insert("end", f"[{timestamp}] {message}\n")
@@ -2243,7 +2682,6 @@ class ZoomTranscriberApp(ctk.CTk):
         full_transcript: str,
         is_final: bool,
     ) -> None:
-        """Atualiza a Aba 1 com o novo trecho transcrito."""
         def update():
             self.txt_transcription.insert("end", block_text)
             self.txt_transcription.see("end")
@@ -2253,12 +2691,13 @@ class ZoomTranscriberApp(ctk.CTk):
         self.after(0, update)
 
     def _handle_minute_generated(self, minute_path: Path, minute_text: str) -> None:
-        """Exibe a Ata Executiva consolidada na Aba 2 e alterna para ela."""
         def update():
             self.txt_minutes.delete("1.0", "end")
             self.txt_minutes.insert("end", minute_text)
-            self.tabview.set("Ata Executiva")
-            self.lbl_status.configure(text="Status: Ata Executiva Concluída!", text_color="#10b981")
+            self.lbl_ata_meta.configure(text=f"Arquivo salvo: {minute_path.name}")
+            self._switch_tab(self.TAB_ATA)
+            self.lbl_status.configure(text="● Ata Concluída!", text_color=COLOR_SUCCESS)
+            self._refresh_usage_panel()
             self._log_gui(f"[CONCLUÍDO] Ata Executiva disponível em: {minute_path.name}")
             if self.mascot:
                 self.mascot.trigger_celebrating("Ata executiva pronta e salva! 🏆")
@@ -2266,36 +2705,24 @@ class ZoomTranscriberApp(ctk.CTk):
         self.after(0, update)
 
     def _handle_status_change(self, status: str) -> None:
-        """Atualiza o badge de status na barra de controles."""
-        def update():
-            self.lbl_status.configure(text=f"Status: {status}")
-
-        self.after(0, update)
+        self.after(0, lambda: self.lbl_status.configure(text=f"● {status}"))
 
     def _log_gui(self, message: str) -> None:
-        """Registra mensagem local diretamente na caixa de logs."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.txt_logs.insert("end", f"[{timestamp}] {message}\n")
         self.txt_logs.see("end")
 
     # ---------------- AÇÕES DE INTERFACE ----------------
     def _on_toggle_noise_gate(self) -> None:
-        enabled = bool(self.chk_noise_gate.get())
-        self.audio_engine.set_noise_gate(enabled)
+        self.audio_engine.set_noise_gate(bool(self.chk_noise_gate.get()))
 
     def _on_toggle_mic_mute(self) -> None:
-        muted = bool(self.chk_mic_mute.get())
-        self.audio_engine.set_mic_muted(muted)
+        self.audio_engine.set_mic_muted(bool(self.chk_mic_mute.get()))
 
     def _open_atas_folder(self) -> None:
-        """Abre a pasta das atas no explorador de arquivos."""
         now = datetime.now()
         target_dir = get_base_dir() / "atas_reunioes" / now.strftime("%Y") / now.strftime("%m")
         open_folder_in_explorer(target_dir)
-
-    def _open_history_modal(self) -> None:
-        """Abre o modal visual de histórico de reuniões."""
-        HistoryModal(self)
 
     def load_document(self, file_path: Path) -> None:
         """Carrega e exibe um arquivo de Ata ou Transcrição nas abas da interface."""
@@ -2304,50 +2731,44 @@ class ZoomTranscriberApp(ctk.CTk):
             return
 
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-
+            content = file_path.read_text(encoding="utf-8")
             filename = file_path.name
+
             if "ata_executiva" in filename:
                 self.txt_minutes.delete("1.0", "end")
                 self.txt_minutes.insert("end", content)
-                self.tabview.set("Ata Executiva")
-                self.lbl_status.configure(text=f"Ata carregada: {filename[:28]}...", text_color="#10b981")
+                self.lbl_ata_meta.configure(text=f"Visualizando: {filename}")
+                self._switch_tab(self.TAB_ATA)
+                self.lbl_status.configure(text=f"● Ata: {filename[:24]}...", text_color=COLOR_SUCCESS)
 
-                # Tenta localizar a transcrição correspondente na mesma pasta
-                matching_name = filename.replace("ata_executiva_", "transcricao_")
-                matching_file = file_path.parent / matching_name
+                matching_file = file_path.parent / filename.replace("ata_executiva_", "transcricao_", 1)
                 if matching_file.exists():
                     try:
-                        with open(matching_file, "r", encoding="utf-8") as mf:
-                            self.txt_transcription.delete("1.0", "end")
-                            self.txt_transcription.insert("end", mf.read())
+                        self.txt_transcription.delete("1.0", "end")
+                        self.txt_transcription.insert("end", matching_file.read_text(encoding="utf-8"))
                     except Exception:
                         pass
 
             elif "transcricao" in filename:
                 self.txt_transcription.delete("1.0", "end")
                 self.txt_transcription.insert("end", content)
-                self.tabview.set("Transcrição ao Vivo")
-                self.lbl_status.configure(text=f"Transcrição carregada: {filename[:28]}...", text_color="#38bdf8")
+                self._switch_tab(self.TAB_REC)
+                self.lbl_status.configure(text=f"● Transcrição: {filename[:22]}...", text_color=COLOR_PRIMARY)
 
-                # Tenta localizar a ata correspondente na mesma pasta
-                matching_name = filename.replace("transcricao_", "ata_executiva_")
-                matching_file = file_path.parent / matching_name
+                matching_file = file_path.parent / filename.replace("transcricao_", "ata_executiva_", 1)
                 if matching_file.exists():
                     try:
-                        with open(matching_file, "r", encoding="utf-8") as mf:
-                            self.txt_minutes.delete("1.0", "end")
-                            self.txt_minutes.insert("end", mf.read())
+                        self.txt_minutes.delete("1.0", "end")
+                        self.txt_minutes.insert("end", matching_file.read_text(encoding="utf-8"))
+                        self.lbl_ata_meta.configure(text=f"Visualizando: {matching_file.name}")
                     except Exception:
                         pass
             else:
                 self.txt_transcription.delete("1.0", "end")
                 self.txt_transcription.insert("end", content)
-                self.tabview.set("Transcrição ao Vivo")
+                self._switch_tab(self.TAB_REC)
 
             self._log_gui(f"[HISTÓRICO] Reunião carregada na interface: {filename}")
-
         except Exception as e:
             logger.exception(f"Erro ao carregar documento: {e}")
             self._log_gui(f"[ERRO] Falha ao ler arquivo: {e}")

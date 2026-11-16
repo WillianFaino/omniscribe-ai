@@ -32,7 +32,7 @@ if exist "dist\OmniScribe\OmniScribe.exe" goto build_setup
 echo [AVISO] Os binarios do OmniScribe nao foram encontrados em 'dist\OmniScribe\'.
 echo Compilando versao Turbo enxuta antes de empacotar o Instalador...
 echo.
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 if %errorlevel% neq 0 (
     echo [ERRO] Falha ao compilar os arquivos base do OmniScribe.
     pause

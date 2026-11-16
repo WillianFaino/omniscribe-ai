@@ -7,7 +7,10 @@ facetado (flat-shading) e serrilhado autentico de 1995.
 
 from __future__ import annotations
 
+import json
 import math
+import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -239,10 +242,14 @@ class Mesh3D:
 
 
 class OmniMic3DRenderer:
-    """Renderiza o OmniMic #03-A Ultra Low-Poly com esqueleto articulado e acessorios 3D."""
+    """Renderiza o OmniMic #03-A atualizado (sprites Blender PS1 Bayer 4x4 + fallback procedural)."""
 
     def __init__(self) -> None:
-        # Cores base estilo 1995 (cromado prata, fendas escuras, detalhes XP)
+        self._sprite_frames: Dict[str, List[Image.Image]] = {}
+        self._sprite_fps: Dict[str, float] = {}
+        self._has_blender_sprites = self._load_blender_sprites()
+
+        # Cores base estilo 1995 (fallback caso assets/mascot nao esteja presente)
         silver = (192, 200, 212)
         silver_dark = (146, 156, 170)
         slot_dark = (26, 32, 42)
@@ -373,6 +380,47 @@ class OmniMic3DRenderer:
         bucket_shines.append(shines)
         return vert_offset + len(v)
 
+    def _resolve_mascot_assets_dir(self) -> Optional[Path]:
+        candidates = []
+        if getattr(sys, "frozen", False):
+            if hasattr(sys, "_MEIPASS"):
+                candidates.append(Path(sys._MEIPASS) / "assets" / "mascot")
+            candidates.append(Path(sys.executable).resolve().parent / "assets" / "mascot")
+        candidates.append(Path(__file__).resolve().parent.parent / "assets" / "mascot")
+        for cand in candidates:
+            if (cand / "manifest.json").exists():
+                return cand
+        return None
+
+    def _load_blender_sprites(self) -> bool:
+        assets_dir = self._resolve_mascot_assets_dir()
+        if not assets_dir:
+            return False
+        try:
+            manifest = json.loads((assets_dir / "manifest.json").read_text(encoding="utf-8"))
+            fw = int(manifest.get("frame_w", 160))
+            fh = int(manifest.get("frame_h", 180))
+            loaded: Dict[str, List[Image.Image]] = {}
+            fps_map: Dict[str, float] = {}
+            for state_name, meta in manifest.get("animations", {}).items():
+                strip_path = assets_dir / str(meta["file"])
+                count = int(meta["frames"])
+                fps = float(meta.get("fps", 12))
+                if not strip_path.exists() or count <= 0:
+                    continue
+                strip = Image.open(strip_path).convert("RGBA")
+                frames = [strip.crop((i * fw, 0, (i + 1) * fw, fh)) for i in range(count)]
+                if frames:
+                    loaded[state_name] = frames
+                    fps_map[state_name] = fps
+            if loaded:
+                self._sprite_frames = loaded
+                self._sprite_fps = fps_map
+                return True
+        except Exception:
+            pass
+        return False
+
     def render(
         self,
         state: str = "idle",
@@ -382,7 +430,21 @@ class OmniMic3DRenderer:
         look_y: float = 0.0,
         bg_rgba: Tuple[int, int, int, int] = (0, 0, 0, 0),
     ) -> Image.Image:
-        """Renderiza 1 frame 3D Ultra Low-Poly para o estado e fase informados."""
+        """Renderiza 1 frame do mascote (Blender RGBA sprite sheet atualizado ou fallback 3D)."""
+        if self._has_blender_sprites:
+            frames = self._sprite_frames.get(state) or self._sprite_frames.get("idle")
+            if frames:
+                fps = self._sprite_fps.get(state, 12.0)
+                speed_mult = (1.0 + min(0.7, max(0.0, rms * 2.2))) if state == "listening" else 1.0
+                # `phase` avanca ~2.54 rad/s (0.14 a cada 55 ms) -> converte para indice natural
+                frame_idx = int((phase / 2.54) * fps * speed_mult) % len(frames)
+                fg = frames[frame_idx]
+                bg = Image.new("RGBA", fg.size, bg_rgba)
+                comp = Image.alpha_composite(bg, fg)
+                if comp.size != (DISPLAY_W, DISPLAY_H):
+                    return comp.resize((DISPLAY_W, DISPLAY_H), Image.Resampling.NEAREST)
+                return comp
+
         verts_list: List[np.ndarray] = []
         tris_list: List[np.ndarray] = []
         cols_list: List[np.ndarray] = []

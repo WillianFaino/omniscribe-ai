@@ -15,8 +15,29 @@ from mascot_3d import DISPLAY_H, DISPLAY_W, OmniMic3DRenderer
 XP_BALLOON_BG = "#FFFFE1"
 XP_BALLOON_BORDER = "#374151"
 XP_BALLOON_TEXT = "#111827"
-XP_CARD_BG = "#0F172A"
-XP_CARD_BORDER = "#334155"
+
+MASCOT_THEMES = {
+    "Dark": {
+        "card_bg": "#182235",
+        "card_border": "#334155",
+        "btn_fg": "#94A3B8",
+        "bg_rgba": (24, 34, 53, 255),
+        "balloon_bg": "#FEFCE8",
+        "balloon_border": "#475569",
+        "balloon_text": "#0F172A",
+        "balloon_title": "#1D4ED8",
+    },
+    "Light": {
+        "card_bg": "#F8FAFC",
+        "card_border": "#CBD5E1",
+        "btn_fg": "#475569",
+        "bg_rgba": (248, 250, 252, 255),
+        "balloon_bg": "#FFFBEB",
+        "balloon_border": "#CBD5E1",
+        "balloon_text": "#1E293B",
+        "balloon_title": "#2563EB",
+    },
+}
 
 
 class OmniMicWidget(ctk.CTkFrame):
@@ -26,6 +47,7 @@ class OmniMicWidget(ctk.CTkFrame):
         self,
         master: ctk.CTk,
         on_visibility_change: Optional[Callable[[bool], None]] = None,
+        theme_mode: str = "Dark",
     ) -> None:
         super().__init__(
             master,
@@ -35,6 +57,8 @@ class OmniMicWidget(ctk.CTkFrame):
         self._master = master
         self._on_visibility_change = on_visibility_change
         self._renderer = OmniMic3DRenderer()
+        self._theme_mode = "Light" if str(theme_mode).lower() == "light" else "Dark"
+        self._palette = MASCOT_THEMES[self._theme_mode]
 
         self._state = "greeting"
         self._state_until: float = time.monotonic() + 3.2
@@ -66,43 +90,44 @@ class OmniMicWidget(ctk.CTkFrame):
         self._tick()
 
     def _build_ui(self) -> None:
+        pal = self._palette
         # 1. Balao de fala retrô estilo Windows 95/XP (acima do mascote)
         self._balloon = tk.Frame(
             self,
-            bg=XP_BALLOON_BG,
-            highlightbackground=XP_BALLOON_BORDER,
+            bg=pal["balloon_bg"],
+            highlightbackground=pal["balloon_border"],
             highlightthickness=2,
             bd=0,
         )
-        balloon_top = tk.Frame(self._balloon, bg=XP_BALLOON_BG)
-        balloon_top.pack(fill="x", padx=6, pady=(4, 0))
+        self._balloon_top = tk.Frame(self._balloon, bg=pal["balloon_bg"])
+        self._balloon_top.pack(fill="x", padx=6, pady=(4, 0))
 
-        lbl_title = tk.Label(
-            balloon_top,
+        self._lbl_balloon_title = tk.Label(
+            self._balloon_top,
             text="OmniMic",
             font=("Segoe UI", 8, "bold"),
-            fg="#1D4ED8",
-            bg=XP_BALLOON_BG,
+            fg=pal["balloon_title"],
+            bg=pal["balloon_bg"],
         )
-        lbl_title.pack(side="left")
+        self._lbl_balloon_title.pack(side="left")
 
-        btn_close_balloon = tk.Label(
-            balloon_top,
+        self._btn_close_balloon = tk.Label(
+            self._balloon_top,
             text="✕",
             font=("Segoe UI", 8, "bold"),
             fg="#6B7280",
-            bg=XP_BALLOON_BG,
+            bg=pal["balloon_bg"],
             cursor="hand2",
         )
-        btn_close_balloon.pack(side="right")
-        btn_close_balloon.bind("<Button-1>", lambda _e: self.hide_balloon())
+        self._btn_close_balloon.pack(side="right")
+        self._btn_close_balloon.bind("<Button-1>", lambda _e: self.hide_balloon())
 
         self._lbl_balloon = tk.Label(
             self._balloon,
             text="",
             font=("Segoe UI", 9),
-            fg=XP_BALLOON_TEXT,
-            bg=XP_BALLOON_BG,
+            fg=pal["balloon_text"],
+            bg=pal["balloon_bg"],
             justify="left",
             wraplength=200,
             padx=8,
@@ -110,14 +135,14 @@ class OmniMicWidget(ctk.CTkFrame):
         )
         self._lbl_balloon.pack(fill="x")
 
-        # 2. Container do sprite 3D
+        # 2. Container do sprite 3D atualizado
         self._stage = tk.Frame(
             self,
-            bg=XP_CARD_BG,
-            highlightbackground=XP_CARD_BORDER,
+            bg=pal["card_bg"],
+            highlightbackground=pal["card_border"],
             highlightthickness=1,
-            width=164,
-            height=176,
+            width=148,
+            height=162,
             cursor="fleur",
         )
         self._stage.pack_propagate(False)
@@ -128,8 +153,8 @@ class OmniMicWidget(ctk.CTkFrame):
             self._stage,
             text="⋮",
             font=("Segoe UI", 10, "bold"),
-            fg="#94A3B8",
-            bg=XP_CARD_BG,
+            fg=pal["btn_fg"],
+            bg=pal["card_bg"],
             cursor="hand2",
             padx=4,
         )
@@ -137,11 +162,25 @@ class OmniMicWidget(ctk.CTkFrame):
 
         self._lbl_sprite = tk.Label(
             self._stage,
-            bg=XP_CARD_BG,
+            bg=pal["card_bg"],
             bd=0,
             cursor="hand2",
         )
         self._lbl_sprite.place(relx=0.5, rely=0.52, anchor="center")
+
+    def set_theme(self, mode: str) -> None:
+        """Atualiza cores do card, sprite background e balao para Dark ou Light."""
+        self._theme_mode = "Light" if str(mode).lower() == "light" else "Dark"
+        pal = MASCOT_THEMES[self._theme_mode]
+        self._palette = pal
+        self._stage.configure(bg=pal["card_bg"], highlightbackground=pal["card_border"])
+        self._btn_menu.configure(bg=pal["card_bg"], fg=pal["btn_fg"])
+        self._lbl_sprite.configure(bg=pal["card_bg"])
+        self._balloon.configure(bg=pal["balloon_bg"], highlightbackground=pal["balloon_border"])
+        self._balloon_top.configure(bg=pal["balloon_bg"])
+        self._lbl_balloon_title.configure(bg=pal["balloon_bg"], fg=pal["balloon_title"])
+        self._btn_close_balloon.configure(bg=pal["balloon_bg"])
+        self._lbl_balloon.configure(bg=pal["balloon_bg"], fg=pal["balloon_text"])
 
     def _build_context_menu(self) -> None:
         self._menu = tk.Menu(self, tearoff=0)
@@ -338,17 +377,15 @@ class OmniMicWidget(ctk.CTkFrame):
 
             if self._visible:
                 self._phase += 0.14
-                # Fundo Dark Obsidian matching o card do app
                 img = self._renderer.render(
                     state=self._state,
                     phase=self._phase,
                     rms=self._rms,
                     look_x=self._look_x,
                     look_y=self._look_y,
-                    bg_rgba=(15, 23, 42, 255),
+                    bg_rgba=self._palette["bg_rgba"],
                 )
-                # Reduz levemente para caber confortavel no card 164x176 mantendo serrilhado
-                resized = img.resize((int(DISPLAY_W * 0.80), int(DISPLAY_H * 0.78)), 0)
+                resized = img.resize((136, 152), 0)
                 self._photo_ref = ImageTk.PhotoImage(resized)
                 self._lbl_sprite.configure(image=self._photo_ref)
         except Exception:
