@@ -101,13 +101,13 @@ omniscribe-ai/
 
 ### 3.4b Biometria Vocal / Voiceprints (`src/voiceprint_service.py`)
 - Roda localmente em CPU via **`sherpa-onnx`** (`wespeaker_en_voxceleb_resnet34_LM.onnx`, 256 dims + `silero_vad.onnx`, ~26 MB sob demanda em `models/voiceprint/`, ignorados pelo `.gitignore`).
-- Armazena perfis L2-normalizados em `atas_reunioes/voice_profiles.json` (`enroll_profile_from_arrays` e `enroll_profile_from_wav_segment`).
+- Armazena perfis L2-normalizados em `atas_reunioes/voice_profiles.json` (`enroll_profile_from_arrays`, `enroll_profile_from_wav_segment`, `export_profiles` e `import_profiles` com validação de modelo `ResNet34-LM` e estratégias `merge`/`skip`/`overwrite`).
 - Antes da chamada ao Gemini em `_process_single_block`, `analyze_wav_speakers()` segmenta o áudio Mono (ou Canal L remoto em Estéreo), gera um mapa temporal biométrico com similaridade de cosseno (incluindo detecção de possíveis sobreposições) e injeta as âncoras no prompt com **zero requisições extras no Free Tier**.
 
 ### 3.5 Interface Gráfica (`src/gui.py`)
 - Classe principal `ZoomTranscriberApp(ctk.CTk)` com tema escuro e 3 abas principais (Transcrição ao Vivo, Ata Executiva e Logs).
 - Modais auxiliares:
-  - `VoiceProfilesModal` (`🗣️ Perfis de Voz`): download sob demanda dos modelos ONNX, cadastro guiado em 3 frases pelo microfone (estilo "Ok Google"), extração a partir de trechos `[MM:SS .. MM:SS]` de `.wav` já gravados e remoção de perfis.
+  - `VoiceProfilesModal` (`🗣️ Perfis de Voz`): download sob demanda dos modelos ONNX, cadastro guiado em 3 frases pelo microfone (estilo "Ok Google"), extração a partir de trechos `[MM:SS .. MM:SS]` de `.wav` já gravados, exportação individual/completa (`.json`), importação com mesclagem inteligente e remoção de perfis.
   - `ApiKeyModal`: configuração e persistência da `GEMINI_API_KEY` no `.env`.
   - `UsageModal`: visualização de requisições do dia, barra de cota Free Tier, tokens e custo estimado.
   - `HistoryModal`: listagem de atas (`.md`) e gravações oficiais em áudio (`.wav`, excluindo `temp_blocks`), permitindo visualizar documentos, abrir o áudio no player do sistema (`▶ Ouvir`) e iniciar re-transcrição.

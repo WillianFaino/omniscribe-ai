@@ -191,6 +191,149 @@ class VoiceprintService:
             return True
         return False
 
+    def export_profiles(
+        self,
+        output_path: Path,
+        profile_names: Optional[List[str]] = None,
+    ) -> int:
+        """Exporta um ou mais perfis biométricos para um arquivo JSON portável."""
+        self._load_profiles()
+        if profile_names is not None:
+            wanted = set(profile_names)
+            selected = {k: v for k, v in self._profiles.items() if k in wanted}
+        else:
+            selected = dict(self._profiles)
+
+        if not selected:
+            raise ValueError("Nenhum perfil de voz disponível para exportar.")
+
+        sample_dim = next(iter(selected.values()))["embedding"].size
+        payload = {
+            "schema_version": 1,
+            "format": "omniscribe-voiceprints",
+            "model": EMBEDDING_MODEL_NAME,
+            "dim": int(sample_dim),
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "profiles": {
+                name: {
+                    "embedding": data["embedding"].astype(float).tolist(),
+                    "samples_count": int(data["samples_count"]),
+                    "total_speech_seconds": round(float(data["total_speech_seconds"]), 2),
+                    "updated_at": data["updated_at"],
+                }
+                for name, data in selected.items()
+            },
+        }
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        return len(selected)
+
+    def import_profiles(
+        self,
+        input_path: Path,
+        conflict_strategy: str = "merge",
+    ) -> Dict[str, int]:
+        """Importa perfis biométricos de um arquivo JSON com validação de modelo e mesclagem.
+
+        conflict_strategy:
+          - 'merge': combina vetores L2-normalizados ponderados por `samples_count` quando o nome já existir.
+          - 'overwrite': substitui o perfil local pelo importado.
+          - 'skip': mantém o perfil local intacto e importa apenas novos nomes.
+        """
+        if conflict_strategy not in ("merge", "overwrite", "skip"):
+            raise ValueError(f"Estratégia de conflito inválida: {conflict_strategy}")
+
+        input_path = Path(input_path)
+        if not input_path.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {input_path}")
+
+        with open(input_path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        if not isinstance(raw, dict) or not isinstance(raw.get("profiles"), dict):
+            raise ValueError("Arquivo JSON inválido: estrutura de perfis de voz não encontrada.")
+
+        source_model = raw.get("model")
+        if source_model and source_model != EMBEDDING_MODEL_NAME:
+            raise ValueError(
+                f"Modelo incompatível no arquivo ({source_model}). Esperado: {EMBEDDING_MODEL_NAME}."
+            )
+
+        self._load_profiles()
+        expected_dim = (
+            next(iter(self._profiles.values()))["embedding"].size
+            if self._profiles
+            else int(raw.get("dim") or 256)
+        )
+
+        added = 0
+        updated = 0
+        skipped = 0
+        now_iso = datetime.now().isoformat(timespec="seconds")
+
+        for raw_name, entry in raw["profiles"].items():
+            clean_name = str(raw_name).strip()
+            if not clean_name or not isinstance(entry, dict):
+                continue
+
+            vec = np.asarray(entry.get("embedding", []), dtype=np.float32)
+            if vec.ndim != 1 or vec.size == 0 or float(np.linalg.norm(vec)) <= 1e-8:
+                continue
+            if vec.size != expected_dim:
+                raise ValueError(
+                    f"Dimensão incompatível para '{clean_name}': {vec.size} != {expected_dim}."
+                )
+
+            imp_emb = _l2_normalize(vec)
+            imp_count = max(1, int(entry.get("samples_count", 1)))
+            imp_secs = max(0.0, float(entry.get("total_speech_seconds", 0.0)))
+            imp_updated = str(entry.get("updated_at", now_iso))
+
+            if clean_name in self._profiles:
+                if conflict_strategy == "skip":
+                    skipped += 1
+                    continue
+                elif conflict_strategy == "overwrite":
+                    self._profiles[clean_name] = {
+                        "embedding": imp_emb,
+                        "samples_count": imp_count,
+                        "total_speech_seconds": imp_secs,
+                        "updated_at": now_iso,
+                    }
+                    updated += 1
+                else:  # merge
+                    cur = self._profiles[clean_name]
+                    cur_w = float(max(1, cur["samples_count"]))
+                    combined = cur["embedding"] * cur_w + imp_emb * float(imp_count)
+                    self._profiles[clean_name] = {
+                        "embedding": _l2_normalize(combined),
+                        "samples_count": int(cur["samples_count"]) + imp_count,
+                        "total_speech_seconds": float(cur["total_speech_seconds"]) + imp_secs,
+                        "updated_at": now_iso,
+                    }
+                    updated += 1
+            else:
+                self._profiles[clean_name] = {
+                    "embedding": imp_emb,
+                    "samples_count": imp_count,
+                    "total_speech_seconds": imp_secs,
+                    "updated_at": imp_updated,
+                }
+                added += 1
+
+        if added == 0 and updated == 0 and skipped == 0:
+            raise ValueError("Nenhum perfil válido encontrado no arquivo selecionado.")
+
+        self._save_profiles()
+        return {
+            "added": added,
+            "updated": updated,
+            "skipped": skipped,
+            "total_after": len(self._profiles),
+        }
+
     # ---------------- MODELOS ONNX & DOWNLOAD ----------------
     def is_runtime_available(self) -> bool:
         return _ensure_sherpa_loaded()

@@ -458,18 +458,58 @@ class VoiceProfilesModal(ctk.CTkToplevel):
         )
         self.btn_enroll_wav.pack(side="right")
 
-        # 4. Lista de perfis salvos
+        # 4. Lista de perfis salvos + Exportar/Importar
         list_card = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         list_card.grid(row=3, column=0, padx=20, pady=6, sticky="nsew")
         list_card.grid_columnconfigure(0, weight=1)
         list_card.grid_rowconfigure(1, weight=1)
 
+        list_head = ctk.CTkFrame(list_card, fg_color="transparent")
+        list_head.grid(row=0, column=0, padx=14, pady=(8, 4), sticky="ew")
+        list_head.grid_columnconfigure(0, weight=1)
+
         ctk.CTkLabel(
-            list_card,
+            list_head,
             text="Perfis Cadastrados (voice_profiles.json)",
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color=THEME_TEXT_PRIMARY,
-        ).grid(row=0, column=0, padx=14, pady=(8, 4), sticky="w")
+        ).grid(row=0, column=0, sticky="w")
+
+        share_box = ctk.CTkFrame(list_head, fg_color="transparent")
+        share_box.grid(row=0, column=1, sticky="e")
+
+        self.opt_import_conflict = ctk.CTkOptionMenu(
+            share_box,
+            values=["Se existir: Mesclar", "Se existir: Manter Local", "Se existir: Substituir"],
+            width=165,
+            height=26,
+            font=ctk.CTkFont(size=11),
+        )
+        self.opt_import_conflict.set("Se existir: Mesclar")
+        self.opt_import_conflict.pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            share_box,
+            text="📥 Importar (.json)",
+            width=120,
+            height=26,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self._import_profiles,
+        ).pack(side="left", padx=(0, 6))
+
+        self.btn_export_all = ctk.CTkButton(
+            share_box,
+            text="📤 Exportar Tudo",
+            width=116,
+            height=26,
+            fg_color="#0891b2",
+            hover_color="#0e7490",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=lambda: self._export_profiles(None),
+        )
+        self.btn_export_all.pack(side="left")
 
         self.scroll_profiles = ctk.CTkScrollableFrame(list_card, fg_color="#0f172a", corner_radius=8)
         self.scroll_profiles.grid(row=1, column=0, padx=12, pady=(0, 10), sticky="nsew")
@@ -547,21 +587,101 @@ class VoiceProfilesModal(ctk.CTkToplevel):
             ctk.CTkLabel(row, text=meta, font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(
                 row=0, column=0, padx=10, pady=8, sticky="w"
             )
+            row_btns = ctk.CTkFrame(row, fg_color="transparent")
+            row_btns.grid(row=0, column=1, padx=8, pady=6, sticky="e")
+
             ctk.CTkButton(
-                row,
+                row_btns,
+                text="📤 Exportar",
+                width=82,
+                height=26,
+                fg_color="#0891b2",
+                hover_color="#0e7490",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda n=prof["name"]: self._export_profiles([n]),
+            ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                row_btns,
                 text="🗑️ Remover",
-                width=92,
+                width=86,
                 height=26,
                 fg_color="#991b1b",
                 hover_color="#dc2626",
                 font=ctk.CTkFont(size=11, weight="bold"),
                 command=lambda n=prof["name"]: self._delete_profile(n),
-            ).grid(row=0, column=1, padx=10, pady=6, sticky="e")
+            ).pack(side="left")
 
     def _delete_profile(self, name: str) -> None:
         if self.vp.delete_profile(name):
             self.lbl_feedback.configure(text=f"Perfil '{name}' removido.", text_color="#f59e0b")
             self._refresh_profiles_list()
+
+    def _export_profiles(self, profile_names: Optional[List[str]]) -> None:
+        if self.is_busy:
+            return
+        if not self.vp.has_profiles():
+            self.lbl_feedback.configure(text="Nenhum perfil cadastrado para exportar.", text_color="#f59e0b")
+            return
+
+        if profile_names and len(profile_names) == 1:
+            safe = re.sub(r"[^a-zA-Z0-9_\-]+", "_", profile_names[0]).strip("_") or "perfil"
+            default_name = f"voiceprint_{safe}.json"
+        else:
+            default_name = "voiceprints_equipe.json"
+
+        chosen = filedialog.asksaveasfilename(
+            parent=self,
+            title="Exportar Perfis de Voz (.json)",
+            initialdir=str(get_base_dir() / "atas_reunioes"),
+            initialfile=default_name,
+            defaultextension=".json",
+            filetypes=[("Perfis Voiceprint JSON", "*.json"), ("Todos os Arquivos", "*.*")],
+        )
+        if not chosen:
+            return
+
+        try:
+            count = self.vp.export_profiles(Path(chosen), profile_names=profile_names)
+            self.lbl_feedback.configure(
+                text=f"✅ {count} perfil(is) exportado(s) para {Path(chosen).name}!",
+                text_color="#10b981",
+            )
+        except Exception as e:
+            self.lbl_feedback.configure(text=f"Erro ao exportar perfis: {e}", text_color="#ef4444")
+
+    def _import_profiles(self) -> None:
+        if self.is_busy:
+            return
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Importar Perfis de Voz (.json)",
+            initialdir=str(get_base_dir() / "atas_reunioes"),
+            filetypes=[("Perfis Voiceprint JSON", "*.json"), ("Todos os Arquivos", "*.*")],
+        )
+        if not chosen:
+            return
+
+        choice = self.opt_import_conflict.get()
+        if "Manter" in choice:
+            strategy = "skip"
+        elif "Substituir" in choice:
+            strategy = "overwrite"
+        else:
+            strategy = "merge"
+
+        try:
+            res = self.vp.import_profiles(Path(chosen), conflict_strategy=strategy)
+            self._refresh_profiles_list()
+            self.lbl_feedback.configure(
+                text=(
+                    f"✅ Importação concluída: +{res['added']} novo(s), "
+                    f"{res['updated']} atualizado(s), {res['skipped']} mantido(s)."
+                ),
+                text_color="#10b981",
+            )
+        except Exception as e:
+            self.lbl_feedback.configure(text=f"Erro ao importar perfis: {e}", text_color="#ef4444")
 
     def _start_model_download(self) -> None:
         if self.is_busy:
