@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
 
+from archive_service import MeetingArchiveService
+from offline_asr_service import OfflineAsrService
 from usage_tracker import UsageTracker
 from voiceprint_service import VoiceprintService
 
@@ -282,6 +284,7 @@ Transcrição completa da reunião:
         on_transcription_update: Optional[Callable[[int, str, str, bool], None]] = None,
         on_minute_generated: Optional[Callable[[Path, str], None]] = None,
         on_status_change: Optional[Callable[[str], None]] = None,
+        on_archive_generated: Optional[Callable[[Path, dict], None]] = None,
         defer_init: bool = False,
     ):
         self.api_key = api_key or load_api_key_from_env()
@@ -289,6 +292,7 @@ Transcrição completa da reunião:
         self.on_transcription_update = on_transcription_update
         self.on_minute_generated = on_minute_generated
         self.on_status_change = on_status_change
+        self.on_archive_generated = on_archive_generated
 
         self._task_queue: queue.Queue[Optional[AudioBlockTask]] = queue.Queue()
         self._worker_thread: Optional[threading.Thread] = None
@@ -298,9 +302,18 @@ Transcrição completa da reunião:
         if not defer_init:
             self._init_client()
 
-        # Rastreador persistente de cotas e custos e serviço local de biometria vocal
+        # Rastreador persistente, biometria vocal, motor offline (5.C) e pacote SQLite portátil (5.D)
         self.tracker = UsageTracker(get_base_dir() / "atas_reunioes")
         self.voiceprint_service = VoiceprintService()
+        self.offline_asr_service = OfflineAsrService(voiceprint_service=self.voiceprint_service)
+        self.archive_service = MeetingArchiveService()
+
+        # Preferências de execução híbrida (online/offline) e empacotamento portátil
+        self.engine_mode = "online"
+        self.offline_whisper_variant = "small"
+        self.offline_ollama_model = ""
+        self.auto_export_sqlite = True
+        self._offline_unknown_clusters = []
 
         # Metadados da reunião atual
         self.meeting_title = ""
@@ -309,7 +322,9 @@ Transcrição completa da reunião:
         self.transcription_file_path: Optional[Path] = None
         self.minute_file_path: Optional[Path] = None
         self.audio_file_path: Optional[Path] = None
+        self.archive_file_path: Optional[Path] = None
         self.accumulated_transcript = ""
+        self.last_minutes_text = ""
         self._max_block_end_seconds = 0.0
 
     def get_session_audio_path(self) -> Optional[Path]:
@@ -365,13 +380,19 @@ Transcrição completa da reunião:
         title: str,
         context_notes: str = "",
         source_audio_path: Optional[Path] = None,
+        engine_mode: Optional[str] = None,
     ) -> Tuple[Path, Path]:
         """Prepara os arquivos e pastas da sessão de reunião e inicia o worker."""
+        if engine_mode in ("online", "offline"):
+            self.engine_mode = engine_mode
+
         self.meeting_title = title.strip() or "Reuniao"
         self.context_notes = (context_notes or "").strip()
         self.meeting_start_time = datetime.now()
         self.accumulated_transcript = ""
+        self.last_minutes_text = ""
         self._max_block_end_seconds = 0.0
+        self._offline_unknown_clusters = []
 
         # Diretório atas_reunioes/AAAA/MM/
         base_dir = get_base_dir()
@@ -391,16 +412,23 @@ Transcrição completa da reunião:
             if source_audio_path is not None
             else (target_dir / f"audio_{timestamp_str}{suffix}.wav")
         )
+        self.archive_file_path = target_dir / f"reuniao_{timestamp_str}{suffix}.omniscribe"
 
         # Inicializa o arquivo de transcrição com cabeçalho Markdown
         data_formatada = self.meeting_start_time.strftime("%d/%m/%Y às %H:%M")
         context_line = f"**Contexto / Glossário:** {self.context_notes}\n" if self.context_notes else ""
         audio_line = f"**Áudio Oficial:** `{self.audio_file_path.name}`\n" if self.audio_file_path else ""
+        engine_desc = (
+            f"Offline Local (Whisper {self.offline_whisper_variant} ONNX + Voiceprints)"
+            if self.engine_mode == "offline"
+            else "Online (Gemini 2.5 Flash + Voiceprints Locais)"
+        )
         header_text = (
             f"# Transcrição da Reunião: {self.meeting_title}\n"
             f"**Data de Início:** {data_formatada}\n"
             f"**Arquivo de Registro:** `{self.transcription_file_path.name}`\n"
             f"{audio_line}"
+            f"**Motor de Transcrição:** {engine_desc}\n"
             f"**Modo de Captura:** Detecção automática por bloco (Estéreo L/R Online ou Mono Presencial)\n"
             f"{context_line}\n"
             f"---\n\n"
@@ -408,7 +436,7 @@ Transcrição completa da reunião:
         with open(self.transcription_file_path, "w", encoding="utf-8") as f:
             f.write(header_text)
 
-        self._log(f"[SESSÃO] Arquivo de transcrição criado: {self.transcription_file_path.name}")
+        self._log(f"[SESSÃO] Transcrição ({engine_desc}): {self.transcription_file_path.name}")
 
         # Inicia thread de processamento da fila
         self._is_running = True
@@ -756,20 +784,69 @@ Transcrição completa da reunião:
             out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
         return int(in_tok), int(out_tok)
 
+    def _process_single_block_offline(self, task: AudioBlockTask, time_range: str, mode_label: str) -> None:
+        """Transcreve um bloco WAV localmente usando Whisper ONNX + Voiceprints (sem API Gemini)."""
+        try:
+            ready, msg = self.offline_asr_service.is_ready(self.offline_whisper_variant)
+            if not ready:
+                self._set_status("Baixando modelo offline Whisper...")
+                self._log(f"[OFFLINE] {msg} Iniciando download automático...")
+                ok, dl_msg = self.offline_asr_service.ensure_models_ready(
+                    variant=self.offline_whisper_variant,
+                    progress_cb=lambda m, p: self._set_status(f"{m} ({int(p*100)}%)"),
+                )
+                if not ok:
+                    err_md = f"### Bloco {task.block_index:02d} [{time_range}]\n\n*[Falha no modo offline: {dl_msg}. WAV preservado em: `{task.wav_path.name}`]*\n\n---\n\n"
+                    self._append_to_transcription(task, err_md, success=False)
+                    return
+
+            self._set_status(f"Transcrevendo Bloco #{task.block_index} (Offline Whisper)...")
+            raw_text = self.offline_asr_service.transcribe_wav_block(
+                task.wav_path,
+                block_offset_seconds=task.start_seconds,
+                variant=self.offline_whisper_variant,
+                session_unknown_clusters=self._offline_unknown_clusters,
+            )
+            transcription_text, _, _ = self._detect_and_sanitize_repetition(raw_text)
+            if not transcription_text:
+                transcription_text = "*[Silêncio / Sem fala identificada no período]*"
+
+            audio_dur = max(0.0, task.end_seconds - task.start_seconds)
+            self.tracker.register_request(audio_seconds=audio_dur, input_tokens=0, output_tokens=0)
+
+            block_markdown = (
+                f"### Bloco {task.block_index:02d} [{time_range}]\n\n"
+                f"{transcription_text}\n\n"
+                f"---\n\n"
+            )
+            self._append_to_transcription(task, block_markdown, success=True)
+            self._log(f"[OK] Bloco #{task.block_index} ({mode_label} • Offline Whisper) transcrito e salvo.")
+        except Exception as e:
+            self._log(f"[ERRO] Falha offline no Bloco #{task.block_index}: {e}")
+            err_md = (
+                f"### Bloco {task.block_index:02d} [{time_range}]\n\n"
+                f"*[Falha offline: {e}. Áudio preservado em: `{task.wav_path.name}`]*\n\n---\n\n"
+            )
+            self._append_to_transcription(task, err_md, success=False)
+
     def _process_single_block(self, task: AudioBlockTask) -> None:
-        """Transcreve um bloco de áudio via Gemini 2.5 Flash, anexa no Markdown e limpa o WAV."""
+        """Transcreve um bloco de áudio (Online Gemini ou Offline Whisper), anexa no Markdown e limpa o WAV."""
         time_range = f"{format_seconds(task.start_seconds)} - {format_seconds(task.end_seconds)}"
-        self._log(f"[IA] Processando Bloco #{task.block_index} ({time_range})...")
+        num_channels = self._detect_wav_channels(task.wav_path)
+        mode_label = "Mono / Presencial" if num_channels == 1 else "Estéreo / Online"
+        self._log(f"[IA] Processando Bloco #{task.block_index} ({time_range} • {self.engine_mode})...")
+        self._log(f"[ÁUDIO] Bloco #{task.block_index} detectado: {num_channels} canal(is) ({mode_label}).")
+
+        if self.engine_mode == "offline":
+            self._process_single_block_offline(task, time_range, mode_label)
+            return
 
         if not self._client:
             msg = f"\n### Bloco {task.block_index:02d} [{time_range}]\n*[Erro: Chave Gemini não configurada]*\n\n"
             self._append_to_transcription(task, msg, success=False)
             return
 
-        num_channels = self._detect_wav_channels(task.wav_path)
-        mode_label = "Mono / Presencial" if num_channels == 1 else "Estéreo / Online"
         system_prompt = self._select_transcription_prompt(num_channels)
-        self._log(f"[ÁUDIO] Bloco #{task.block_index} detectado: {num_channels} canal(is) ({mode_label}).")
 
         uploaded_remote_file = None
         try:
@@ -971,13 +1048,42 @@ Transcrição completa da reunião:
         except Exception as e:
             logger.exception(f"Erro ao escrever no arquivo de transcrição: {e}")
 
+    def _export_session_archive(self, transcript_md: str, minutes_md: str) -> None:
+        """Exporta o pacote SQLite portátil `.omniscribe` contendo texto e áudio comprimido da reunião."""
+        if not self.auto_export_sqlite or not self.archive_file_path:
+            return
+        try:
+            self._set_status("Compactando pacote SQLite (.omniscribe)...")
+            summary = self.archive_service.export_meeting_package(
+                output_path=self.archive_file_path,
+                title=self.meeting_title or "Reuniao",
+                created_at=self.meeting_start_time,
+                mode="Híbrido",
+                engine_mode=self.engine_mode,
+                context_notes=self.context_notes,
+                transcript_md=transcript_md,
+                minutes_md=minutes_md,
+                wav_path=self.audio_file_path if (self.audio_file_path and self.audio_file_path.exists()) else None,
+            )
+            mb = summary["size_bytes"] / (1024 * 1024)
+            ratio = summary["compression_ratio"]
+            self._log(
+                f"[SQLITE] Pacote portátil salvo: {self.archive_file_path.name} "
+                f"({mb:.2f} MB • compressão {ratio}x • {summary['segment_count']} turnos)."
+            )
+            if self.on_archive_generated:
+                self.on_archive_generated(self.archive_file_path, summary)
+        except Exception as arch_err:
+            logger.warning(f"Falha ao gerar pacote SQLite .omniscribe: {arch_err}")
+            self._log(f"[AVISO] Não foi possível gerar pacote .omniscribe: {arch_err}")
+
     def _generate_executive_minutes(self) -> None:
-        """Lê a transcrição consolidada e gera a Ata Executiva estruturada via Gemini 2.5 Flash."""
+        """Lê a transcrição consolidada, gera a Ata Executiva (Online ou Offline) e salva o pacote `.omniscribe`."""
         if not self.transcription_file_path or not self.minute_file_path:
             self._log("[ERRO] Caminhos de arquivos de Ata não definidos.")
             return
 
-        if not self._client:
+        if self.engine_mode == "online" and not self._client:
             self._log("[AVISO] Chave Gemini ausente; Ata Executiva não pôde ser gerada via IA.")
             fallback_text = (
                 f"# Ata Executiva da Reunião: {self.meeting_title}\n"
@@ -986,6 +1092,7 @@ Transcrição completa da reunião:
             )
             with open(self.minute_file_path, "w", encoding="utf-8") as f:
                 f.write(fallback_text)
+            self.last_minutes_text = fallback_text
             if self.on_minute_generated:
                 self.on_minute_generated(self.minute_file_path, fallback_text)
             return
@@ -1012,6 +1119,7 @@ Transcrição completa da reunião:
                 )
                 with open(self.minute_file_path, "w", encoding="utf-8") as f:
                     f.write(notice_text)
+                self.last_minutes_text = notice_text
                 if self.on_minute_generated:
                     self.on_minute_generated(self.minute_file_path, notice_text)
                 return
@@ -1019,6 +1127,27 @@ Transcrição completa da reunião:
             # Lê o conteúdo completo da transcrição gravada
             with open(self.transcription_file_path, "r", encoding="utf-8") as f:
                 raw_transcript = f.read()
+
+            if self.engine_mode == "offline":
+                refined_transcript, _, _ = self._detect_and_sanitize_repetition(raw_transcript)
+                self._set_status("Gerando Ata Executiva offline...")
+                minute_text, backend_used = self.offline_asr_service.generate_offline_minutes(
+                    title=self.meeting_title,
+                    date_str=date_str,
+                    duration_str=duration_str,
+                    transcript_md=refined_transcript,
+                    minutes_prompt_template=self.MINUTES_SYSTEM_PROMPT,
+                    preferred_ollama_model=self.offline_ollama_model,
+                )
+                self.tracker.register_request(audio_seconds=0.0, input_tokens=0, output_tokens=0, is_new_meeting=True)
+                with open(self.minute_file_path, "w", encoding="utf-8") as f:
+                    f.write(minute_text)
+                self.last_minutes_text = minute_text
+                self._log(f"[SUCESSO] Ata Executiva Offline salva ({backend_used}): {self.minute_file_path.name}")
+                self._export_session_archive(refined_transcript, minute_text)
+                if self.on_minute_generated:
+                    self.on_minute_generated(self.minute_file_path, minute_text)
+                return
 
             # Segunda passada fono-semântica antes da Ata Executiva (apenas texto)
             self._set_status("Refinando transcrição e nomes de participantes...")
@@ -1052,8 +1181,10 @@ Transcrição completa da reunião:
             # Salva no arquivo de Ata Executiva
             with open(self.minute_file_path, "w", encoding="utf-8") as f:
                 f.write(minute_text)
+            self.last_minutes_text = minute_text
 
             self._log(f"[SUCESSO] Ata Executiva salva com sucesso em: {self.minute_file_path.name}")
+            self._export_session_archive(refined_transcript, minute_text)
 
             if self.on_minute_generated:
                 self.on_minute_generated(self.minute_file_path, minute_text)

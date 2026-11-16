@@ -179,13 +179,13 @@ python src/main.py
 3. **Busca, Filtros e Exportação Avançada:** pesquisa no histórico de gravações e exportação direta em `.md`, `.docx` e `.pdf`.
 4. **Player Sincronizado com Timestamps:** clicar em uma fala da transcrição para reproduzir exatamente aquele trecho do áudio salvo.
 
-### C. Transcrição Híbrida (Modo Online e Totalmente Offline)
-1. **Seletor de Modo na Interface (`Online` vs. `Offline`):** alternância rápida para reuniões confidenciais, ambientes sem internet ou cota esgotada.
-2. **Pipeline Local Offline:** ASR local (`faster-whisper` ou `whisper.cpp` com modelos quantizados sob demanda), diarização local (`Mic` vs. `Loopback` + embeddings locais) e geração de ata via LLM local (`Ollama` / `llama.cpp`) ou fallback estruturado.
+### C. Transcrição Híbrida (Modo Online e Totalmente Offline) — **[IMPLEMENTADO]**
+1. **Seletor de Modo na Interface (`Online` vs. `Offline`):** alternância direta na aba Gravação (`seg_engine_mode`) e no modal de Re-transcrição (`RetranscribeModal`), permitindo gravar e re-transcrever sem `GEMINI_API_KEY`.
+2. **Pipeline Local Offline (`src/offline_asr_service.py`):** ASR local via `sherpa-onnx` **Whisper `small` / `base` INT8 ONNX** com download sob demanda, segmentação Silero VAD + diarização biométrica via `VoiceprintService` (`Estéreo L/R` e `Mono Presencial`) e geração da Ata via **Ollama local** (`localhost:11434`, quando ativo) ou sintetizador estruturado determinístico.
 
-### D. Armazenamento Portátil em SQLite por Gravação
-1. **Arquivo Único Autocontido (`.omniscribe` / `.db`):** empacotar áudio comprimido (**Opus/Ogg** ou **MP3** em `BLOB`), metadados, segmentos de transcrição e ata executiva em um único banco SQLite por reunião (reduzindo espaço em disco frente a `.wav` bruto).
-2. **Compartilhamento Direto:** permitir abrir e compartilhar o arquivo `.omniscribe`/`.db` entre usuários do OmniScribe com áudio, transcrição e ata completos.
+### D. Armazenamento Portátil em SQLite por Gravação — **[IMPLEMENTADO]**
+1. **Arquivo Único Autocontido (`.omniscribe`):** empacotamento em SQLite (`src/archive_service.py`) contendo metadados, documentos Markdown (`transcrição` e `ata`), segmentos indexados (`transcript_segments`) e áudio oficial compactado em chunks via codec `b4p_zlib` (Block-4bit PCM + `zlib`, ~5x–9x menor sem depender de FFmpeg).
+2. **Compartilhamento Direto & Modo Híbrido:** exportação automática ao finalizar sessão, botão **📦 Exportar .omniscribe** na aba Ata, e importação/leitura/playback/re-transcrição direta de `.omniscribe` na aba Histórico.
 
 ### E. Upload e Transcrição de Arquivos de Áudio e Vídeo
 1. **Importação Direta (Drag-and-Drop / Seletor):** aceitar `.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`, `.mp3`, `.wav`, `.m4a`, `.ogg` e `.flac` pela tela inicial.

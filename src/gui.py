@@ -27,7 +27,9 @@ from audio_engine import (
     record_mic_sample,
     slice_wav_for_retranscription,
 )
+from archive_service import MeetingArchiveService
 from mascot_widget import OmniMicWidget
+from offline_asr_service import WHISPER_MODELS, list_ollama_models
 from gemini_service import (
     GeminiService,
     format_seconds,
@@ -37,6 +39,7 @@ from gemini_service import (
 )
 
 logger = logging.getLogger("omniscribe.gui")
+_ARCHIVE_READER = MeetingArchiveService()
 
 # Configurações globais de aparência (Escuro como padrão; alternável para Claro em tempo real)
 ctk.set_appearance_mode("Dark")
@@ -113,7 +116,7 @@ class RetranscribeModal(ctk.CTkToplevel):
         self.wav_info = get_wav_info(self.wav_path)
 
         self.title("Re-transcrever Áudio Salvo - OmniScribe AI")
-        self.geometry("560x390")
+        self.geometry("560x430")
         self.resizable(False, False)
         self.configure(fg_color=THEME_BG)
         self.grab_set()
@@ -167,6 +170,17 @@ class RetranscribeModal(ctk.CTkToplevel):
         self.opt_block.set("1 minuto")
         self.opt_block.grid(row=2, column=1, padx=14, pady=8, sticky="w")
 
+        ctk.CTkLabel(form, text="Motor de IA:", font=ctk.CTkFont(weight="bold")).grid(
+            row=3, column=0, padx=14, pady=8, sticky="w"
+        )
+        self.opt_engine = ctk.CTkOptionMenu(
+            form,
+            values=["☁️ Online (Gemini 2.5)", "💻 Offline (Whisper ONNX)"],
+        )
+        default_eng = "💻 Offline (Whisper ONNX)" if getattr(parent, "engine_mode", "online") == "offline" else "☁️ Online (Gemini 2.5)"
+        self.opt_engine.set(default_eng)
+        self.opt_engine.grid(row=3, column=1, padx=14, pady=8, sticky="w")
+
         self.chk_enhance = ctk.CTkCheckBox(
             form,
             text="Aplicar filtro passa-alta (~80 Hz) e normalização dinâmica (recomendado para WAV externo)",
@@ -174,7 +188,7 @@ class RetranscribeModal(ctk.CTkToplevel):
         )
         if sr_hz != 16000:
             self.chk_enhance.select()
-        self.chk_enhance.grid(row=3, column=0, columnspan=2, padx=14, pady=(6, 14), sticky="w")
+        self.chk_enhance.grid(row=4, column=0, columnspan=2, padx=14, pady=(6, 14), sticky="w")
 
         lbl_note = ctk.CTkLabel(
             self,
@@ -210,6 +224,7 @@ class RetranscribeModal(ctk.CTkToplevel):
         context_notes = self.entry_context.get().strip()
         block_str = self.opt_block.get()
         block_seconds = 60 if "1" in block_str else (300 if "5" in block_str else 180)
+        eng_mode = "offline" if "Offline" in self.opt_engine.get() else "online"
         apply_enh = bool(self.chk_enhance.get())
         self.destroy()
         self.parent.start_retranscription(
@@ -218,6 +233,7 @@ class RetranscribeModal(ctk.CTkToplevel):
             context_notes=context_notes,
             block_seconds=block_seconds,
             apply_enhancement=apply_enh,
+            engine_mode=eng_mode,
         )
 
 
@@ -1081,8 +1097,11 @@ def render_history_cards_into(
     filter_mode: str,
     on_view_md,
     on_retranscribe_wav,
+    on_open_archive=None,
+    on_play_archive=None,
+    on_retranscribe_archive=None,
 ) -> None:
-    """Popula um container rolável com cartões de gravações .wav, atas e transcrições."""
+    """Popula um container rolável com cartões de pacotes .omniscribe, .wav, atas e transcrições."""
     for child in scroll_container.winfo_children():
         child.destroy()
 
@@ -1097,8 +1116,10 @@ def render_history_cards_into(
         ).pack(pady=40)
         return
 
-    patterns = ("**/*.md", "**/*.wav")
-    if "Áudios" in filter_mode:
+    patterns = ("**/*.omniscribe", "**/*.md", "**/*.wav")
+    if ".omniscribe" in filter_mode or "Pacote" in filter_mode:
+        patterns = ("**/*.omniscribe",)
+    elif "Áudios" in filter_mode:
         patterns = ("**/*.wav",)
     elif "Atas" in filter_mode or "Transcrições" in filter_mode:
         patterns = ("**/*.md",)
@@ -1127,7 +1148,9 @@ def render_history_cards_into(
 
     for file_path in files:
         filename = file_path.name
-        is_wav = file_path.suffix.lower() == ".wav"
+        ext = file_path.suffix.lower()
+        is_archive = ext == ".omniscribe"
+        is_wav = ext == ".wav"
         is_ata = "ata_executiva" in filename
         is_transc = "transcricao" in filename
 
@@ -1146,7 +1169,9 @@ def render_history_cards_into(
         card.pack(fill="x", padx=4, pady=4)
         card.grid_columnconfigure(1, weight=1)
 
-        if is_wav:
+        if is_archive:
+            badge_text, badge_color, icon = "PACOTE SQLITE", "#7c3aed", "📦"
+        elif is_wav:
             badge_text, badge_color, icon = "ÁUDIO WAV", COLOR_TEAL, "🔊"
         elif is_ata:
             badge_text, badge_color, icon = "ATA EXECUTIVA", COLOR_SUCCESS, "📋"
@@ -1169,14 +1194,20 @@ def render_history_cards_into(
         info_frame = ctk.CTkFrame(card, fg_color="transparent")
         info_frame.grid(row=0, column=1, padx=6, pady=8, sticky="w")
 
-        ctk.CTkLabel(
-            info_frame,
-            text=filename,
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=THEME_TEXT_PRIMARY,
-        ).pack(anchor="w")
-
-        if is_wav:
+        display_title = filename
+        if is_archive:
+            try:
+                arch_info = _ARCHIVE_READER.read_archive_summary(file_path)
+                display_title = f"{arch_info['title']} ({filename})"
+                eng_tag = "Offline" if arch_info["engine_mode"] == "offline" else "Online"
+                meta_txt = (
+                    f"Duração: {format_seconds(arch_info['duration_seconds'])} • {eng_tag} • "
+                    f"{arch_info['segment_count']} falas • {arch_info['compression_ratio']}x comp. • "
+                    f"{size_label} • {date_str}"
+                )
+            except Exception:
+                meta_txt = f"Pacote SQLite • {size_label} • {date_str}"
+        elif is_wav:
             w_info = get_wav_info(file_path)
             ch_txt = "Mono" if w_info["channels"] == 1 else "Estéreo L/R"
             meta_txt = (
@@ -1188,6 +1219,13 @@ def render_history_cards_into(
 
         ctk.CTkLabel(
             info_frame,
+            text=display_title,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(anchor="w")
+
+        ctk.CTkLabel(
+            info_frame,
             text=meta_txt,
             font=ctk.CTkFont(size=11),
             text_color=THEME_TEXT_MUTED,
@@ -1196,7 +1234,43 @@ def render_history_cards_into(
         actions = ctk.CTkFrame(card, fg_color="transparent")
         actions.grid(row=0, column=2, padx=10, pady=10, sticky="e")
 
-        if is_wav:
+        if is_archive:
+            if on_play_archive is not None:
+                ctk.CTkButton(
+                    actions,
+                    text="▶ Ouvir",
+                    width=74,
+                    height=30,
+                    font=ctk.CTkFont(size=12, weight="bold"),
+                    fg_color=BTN_NEUTRAL,
+                    hover_color=BTN_NEUTRAL_HOVER,
+                    text_color=THEME_TEXT_PRIMARY,
+                    command=lambda p=file_path: on_play_archive(p),
+                ).pack(side="left", padx=(0, 6))
+
+            if on_retranscribe_archive is not None:
+                ctk.CTkButton(
+                    actions,
+                    text="🔄 Áudio",
+                    width=82,
+                    height=30,
+                    font=ctk.CTkFont(size=11, weight="bold"),
+                    fg_color=COLOR_TEAL,
+                    hover_color="#0e7490",
+                    command=lambda p=file_path: on_retranscribe_archive(p),
+                ).pack(side="left", padx=(0, 6))
+
+            ctk.CTkButton(
+                actions,
+                text="Abrir",
+                width=78,
+                height=30,
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color="#7c3aed",
+                hover_color="#6d28d9",
+                command=(lambda p=file_path: on_open_archive(p)) if on_open_archive else (lambda p=file_path: on_view_md(p)),
+            ).pack(side="left")
+        elif is_wav:
             ctk.CTkButton(
                 actions,
                 text="▶ Ouvir",
@@ -1320,6 +1394,9 @@ class HistoryModal(ctk.CTkToplevel):
             filter_mode="Tudo",
             on_view_md=self._select_file,
             on_retranscribe_wav=self._open_retranscribe,
+            on_open_archive=lambda p: (self.parent.load_archive(p), self.destroy()),
+            on_play_archive=self.parent.play_archive_audio,
+            on_retranscribe_archive=lambda p: (self.destroy(), self.parent.retranscribe_archive(p)),
         )
 
     def _open_retranscribe(self, wav_path: Path) -> None:
@@ -1334,10 +1411,11 @@ class HistoryModal(ctk.CTkToplevel):
         atas_root = get_base_dir() / "atas_reunioes"
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="Selecione uma Ata (.md) ou Gravação (.wav)",
+            title="Selecione um Pacote (.omniscribe), Ata (.md) ou Gravação (.wav)",
             initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
             filetypes=[
-                ("Atas e Gravações", "*.md *.wav"),
+                ("Reuniões OmniScribe", "*.omniscribe *.md *.wav"),
+                ("Pacotes SQLite", "*.omniscribe"),
                 ("Gravações WAV", "*.wav"),
                 ("Documentos Markdown", "*.md"),
                 ("Todos os Arquivos", "*.*"),
@@ -1345,7 +1423,10 @@ class HistoryModal(ctk.CTkToplevel):
         )
         if chosen:
             chosen_path = Path(chosen)
-            if chosen_path.suffix.lower() == ".wav":
+            if chosen_path.suffix.lower() == ".omniscribe":
+                self.parent.import_archive_file(chosen_path)
+                self.destroy()
+            elif chosen_path.suffix.lower() == ".wav":
                 self._open_retranscribe(chosen_path)
             else:
                 self._select_file(chosen_path)
@@ -1361,11 +1442,18 @@ class ZoomTranscriberApp(ctk.CTk):
 
     MODE_ONLINE = "🌐 Online (Sistema+Mic)"
     MODE_PRESENCIAL = "🏢 Presencial (Só Mic)"
+    ENGINE_ONLINE = "☁️ Gemini"
+    ENGINE_OFFLINE = "💻 Offline"
 
     def __init__(self):
         super().__init__()
 
-        self.theme_mode = self._load_theme_preference()
+        ui_cfg = self._load_ui_settings()
+        self.theme_mode = "Light" if str(ui_cfg.get("theme", "")).lower() == "light" else "Dark"
+        self.engine_mode = "offline" if str(ui_cfg.get("engine_mode", "")).lower() == "offline" else "online"
+        self.offline_whisper_variant = "base" if ui_cfg.get("whisper_variant") == "base" else "small"
+        self.offline_ollama_model = str(ui_cfg.get("ollama_model", "") or "")
+        self.auto_export_sqlite = bool(ui_cfg.get("auto_export_sqlite", True))
         ctk.set_appearance_mode(self.theme_mode)
 
         self.title("OmniScribe AI - Universal Meeting Transcriber & Minute Generator")
@@ -1395,8 +1483,13 @@ class ZoomTranscriberApp(ctk.CTk):
             on_transcription_update=self._handle_transcription_update,
             on_minute_generated=self._handle_minute_generated,
             on_status_change=self._handle_status_change,
+            on_archive_generated=self._handle_archive_generated,
             defer_init=True,
         )
+        self.gemini_service.engine_mode = self.engine_mode
+        self.gemini_service.offline_whisper_variant = self.offline_whisper_variant
+        self.gemini_service.offline_ollama_model = self.offline_ollama_model
+        self.gemini_service.auto_export_sqlite = self.auto_export_sqlite
 
         self.audio_engine = AudioEngine(
             temp_dir=self.temp_dir,
@@ -1422,29 +1515,48 @@ class ZoomTranscriberApp(ctk.CTk):
     def _ui_settings_path() -> Path:
         return get_base_dir() / "atas_reunioes" / "ui_settings.json"
 
-    def _load_theme_preference(self) -> str:
+    def _load_ui_settings(self) -> Dict:
         try:
             cfg_path = self._ui_settings_path()
             if cfg_path.exists():
                 data = json.loads(cfg_path.read_text(encoding="utf-8"))
-                if str(data.get("theme", "")).lower() == "light":
-                    return "Light"
+                if isinstance(data, dict):
+                    return data
         except Exception:
             pass
-        return "Dark"
+        return {}
 
-    def _save_theme_preference(self) -> None:
+    def _save_ui_settings(self) -> None:
         try:
             cfg_path = self._ui_settings_path()
             cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            cfg_path.write_text(json.dumps({"theme": self.theme_mode}, indent=2), encoding="utf-8")
+            cfg_path.write_text(
+                json.dumps(
+                    {
+                        "theme": self.theme_mode,
+                        "engine_mode": self.engine_mode,
+                        "whisper_variant": self.offline_whisper_variant,
+                        "ollama_model": self.offline_ollama_model,
+                        "auto_export_sqlite": self.auto_export_sqlite,
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
         except Exception:
             pass
+
+    def _load_theme_preference(self) -> str:
+        return "Light" if str(self._load_ui_settings().get("theme", "")).lower() == "light" else "Dark"
+
+    def _save_theme_preference(self) -> None:
+        self._save_ui_settings()
 
     def _deferred_init_services(self) -> None:
         self.gemini_service._init_client()
         self._refresh_usage_panel()
         self._refresh_voiceprint_summary()
+        self._refresh_offline_status()
         self._update_hw_summary_label()
 
     def _build_ui(self) -> None:
@@ -1597,9 +1709,9 @@ class ZoomTranscriberApp(ctk.CTk):
         self.entry_context_notes.pack(fill="x")
 
         mode_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
-        mode_col.grid(row=0, column=2, sticky="e")
+        mode_col.grid(row=0, column=2, padx=(0, 10), sticky="e")
         ctk.CTkLabel(
-            mode_col, text="MODO DE CAPTAÇÃO", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
+            mode_col, text="CAPTAÇÃO", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
         ).pack(anchor="w", pady=(0, 4))
         self.seg_capture_mode = ctk.CTkSegmentedButton(
             mode_col,
@@ -1616,6 +1728,27 @@ class ZoomTranscriberApp(ctk.CTk):
         )
         self.seg_capture_mode.set(self.MODE_ONLINE)
         self.seg_capture_mode.pack()
+
+        eng_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
+        eng_col.grid(row=0, column=3, sticky="e")
+        ctk.CTkLabel(
+            eng_col, text="MOTOR DE IA", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
+        ).pack(anchor="w", pady=(0, 4))
+        self.seg_engine_mode = ctk.CTkSegmentedButton(
+            eng_col,
+            values=[self.ENGINE_ONLINE, self.ENGINE_OFFLINE],
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=THEME_INPUT,
+            selected_color="#7c3aed",
+            selected_hover_color="#6d28d9",
+            unselected_color=THEME_INPUT,
+            unselected_hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=36,
+            command=self._on_engine_mode_change,
+        )
+        self.seg_engine_mode.set(self.ENGINE_OFFLINE if self.engine_mode == "offline" else self.ENGINE_ONLINE)
+        self.seg_engine_mode.pack()
 
         # Linha 1: Botão Único Principal + Timer + Status + VU compactos
         sep = ctk.CTkFrame(sess_card, height=1, fg_color=THEME_BORDER)
@@ -1812,6 +1945,18 @@ class ZoomTranscriberApp(ctk.CTk):
         )
         self.btn_open_folder.pack(side="left", padx=(0, 8))
 
+        self.btn_export_sqlite = ctk.CTkButton(
+            btn_row,
+            text="📦 Exportar .omniscribe",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#7c3aed",
+            hover_color="#6d28d9",
+            width=166,
+            height=32,
+            command=self._export_current_archive,
+        )
+        self.btn_export_sqlite.pack(side="left", padx=(0, 8))
+
         self.btn_copy_min = ctk.CTkButton(
             btn_row,
             text="📋 Copiar Ata Markdown",
@@ -1854,7 +1999,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self.seg_hist_filter = ctk.CTkSegmentedButton(
             top,
-            values=["Tudo", "🔊 Áudios (.wav)", "📋 Atas", "🎙️ Transcrições"],
+            values=["Tudo", "📦 .omniscribe", "🔊 Áudios (.wav)", "📋 Atas", "🎙️ Transcrições"],
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=THEME_CARD,
             selected_color=COLOR_PRIMARY,
@@ -1878,14 +2023,24 @@ class ZoomTranscriberApp(ctk.CTk):
             fg_color=BTN_NEUTRAL,
             hover_color=BTN_NEUTRAL_HOVER,
             text_color=THEME_TEXT_PRIMARY,
-            width=96,
+            width=92,
             height=32,
             command=self._refresh_history_tab,
         ).pack(side="left", padx=(0, 8))
 
         ctk.CTkButton(
             hist_btns,
-            text="📂 Abrir arquivo externo (.md / .wav)...",
+            text="📥 Importar .omniscribe",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#7c3aed",
+            hover_color="#6d28d9",
+            height=32,
+            command=self._import_external_archive_dialog,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            hist_btns,
+            text="📂 Abrir arquivo...",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=BTN_NEUTRAL,
             hover_color=BTN_NEUTRAL_HOVER,
@@ -2090,11 +2245,70 @@ class ZoomTranscriberApp(ctk.CTk):
             command=self._open_voiceprints_modal,
         ).pack(side="left")
 
-        # Card 4: Logs Técnicos (Recolhível)
+        # Card 4: Modo Offline (Whisper ONNX + Ollama) & Pacote Portátil SQLite
+        off_card = ctk.CTkFrame(
+            scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
+        )
+        off_card.grid(row=2, column=0, columnspan=2, pady=(0, 12), sticky="ew")
+        off_card.grid_columnconfigure(0, weight=1)
+
+        off_left = ctk.CTkFrame(off_card, fg_color="transparent")
+        off_left.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
+        ctk.CTkLabel(
+            off_left,
+            text="💻 Transcrição Offline (Whisper ONNX + Ollama) & SQLite .omniscribe",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        self.lbl_offline_status = ctk.CTkLabel(
+            off_left,
+            text="Verificando modelos Whisper ONNX e Ollama local...",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_MUTED,
+        )
+        self.lbl_offline_status.pack(anchor="w", pady=(2, 0))
+
+        off_btns = ctk.CTkFrame(off_card, fg_color="transparent")
+        off_btns.grid(row=0, column=1, padx=16, pady=(14, 6), sticky="e")
+
+        self.opt_whisper_variant = ctk.CTkOptionMenu(
+            off_btns,
+            values=["small", "base"],
+            width=96,
+            command=self._on_whisper_variant_change,
+        )
+        self.opt_whisper_variant.set(self.offline_whisper_variant)
+        self.opt_whisper_variant.pack(side="left", padx=(0, 8))
+
+        self.btn_download_whisper = ctk.CTkButton(
+            off_btns,
+            text="⬇️ Baixar / Verificar Offline",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#7c3aed",
+            hover_color="#6d28d9",
+            height=32,
+            command=self._download_offline_models_async,
+        )
+        self.btn_download_whisper.pack(side="left")
+
+        off_bottom = ctk.CTkFrame(off_card, fg_color="transparent")
+        off_bottom.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
+        self.chk_auto_sqlite = ctk.CTkCheckBox(
+            off_bottom,
+            text="Gerar pacote portátil SQLite (.omniscribe com áudio compactado) automaticamente ao encerrar",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_PRIMARY,
+            command=self._on_toggle_auto_sqlite,
+        )
+        if self.auto_export_sqlite:
+            self.chk_auto_sqlite.select()
+        self.chk_auto_sqlite.pack(anchor="w")
+
+        # Card 5: Logs Técnicos (Recolhível)
         log_card = ctk.CTkFrame(
             scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
         )
-        log_card.grid(row=2, column=0, columnspan=2, sticky="ew")
+        log_card.grid(row=3, column=0, columnspan=2, sticky="ew")
         log_card.grid_columnconfigure(0, weight=1)
 
         log_head = ctk.CTkFrame(log_card, fg_color="transparent")
@@ -2173,6 +2387,7 @@ class ZoomTranscriberApp(ctk.CTk):
             elif tab_name == self.TAB_CFG:
                 self._refresh_usage_panel()
                 self._refresh_voiceprint_summary()
+                self._refresh_offline_status()
 
     def _toggle_theme(self) -> None:
         self.theme_mode = "Light" if self.theme_mode == "Dark" else "Dark"
@@ -2213,6 +2428,7 @@ class ZoomTranscriberApp(ctk.CTk):
         mic_name = self.opt_mic.get()
         loop_name = self.opt_loopback.get()
         block_txt = self.opt_block_duration.get()
+        eng_txt = "Offline Whisper" if self.engine_mode == "offline" else "Gemini 2.5"
         profs = self.gemini_service.voiceprint_service.list_profiles() if self.gemini_service.voiceprint_service else []
         vp_txt = f"{len(profs)} voiceprint(s)" if profs else "sem voiceprints"
 
@@ -2221,7 +2437,62 @@ class ZoomTranscriberApp(ctk.CTk):
         else:
             dev_txt = f"Sistema + Mic ({mic_name[:22]})"
 
-        self.lbl_hw_summary.configure(text=f"Captação: {dev_txt} • Blocos de {block_txt} • {vp_txt}")
+        self.lbl_hw_summary.configure(text=f"Captação: {dev_txt} • {eng_txt} • Blocos de {block_txt} • {vp_txt}")
+
+    def _on_engine_mode_change(self, val: str) -> None:
+        self.engine_mode = "offline" if "Offline" in val else "online"
+        self.gemini_service.engine_mode = self.engine_mode
+        self._save_ui_settings()
+        self._update_hw_summary_label()
+        self._log_gui(f"[MOTOR] Alterado para modo {'100% Offline (Whisper ONNX)' if self.engine_mode == 'offline' else 'Online (Gemini 2.5)'}.")
+
+    def _on_whisper_variant_change(self, val: str) -> None:
+        self.offline_whisper_variant = "base" if val == "base" else "small"
+        self.gemini_service.offline_whisper_variant = self.offline_whisper_variant
+        self._save_ui_settings()
+        self._refresh_offline_status()
+
+    def _on_toggle_auto_sqlite(self) -> None:
+        self.auto_export_sqlite = bool(self.chk_auto_sqlite.get())
+        self.gemini_service.auto_export_sqlite = self.auto_export_sqlite
+        self._save_ui_settings()
+
+    def _refresh_offline_status(self) -> None:
+        if not hasattr(self, "lbl_offline_status"):
+            return
+        ready, _ = self.gemini_service.offline_asr_service.is_ready(self.offline_whisper_variant)
+        w_txt = f"✅ Whisper {self.offline_whisper_variant} pronto" if ready else f"⚠️ Whisper {self.offline_whisper_variant} não baixado"
+        self.lbl_offline_status.configure(text=f"{w_txt} • Verificando Ollama...")
+
+        def _probe_ollama():
+            ok_ol, models = list_ollama_models()
+            if ok_ol and models:
+                ol_txt = f"🟢 Ollama ({models[0]})"
+            elif ok_ol:
+                ol_txt = "🟡 Ollama sem modelos"
+            else:
+                ol_txt = "⚪ Ata via Síntese Local"
+            self.after(0, lambda: self.lbl_offline_status.configure(text=f"{w_txt} • {ol_txt}"))
+
+        threading.Thread(target=_probe_ollama, daemon=True, name="OllamaProbe").start()
+
+    def _download_offline_models_async(self) -> None:
+        self.btn_download_whisper.configure(state="disabled", text="⏳ Baixando...")
+
+        def _worker():
+            ok, msg = self.gemini_service.offline_asr_service.ensure_models_ready(
+                variant=self.offline_whisper_variant,
+                progress_cb=lambda m, p: self.after(
+                    0, lambda txt=f"{m} ({int(p*100)}%)": self.lbl_offline_status.configure(text=txt)
+                ),
+            )
+            def _done():
+                self.btn_download_whisper.configure(state="normal", text="⬇️ Baixar / Verificar Offline")
+                self._log_gui(f"[OFFLINE] {msg}")
+                self._refresh_offline_status()
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True, name="OfflineModelDownloader").start()
 
     def _refresh_usage_panel(self) -> None:
         s = self.gemini_service.get_usage_summary()
@@ -2253,16 +2524,20 @@ class ZoomTranscriberApp(ctk.CTk):
             filter_mode=self.seg_hist_filter.get(),
             on_view_md=self.load_document,
             on_retranscribe_wav=lambda p: RetranscribeModal(self, p),
+            on_open_archive=self.load_archive,
+            on_play_archive=self.play_archive_audio,
+            on_retranscribe_archive=self.retranscribe_archive,
         )
 
     def _browse_external_history_file(self) -> None:
         atas_root = get_base_dir() / "atas_reunioes"
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="Selecione uma Ata (.md) ou Gravação (.wav)",
+            title="Selecione um Pacote (.omniscribe), Ata (.md) ou Gravação (.wav)",
             initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
             filetypes=[
-                ("Atas e Gravações", "*.md *.wav"),
+                ("Reuniões OmniScribe", "*.omniscribe *.md *.wav"),
+                ("Pacotes SQLite", "*.omniscribe"),
                 ("Gravações WAV", "*.wav"),
                 ("Documentos Markdown", "*.md"),
                 ("Todos os Arquivos", "*.*"),
@@ -2270,10 +2545,111 @@ class ZoomTranscriberApp(ctk.CTk):
         )
         if chosen:
             chosen_path = Path(chosen)
-            if chosen_path.suffix.lower() == ".wav":
+            ext = chosen_path.suffix.lower()
+            if ext == ".omniscribe":
+                self.import_archive_file(chosen_path)
+            elif ext == ".wav":
                 RetranscribeModal(self, chosen_path)
             else:
                 self.load_document(chosen_path)
+
+    def _import_external_archive_dialog(self) -> None:
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Importar pacote portátil .omniscribe",
+            filetypes=[("Pacotes OmniScribe SQLite", "*.omniscribe"), ("Todos os Arquivos", "*.*")],
+        )
+        if chosen:
+            self.import_archive_file(Path(chosen))
+
+    def import_archive_file(self, archive_path: Path) -> None:
+        try:
+            now = datetime.now()
+            dest_dir = get_base_dir() / "atas_reunioes" / now.strftime("%Y") / now.strftime("%m")
+            data = self.gemini_service.archive_service.import_archive_to_workspace(archive_path, dest_dir)
+            imported = data["imported_paths"]["archive"]
+            self.load_archive(imported)
+            self._refresh_history_tab()
+            self._log_gui(f"[SQLITE] Pacote importado para o histórico: {imported.name}")
+        except Exception as e:
+            self._log_gui(f"[ERRO] Falha ao importar pacote .omniscribe: {e}")
+
+    def load_archive(self, archive_path: Path) -> None:
+        try:
+            data = self.gemini_service.archive_service.load_archive_contents(archive_path)
+            self.txt_transcription.delete("1.0", "end")
+            self.txt_transcription.insert("end", data.get("transcript_md", "") or "*[Transcrição vazia no pacote]*")
+            self.txt_minutes.delete("1.0", "end")
+            self.txt_minutes.insert("end", data.get("minutes_md", "") or "*[Ata não incluída no pacote]*")
+            self.lbl_ata_meta.configure(
+                text=f"Pacote SQLite: {Path(archive_path).name} ({data.get('segment_count', 0)} turnos)"
+            )
+            self.lbl_status.configure(text=f"● Pacote: {data.get('title', '')[:22]}", text_color="#7c3aed")
+            self._switch_tab(self.TAB_ATA if data.get("minutes_md") else self.TAB_REC)
+            self._log_gui(f"[SQLITE] Pacote carregado: {Path(archive_path).name}")
+        except Exception as e:
+            self._log_gui(f"[ERRO] Falha ao abrir pacote .omniscribe: {e}")
+
+    def play_archive_audio(self, archive_path: Path) -> None:
+        try:
+            out_wav = self.temp_dir / f"play_{Path(archive_path).stem}.wav"
+            wav_p = self.gemini_service.archive_service.extract_wav(archive_path, out_wav)
+            if wav_p and wav_p.exists():
+                open_file_in_os(wav_p)
+            else:
+                self._log_gui(f"[AVISO] O pacote {Path(archive_path).name} não contém áudio embutido.")
+        except Exception as e:
+            self._log_gui(f"[ERRO] Falha ao reproduzir áudio do pacote: {e}")
+
+    def retranscribe_archive(self, archive_path: Path) -> None:
+        try:
+            out_wav = self.temp_dir / f"retrans_{Path(archive_path).stem}.wav"
+            wav_p = self.gemini_service.archive_service.extract_wav(archive_path, out_wav)
+            if wav_p and wav_p.exists():
+                RetranscribeModal(self, wav_p)
+            else:
+                self._log_gui(f"[AVISO] O pacote {Path(archive_path).name} não contém faixa de áudio para re-transcrever.")
+        except Exception as e:
+            self._log_gui(f"[ERRO] Falha ao extrair áudio do pacote: {e}")
+
+    def _export_current_archive(self) -> None:
+        trans_txt = self.txt_transcription.get("1.0", "end-1c").strip()
+        min_txt = self.txt_minutes.get("1.0", "end-1c").strip()
+        if not trans_txt and not min_txt:
+            self._log_gui("[AVISO] Nenhuma transcrição ou ata carregada para exportar em .omniscribe.")
+            return
+        title = self.entry_meeting_title.get().strip() or self.gemini_service.meeting_title or "Reuniao"
+        default_name = f"reuniao_{datetime.now().strftime('%Y%m%d_%H%M')}.omniscribe"
+        dest = filedialog.asksaveasfilename(
+            parent=self,
+            title="Exportar Pacote Portátil .omniscribe",
+            defaultextension=".omniscribe",
+            initialfile=default_name,
+            filetypes=[("Pacote OmniScribe SQLite", "*.omniscribe")],
+        )
+        if not dest:
+            return
+        try:
+            wav_src = self.gemini_service.audio_file_path
+            summary = self.gemini_service.archive_service.export_meeting_package(
+                output_path=Path(dest),
+                title=title,
+                engine_mode=self.engine_mode,
+                context_notes=self.entry_context_notes.get().strip(),
+                transcript_md=trans_txt,
+                minutes_md=min_txt,
+                wav_path=wav_src if (wav_src and Path(wav_src).exists()) else None,
+            )
+            mb = summary["size_bytes"] / (1024 * 1024)
+            self._log_gui(f"[SQLITE] Pacote exportado com sucesso: {Path(dest).name} ({mb:.2f} MB)")
+        except Exception as e:
+            self._log_gui(f"[ERRO] Falha ao exportar .omniscribe: {e}")
+
+    def _handle_archive_generated(self, archive_path: Path, summary: Dict) -> None:
+        def _notify():
+            mb = summary.get("size_bytes", 0) / (1024 * 1024)
+            self._log_gui(f"[HISTÓRICO] Pacote portátil disponível: {archive_path.name} ({mb:.2f} MB)")
+        self.after(0, _notify)
 
     def _toggle_cfg_key_visibility(self) -> None:
         self._api_key_visible = not self._api_key_visible
@@ -2370,10 +2746,12 @@ class ZoomTranscriberApp(ctk.CTk):
 
     # ---------------- GERENCIAMENTO DA CHAVE API & MODAIS ----------------
     def _check_initial_api_key(self) -> None:
+        if self.engine_mode == "offline":
+            return
         key = load_api_key_from_env()
         if not key:
             if self.mascot:
-                self.mascot.trigger_warning("Chave Gemini não configurada! Cole sua API Key para começar.")
+                self.mascot.trigger_warning("Chave Gemini não configurada! Cole sua API Key ou use o modo Offline.")
             self._open_api_key_dialog()
 
     def _open_api_key_dialog(self) -> None:
@@ -2411,6 +2789,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.entry_meeting_title.configure(state=field_state)
         self.entry_context_notes.configure(state=field_state)
         self.seg_capture_mode.configure(state=field_state)
+        self.seg_engine_mode.configure(state=field_state)
 
         if recording:
             self.btn_rec_action.configure(
@@ -2445,7 +2824,9 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui("[AVISO] Já existe uma gravação ou re-transcrição em andamento.")
             return
 
-        if not self.gemini_service.api_key:
+        active_engine = "offline" if "Offline" in self.seg_engine_mode.get() else "online"
+        self.engine_mode = active_engine
+        if active_engine == "online" and not self.gemini_service.api_key:
             self._open_api_key_dialog()
             return
 
@@ -2469,7 +2850,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         meeting_title = self.entry_meeting_title.get().strip() or "Reunião de Alinhamento"
         context_notes = self.entry_context_notes.get().strip()
-        self.gemini_service.start_session(meeting_title, context_notes=context_notes)
+        self.gemini_service.start_session(meeting_title, context_notes=context_notes, engine_mode=active_engine)
         session_audio_path = self.gemini_service.get_session_audio_path()
 
         started = self.audio_engine.start_recording(
@@ -2544,12 +2925,14 @@ class ZoomTranscriberApp(ctk.CTk):
         context_notes: str = "",
         block_seconds: int = 60,
         apply_enhancement: Optional[bool] = None,
+        engine_mode: Optional[str] = None,
     ) -> None:
         if self.is_recording or self.is_retranscribing:
             self._log_gui("[AVISO] Aguarde a conclusão da gravação ou re-transcrição atual.")
             return
 
-        if not self.gemini_service.api_key:
+        target_engine = engine_mode if engine_mode in ("online", "offline") else self.engine_mode
+        if target_engine == "online" and not self.gemini_service.api_key:
             self._open_api_key_dialog()
             return
 
@@ -2562,11 +2945,12 @@ class ZoomTranscriberApp(ctk.CTk):
         self.block_count = 0
         self._set_session_controls_state(idle=False, recording=False)
 
-        self.lbl_status.configure(text="🔄 Re-transcrevendo áudio...", text_color=COLOR_PRIMARY)
+        eng_badge = "Offline Whisper" if target_engine == "offline" else "Online Gemini"
+        self.lbl_status.configure(text=f"🔄 Re-transcrevendo ({eng_badge})...", text_color=COLOR_PRIMARY)
         self.txt_transcription.delete("1.0", "end")
         self.txt_transcription.insert(
             "end",
-            f"=== Re-transcrição de Áudio Salvo: {title} ===\n"
+            f"=== Re-transcrição de Áudio Salvo ({eng_badge}): {title} ===\n"
             f"Arquivo fonte: {wav_path.name}\n\n",
         )
         self._switch_tab(self.TAB_REC)
@@ -2576,7 +2960,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         threading.Thread(
             target=self._async_retranscribe_worker,
-            args=(wav_path, title, context_notes, block_seconds, apply_enhancement),
+            args=(wav_path, title, context_notes, block_seconds, apply_enhancement, target_engine),
             daemon=True,
             name="AsyncRetranscribeWorker",
         ).start()
@@ -2588,13 +2972,15 @@ class ZoomTranscriberApp(ctk.CTk):
         context_notes: str,
         block_seconds: int,
         apply_enhancement: Optional[bool],
+        engine_mode: str = "online",
     ) -> None:
         try:
-            self._log_gui(f"[RE-TRANSCRIÇÃO] Iniciando reprocessamento de: {wav_path.name}")
+            self._log_gui(f"[RE-TRANSCRIÇÃO] Iniciando reprocessamento ({engine_mode}): {wav_path.name}")
             transc_path, minute_path = self.gemini_service.start_session(
                 title=title,
                 context_notes=context_notes,
                 source_audio_path=wav_path,
+                engine_mode=engine_mode,
             )
             self._log_gui(f"[RE-TRANSCRIÇÃO] Novos arquivos: {transc_path.name} / {minute_path.name}")
 
