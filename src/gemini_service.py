@@ -1,8 +1,8 @@
 """Serviço OmniScribe AI de integração com a API do Google Gemini (gemini-2.5-flash).
 
 Gerencia fila assíncrona de blocos de áudio, upload via Files API,
-transcrição incremental estéreo (Participantes vs Willian), higienização de arquivos locais/remotos
-e síntese consolidada da Ata Executiva ao final da reunião.
+transcrição incremental estéreo (Online L/R) ou mono (Presencial em sala),
+revisão fono-semântica em segunda passada e síntese consolidada da Ata Executiva.
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ import sys
 import threading
 import time
 import unicodedata
+import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 
 from usage_tracker import UsageTracker
 
@@ -186,6 +187,56 @@ DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO E IDENTIFICAÇÃO DE VOZES:
    - Não resuma nem omita palavras nesta etapa; forneça o diálogo completo.
 """
 
+    PRESENTIAL_TRANSCRIPTION_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do OmniScribe AI.
+O áudio fornecido em WAV MONO (1 canal) foi captado por um único microfone de ambiente em uma **REUNIÃO PRESENCIAL** de sala única (com múltiplos participantes falando ao redor do mesmo microfone).
+
+DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO ACÚSTICA EM SALA ÚNICA:
+1. IDENTIFICAÇÃO DE VOZES E NOMES:
+   - Diferencie cuidadosamente os locutores pelo **timbre vocal, altura (pitch), cadência, gênero, distância acústica do microfone e contexto da conversa**.
+   - Rotule como **Willian** sempre que o falante for identificado pelo contexto, autoapresentação, direcionamento direto de outro participante ("Willian, o que você acha?") ou continuidade vocal já estabelecida nos blocos anteriores.
+   - Para os demais participantes da sala ainda sem nome citado, mantenha rotulagem numérica consistente entre turnos e blocos:
+     [MM:SS] **Participante 1**: <texto falado>
+     [MM:SS] **Participante 2**: <texto falado>
+   - Extração Ativa de Nomes: assim que um nome for mencionado ("Aqui é o Marcos", "Concordo com a Ana"), associe permanentemente aquela voz ao nome real: `[MM:SS] **Marcos**: <texto>`.
+
+2. TRATAMENTO CRÍTICO DE FALAS SOBREPOSTAS NA SALA (CROSS-TALK):
+   - Em reuniões presenciais, duas ou mais pessoas frequentemente falam ao mesmo tempo, interrompem ou comentam em paralelo.
+   - NUNCA funda vozes diferentes em um único parágrafo nem descarte a fala mais baixa ou distante.
+   - Sempre que detectar sobreposição simultânea de vozes no canal mono, marque EXPLICITAMENTE com:
+     [MM:SS] ⚡ [Falas Sobrepostas]:
+       - **Willian**: <fala completa sem resumir>
+       - **Participante 1**: <fala simultânea completa sem resumir>
+
+3. FIDELIDADE LITERAL E FORMATAÇÃO:
+   - Transcreva literalmente em português brasileiro com precisão máxima (>= 98%), mantendo siglas corporativas e termos técnicos em inglês intactos (ex.: Framework, Deploy, Pipeline, Query, API, BI).
+   - Ignore ruídos de ambiente (ar-condicionado, cadeira, clique de mouse/teclado, papel).
+   - Se os segundos iniciais (~2,5s) repetirem o final exato do contexto anterior por sobreposição de bloco, dê continuidade natural sem truncar palavras na fronteira.
+   - Se o trecho inteiro não possuir fala humana perceptível, retorne exatamente: *[Silêncio / Sem fala identificada no período]*
+   - Não resuma nem corrija livremente o estilo oral; transcreva todas as falas na íntegra.
+"""
+
+    REFINEMENT_SYSTEM_PROMPT = """Você é um revisor especialista em transcrições corporativas e correção fono-semântica em português brasileiro e termos técnicos de TI/negócios.
+Analise a transcrição bruta da reunião abaixo (composta por blocos sequenciais com ~2,5s de overlap de áudio entre blocos consecutivos) e devolva a transcrição revisada integral seguindo ESTRITAMENTE estas regras:
+
+1. CORREÇÃO FONO-SEMÂNTICA:
+   - Corrija erros fonéticos óbvios e palavras mal reconhecidas usando o contexto global da reunião e o vocabulário prioritário (ex.: termos técnicos, siglas, sistemas, nomes próprios mal grafados).
+   - NÃO invente falas, NÃO parafraseie em excesso e NÃO altere o sentido original do que foi dito.
+
+2. UNIFICAÇÃO RETROATIVA DE PARTICIPANTES:
+   - Se o nome de algum participante foi descoberto apenas em blocos posteriores (ex.: `Participante 2` foi identificado como `Carlos` ou `Participante 1 (Voz masculina)` como `Lucas`), substitua o rótulo genérico pelo nome real em TODOS os blocos anteriores correspondentes da transcrição.
+   - Preserve intactos os rótulos **Willian (Você)**, **Willian** e os marcadores `⚡ [Falas Sobrepostas...]:`.
+
+3. REMOÇÃO DE DUPLICAÇÕES DE OVERLAP (2,5s):
+   - Remova repetições exatas ou parciais de frases ocorridas na fronteira imediata entre o fim de um bloco (`### Bloco N`) e o início do bloco seguinte (`### Bloco N+1`) causadas pela janela de 2,5 segundos de sobreposição, mantendo a frase completa exatamente uma vez no ponto natural.
+
+4. INTEGRIDADE ESTRUTURAL:
+   - Preserve os cabeçalhos Markdown (`# Transcrição...`, `### Bloco ...`, `---`), timestamps `[MM:SS]` e TODOS os turnos de fala.
+   - NUNCA resuma, omita ou condense o diálogo. Retorne o documento Markdown completo revisado.
+{vocab_section}
+--- TRANSCRIÇÃO BRUTA DA REUNIÃO: {title} ---
+{raw_transcript}
+"""
+
     MINUTES_SYSTEM_PROMPT = """Você é um secretário executivo sênior e analista corporativo de alto nível, especialista na elaboração de Atas Executivas para diretoria, reuniões técnicas e sessões de alinhamento.
 Abaixo está a transcrição integral e sequencial da reunião (ou vídeo/podcast analisado).
 
@@ -249,6 +300,7 @@ Transcrição completa da reunião:
 
         # Metadados da reunião atual
         self.meeting_title = ""
+        self.context_notes = ""
         self.meeting_start_time = datetime.now()
         self.transcription_file_path: Optional[Path] = None
         self.minute_file_path: Optional[Path] = None
@@ -298,9 +350,10 @@ Transcrição completa da reunião:
         self.api_key = new_key.strip()
         return self._init_client()
 
-    def start_session(self, title: str) -> Tuple[Path, Path]:
+    def start_session(self, title: str, context_notes: str = "") -> Tuple[Path, Path]:
         """Prepara os arquivos e pastas da sessão de reunião e inicia o worker."""
         self.meeting_title = title.strip() or "Reuniao"
+        self.context_notes = (context_notes or "").strip()
         self.meeting_start_time = datetime.now()
         self.accumulated_transcript = ""
 
@@ -320,11 +373,13 @@ Transcrição completa da reunião:
 
         # Inicializa o arquivo de transcrição com cabeçalho Markdown
         data_formatada = self.meeting_start_time.strftime("%d/%m/%Y às %H:%M")
+        context_line = f"**Contexto / Glossário:** {self.context_notes}\n" if self.context_notes else ""
         header_text = (
             f"# Transcrição da Reunião: {self.meeting_title}\n"
             f"**Data de Início:** {data_formatada}\n"
             f"**Arquivo de Registro:** `{self.transcription_file_path.name}`\n"
-            f"**Canais de Áudio:** Esquerdo (L) = Participantes / Zoom | Direito (R) = Willian (Você)\n\n"
+            f"**Modo de Captura:** Detecção automática por bloco (Estéreo L/R Online ou Mono Presencial)\n"
+            f"{context_line}\n"
             f"---\n\n"
         )
         with open(self.transcription_file_path, "w", encoding="utf-8") as f:
@@ -396,6 +451,64 @@ Transcrição completa da reunião:
         self._is_running = False
         logger.debug("Gemini Worker encerrado.")
 
+    def _detect_wav_channels(self, wav_path: Path) -> int:
+        """Detecta automaticamente se o WAV possui 1 canal (Mono) ou 2 canais (Estéreo)."""
+        try:
+            with wave.open(str(wav_path), "rb") as wf:
+                channels = int(wf.getnchannels())
+                return 1 if channels == 1 else 2
+        except Exception as e:
+            logger.warning(f"Falha ao detectar canais de {wav_path}: {e}. Usando fallback Estéreo (2ch).")
+            return 2
+
+    def _select_transcription_prompt(self, num_channels: int) -> str:
+        """Seleciona o prompt especializado conforme o layout de canais (1=Mono Presencial, 2=Estéreo Online)."""
+        return self.PRESENTIAL_TRANSCRIPTION_PROMPT if num_channels == 1 else self.TRANSCRIPTION_SYSTEM_PROMPT
+
+    def _build_generation_config(self, temperature: float = 0.0, top_p: float = 0.95):
+        """Constrói GenerateContentConfig determinístico quando `google.genai.types` estiver carregado."""
+        if types is None:
+            _ensure_genai_loaded()
+        if types is not None and hasattr(types, "GenerateContentConfig"):
+            return types.GenerateContentConfig(temperature=temperature, top_p=top_p)
+        return None
+
+    def _build_priority_vocabulary_section(self) -> str:
+        """Gera bloco de vocabulário prioritário a partir de `context_notes` e palavras-chave do `title`."""
+        stopwords = {
+            "de", "da", "do", "das", "dos", "e", "ou", "em", "para", "com", "sem",
+            "por", "sobre", "entre", "reuniao", "reunião", "alinhamento", "call",
+        }
+        keywords: List[str] = []
+        for token in re.findall(r"[A-Za-zÀ-ÿ0-9_\-]{3,}", self.meeting_title or ""):
+            if token.lower() not in stopwords and token not in keywords:
+                keywords.append(token)
+
+        notes = (self.context_notes or "").strip()
+        if not keywords and not notes:
+            return ""
+
+        parts = ["\n--- VOCABULÁRIO PRIORITÁRIO E CONTEXTO DA REUNIÃO ---"]
+        if self.meeting_title:
+            parts.append(f"Título da Reunião: {self.meeting_title}")
+        if keywords:
+            parts.append(f"Palavras-chave do Título: {', '.join(keywords)}")
+        if notes:
+            parts.append(f"Glossário / Participantes / Notas de Contexto: {notes}")
+        parts.append("Use estritamente estes termos, siglas e nomes próprios quando foneticamente compatíveis.")
+        parts.append("-----------------------------------------------------\n")
+        return "\n".join(parts) + "\n"
+
+    @staticmethod
+    def _extract_usage_tokens(response) -> Tuple[int, int]:
+        """Extrai contagem segura de tokens de entrada e saída da resposta do Gemini."""
+        in_tok = 0
+        out_tok = 0
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
+            out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+        return int(in_tok), int(out_tok)
+
     def _process_single_block(self, task: AudioBlockTask) -> None:
         """Transcreve um bloco de áudio via Gemini 2.5 Flash, anexa no Markdown e limpa o WAV."""
         time_range = f"{format_seconds(task.start_seconds)} - {format_seconds(task.end_seconds)}"
@@ -406,13 +519,18 @@ Transcrição completa da reunião:
             self._append_to_transcription(task, msg, success=False)
             return
 
+        num_channels = self._detect_wav_channels(task.wav_path)
+        mode_label = "Mono / Presencial" if num_channels == 1 else "Estéreo / Online"
+        system_prompt = self._select_transcription_prompt(num_channels)
+        self._log(f"[ÁUDIO] Bloco #{task.block_index} detectado: {num_channels} canal(is) ({mode_label}).")
+
         uploaded_remote_file = None
         try:
             # 1. Upload do WAV para a API Files do Gemini
             self._log(f"[UPLOAD] Enviando {task.wav_path.name} para a nuvem Gemini...")
             uploaded_remote_file = self._client.files.upload(file=str(task.wav_path))
 
-            # 2. Chamada de geração com gemini-2.5-flash
+            # 2. Chamada determinística com gemini-2.5-flash (temperature=0.0, top_p=0.95)
             recent_context = ""
             if self.accumulated_transcript.strip():
                 # Coleta os últimos turnos de fala significativos para manter continuidade de vozes e nomes
@@ -429,26 +547,35 @@ Transcrição completa da reunião:
                         + "\n--------------------------------------------------------------------------------------\n\n"
                     )
 
+            vocab_section = self._build_priority_vocabulary_section()
+            overlap_hint = (
+                "Nota: Os ~2,5s iniciais deste bloco podem sobrepor o final do bloco anterior; mantenha a continuidade natural sem cortar palavras.\n"
+                if task.block_index > 1
+                else ""
+            )
             prompt = (
-                f"Transcreva este bloco de áudio da reunião.\n"
+                f"Transcreva este bloco de áudio da reunião ({mode_label}).\n"
                 f"Trecho temporal: {time_range}.\n"
+                f"{overlap_hint}"
+                f"{vocab_section}"
                 f"{recent_context}"
-                f"{self.TRANSCRIPTION_SYSTEM_PROMPT}"
+                f"{system_prompt}"
             )
 
-            response = self._client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[uploaded_remote_file, prompt],
-            )
+            gen_config = self._build_generation_config(temperature=0.0, top_p=0.95)
+            kwargs = {
+                "model": "gemini-2.5-flash",
+                "contents": [uploaded_remote_file, prompt],
+            }
+            if gen_config is not None:
+                kwargs["config"] = gen_config
+
+            response = self._client.models.generate_content(**kwargs)
 
             transcription_text = response.text.strip() if response.text else "*[Áudio sem transcrição disponível]*"
 
             # Rastreamento de tokens e cota da API
-            in_tok = 0
-            out_tok = 0
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
-                out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            in_tok, out_tok = self._extract_usage_tokens(response)
             audio_dur = max(0.0, task.end_seconds - task.start_seconds)
             self.tracker.register_request(audio_seconds=audio_dur, input_tokens=in_tok, output_tokens=out_tok)
 
@@ -461,7 +588,7 @@ Transcrição completa da reunião:
 
             # 4. Gravação segura no arquivo Markdown
             self._append_to_transcription(task, block_markdown, success=True)
-            self._log(f"[OK] Bloco #{task.block_index} transcrito e salvo no Markdown.")
+            self._log(f"[OK] Bloco #{task.block_index} ({mode_label}) transcrito e salvo no Markdown.")
 
         except Exception as e:
             self._log(f"[ERRO] Falha ao transcrever Bloco #{task.block_index}: {e}")
@@ -480,6 +607,46 @@ Transcrição completa da reunião:
                     self._log(f"[NUVEM] Arquivo remoto {uploaded_remote_file.name} deletado com sucesso.")
                 except Exception as del_err:
                     logger.debug(f"Não foi possível remover arquivo remoto: {del_err}")
+
+    def _refine_transcript_phonetics(self, raw_transcript: str) -> str:
+        """Executa segunda passada fono-semântica (texto puro) para corrigir fonética, unificar nomes e deduplicar overlap."""
+        if not raw_transcript or not raw_transcript.strip() or not self._client:
+            return raw_transcript
+
+        try:
+            self._log("[REVISÃO] Executando segunda passada fono-semântica (correção, nomes e overlap)...")
+            vocab_section = self._build_priority_vocabulary_section()
+            prompt = self.REFINEMENT_SYSTEM_PROMPT.format(
+                vocab_section=vocab_section,
+                title=self.meeting_title or "Reunião",
+                raw_transcript=raw_transcript,
+            )
+
+            gen_config = self._build_generation_config(temperature=0.0, top_p=0.95)
+            kwargs = {
+                "model": "gemini-2.5-flash",
+                "contents": [prompt],
+            }
+            if gen_config is not None:
+                kwargs["config"] = gen_config
+
+            response = self._client.models.generate_content(**kwargs)
+            in_tok, out_tok = self._extract_usage_tokens(response)
+            self.tracker.register_request(audio_seconds=0.0, input_tokens=in_tok, output_tokens=out_tok)
+
+            refined_text = response.text.strip() if getattr(response, "text", None) else ""
+            # Proteção contra resposta vazia ou truncamento anômalo pela API
+            if not refined_text or len(refined_text) < int(0.35 * len(raw_transcript.strip())):
+                logger.warning("Revisão fono-semântica retornou conteúdo curto/vazio; mantendo transcrição original.")
+                return raw_transcript
+
+            self._log("[REVISÃO] Passada fono-semântica concluída com sucesso.")
+            return refined_text + "\n"
+
+        except Exception as e:
+            logger.warning(f"Falha na revisão fono-semântica (usando transcrição bruta): {e}")
+            self._log(f"[AVISO] Revisão fono-semântica falhou ({e}); prosseguindo com transcrição original.")
+            return raw_transcript
 
     def _append_to_transcription(self, task: AudioBlockTask, content: str, success: bool) -> None:
         """Anexa o texto ao arquivo Markdown e apaga o WAV local se a escrita foi bem-sucedida."""
@@ -560,16 +727,26 @@ Transcrição completa da reunião:
 
             # Lê o conteúdo completo da transcrição gravada
             with open(self.transcription_file_path, "r", encoding="utf-8") as f:
-                full_transcript = f.read()
+                raw_transcript = f.read()
 
+            # Segunda passada fono-semântica antes da Ata Executiva (apenas texto)
+            self._set_status("Refinando transcrição e nomes de participantes...")
+            refined_transcript = self._refine_transcript_phonetics(raw_transcript)
+            if refined_transcript != raw_transcript and refined_transcript.strip():
+                with open(self.transcription_file_path, "w", encoding="utf-8") as f:
+                    f.write(refined_transcript)
+                self.accumulated_transcript = refined_transcript
+                self._log(f"[REVISÃO] Transcrição revisada salva em: {self.transcription_file_path.name}")
+
+            self._set_status("Gerando Ata Executiva consolidada...")
             prompt = self.MINUTES_SYSTEM_PROMPT.format(
                 title=self.meeting_title,
                 date_str=date_str,
                 duration_str=duration_str,
-                full_transcript=full_transcript,
+                full_transcript=refined_transcript,
             )
 
-            self._log("[IA] Enviando transcrição integral para síntese da Ata Executiva...")
+            self._log("[IA] Enviando transcrição revisada para síntese da Ata Executiva...")
             response = self._client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=[prompt],
@@ -578,11 +755,7 @@ Transcrição completa da reunião:
             minute_text = response.text.strip() if response.text else "# Ata Executiva\n*(Falha ao gerar texto)*"
 
             # Rastreamento de tokens da Ata Executiva
-            in_tok = 0
-            out_tok = 0
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                in_tok = getattr(response.usage_metadata, "prompt_token_count", 0) or 0
-                out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
+            in_tok, out_tok = self._extract_usage_tokens(response)
             self.tracker.register_request(audio_seconds=0.0, input_tokens=in_tok, output_tokens=out_tok, is_new_meeting=True)
 
             # Salva no arquivo de Ata Executiva
