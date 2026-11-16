@@ -33,8 +33,8 @@ def create_app_package(source_dir: Path, output_zip: Path) -> Path:
     with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
         file_count = 0
         for root, dirs, files in os.walk(source_dir):
-            # Evita empacotar pastas de runtime/logs locais dentro do instalador distribuível
-            dirs[:] = [d for d in dirs if d not in ("atas_reunioes", "__pycache__")]
+            # Evita empacotar pastas de runtime/logs locais ou pesos ONNX baixados sob demanda dentro do instalador distribuível
+            dirs[:] = [d for d in dirs if d not in ("atas_reunioes", "__pycache__", "models")]
             for file in files:
                 if file == ".env":
                     continue
