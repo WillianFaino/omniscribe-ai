@@ -304,7 +304,13 @@ Transcrição completa da reunião:
         self.meeting_start_time = datetime.now()
         self.transcription_file_path: Optional[Path] = None
         self.minute_file_path: Optional[Path] = None
+        self.audio_file_path: Optional[Path] = None
         self.accumulated_transcript = ""
+        self._max_block_end_seconds = 0.0
+
+    def get_session_audio_path(self) -> Optional[Path]:
+        """Retorna o caminho do arquivo WAV oficial da sessão atual."""
+        return self.audio_file_path
 
     def get_usage_summary(self) -> dict:
         """Retorna resumo estatístico de consumo e custos."""
@@ -350,12 +356,18 @@ Transcrição completa da reunião:
         self.api_key = new_key.strip()
         return self._init_client()
 
-    def start_session(self, title: str, context_notes: str = "") -> Tuple[Path, Path]:
+    def start_session(
+        self,
+        title: str,
+        context_notes: str = "",
+        source_audio_path: Optional[Path] = None,
+    ) -> Tuple[Path, Path]:
         """Prepara os arquivos e pastas da sessão de reunião e inicia o worker."""
         self.meeting_title = title.strip() or "Reuniao"
         self.context_notes = (context_notes or "").strip()
         self.meeting_start_time = datetime.now()
         self.accumulated_transcript = ""
+        self._max_block_end_seconds = 0.0
 
         # Diretório atas_reunioes/AAAA/MM/
         base_dir = get_base_dir()
@@ -370,14 +382,21 @@ Transcrição completa da reunião:
 
         self.transcription_file_path = target_dir / f"transcricao_{timestamp_str}{suffix}.md"
         self.minute_file_path = target_dir / f"ata_executiva_{timestamp_str}{suffix}.md"
+        self.audio_file_path = (
+            Path(source_audio_path).resolve()
+            if source_audio_path is not None
+            else (target_dir / f"audio_{timestamp_str}{suffix}.wav")
+        )
 
         # Inicializa o arquivo de transcrição com cabeçalho Markdown
         data_formatada = self.meeting_start_time.strftime("%d/%m/%Y às %H:%M")
         context_line = f"**Contexto / Glossário:** {self.context_notes}\n" if self.context_notes else ""
+        audio_line = f"**Áudio Oficial:** `{self.audio_file_path.name}`\n" if self.audio_file_path else ""
         header_text = (
             f"# Transcrição da Reunião: {self.meeting_title}\n"
             f"**Data de Início:** {data_formatada}\n"
             f"**Arquivo de Registro:** `{self.transcription_file_path.name}`\n"
+            f"{audio_line}"
             f"**Modo de Captura:** Detecção automática por bloco (Estéreo L/R Online ou Mono Presencial)\n"
             f"{context_line}\n"
             f"---\n\n"
@@ -412,6 +431,7 @@ Transcrição completa da reunião:
             end_seconds=end_seconds,
             is_final=is_final,
         )
+        self._max_block_end_seconds = max(self._max_block_end_seconds, float(end_seconds))
         self._task_queue.put(task)
         self._log(f"[FILA] Bloco #{block_index} enfileirado para transcrição.")
 
@@ -615,11 +635,24 @@ Transcrição completa da reunião:
 
         try:
             self._log("[REVISÃO] Executando segunda passada fono-semântica (correção, nomes e overlap)...")
+            header_prefix = ""
+            body_raw = raw_transcript
+            if raw_transcript.lstrip().startswith("# Transcrição") and "\n---\n" in raw_transcript:
+                split_idx = raw_transcript.find("\n---\n")
+                header_end = split_idx + len("\n---\n")
+                while header_end < len(raw_transcript) and raw_transcript[header_end] == "\n":
+                    header_end += 1
+                header_prefix = raw_transcript[:header_end]
+                body_raw = raw_transcript[header_end:]
+
+            if not body_raw.strip():
+                return raw_transcript
+
             vocab_section = self._build_priority_vocabulary_section()
             prompt = self.REFINEMENT_SYSTEM_PROMPT.format(
                 vocab_section=vocab_section,
                 title=self.meeting_title or "Reunião",
-                raw_transcript=raw_transcript,
+                raw_transcript=body_raw,
             )
 
             gen_config = self._build_generation_config(temperature=0.0, top_p=0.95)
@@ -636,12 +669,12 @@ Transcrição completa da reunião:
 
             refined_text = response.text.strip() if getattr(response, "text", None) else ""
             # Proteção contra resposta vazia ou truncamento anômalo pela API
-            if not refined_text or len(refined_text) < int(0.35 * len(raw_transcript.strip())):
+            if not refined_text or len(refined_text) < int(0.35 * len(body_raw.strip())):
                 logger.warning("Revisão fono-semântica retornou conteúdo curto/vazio; mantendo transcrição original.")
                 return raw_transcript
 
             self._log("[REVISÃO] Passada fono-semântica concluída com sucesso.")
-            return refined_text + "\n"
+            return header_prefix + refined_text + "\n"
 
         except Exception as e:
             logger.warning(f"Falha na revisão fono-semântica (usando transcrição bruta): {e}")
@@ -702,7 +735,8 @@ Transcrição completa da reunião:
 
         try:
             now = datetime.now()
-            duration_secs = (now - self.meeting_start_time).total_seconds()
+            wall_secs = (now - self.meeting_start_time).total_seconds()
+            duration_secs = max(wall_secs, self._max_block_end_seconds)
             duration_str = format_seconds(duration_secs)
             date_str = self.meeting_start_time.strftime("%d/%m/%Y às %H:%M")
 
