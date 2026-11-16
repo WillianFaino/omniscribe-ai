@@ -34,6 +34,9 @@ omniscribe-ai/
 │   │   ├── omnimic_tpose.blend    # Modelo principal OmniMic_TPOSE em T-pose pronto para rigging
 │   │   ├── omnimic_rigged.blend   # Cena rigada (OmniMic_Rig, 22 ossos) + 4 props PS1 + 7 animações em NLA
 │   │   └── rig_omnimic.py         # Script reprodutível de rigging, props PS1, curvas Bezier e QA geométrico
+│   ├── mascot/
+│   │   ├── manifest.json          # Metadados das 8 tiras RGBA (`160x180`, 16-24 quadros) renderizadas do Blender
+│   │   └── {idle,greeting,listening,transcribing,celebrating,warning,sleeping,spin}.png  # Sprites RGBA PS1
 │   ├── models/
 │   │   └── omnimic.glb            # Exportação GLB v2 (~906 KB) com skinning, 4 props e 7 Actions embutidas
 │   └── references/
@@ -104,22 +107,20 @@ omniscribe-ai/
 - Armazena perfis L2-normalizados em `atas_reunioes/voice_profiles.json` (`enroll_profile_from_arrays`, `enroll_profile_from_wav_segment`, `export_profiles` e `import_profiles` com validação de modelo `ResNet34-LM` e estratégias `merge`/`skip`/`overwrite`).
 - Antes da chamada ao Gemini em `_process_single_block`, `analyze_wav_speakers()` segmenta o áudio Mono (ou Canal L remoto em Estéreo), gera um mapa temporal biométrico com similaridade de cosseno (incluindo detecção de possíveis sobreposições) e injeta as âncoras no prompt com **zero requisições extras no Free Tier**.
 
-### 3.5 Interface Gráfica (`src/gui.py`)
-- Classe principal `ZoomTranscriberApp(ctk.CTk)` com tema escuro e 3 abas principais (Transcrição ao Vivo, Ata Executiva e Logs).
-- Modais auxiliares:
-  - `VoiceProfilesModal` (`🗣️ Perfis de Voz`): download sob demanda dos modelos ONNX, cadastro guiado em 3 frases pelo microfone (estilo "Ok Google"), extração a partir de trechos `[MM:SS .. MM:SS]` de `.wav` já gravados, exportação individual/completa (`.json`), importação com mesclagem inteligente e remoção de perfis.
-  - `ApiKeyModal`: configuração e persistência da `GEMINI_API_KEY` no `.env`.
-  - `UsageModal`: visualização de requisições do dia, barra de cota Free Tier, tokens e custo estimado.
-  - `HistoryModal`: listagem de atas (`.md`) e gravações oficiais em áudio (`.wav`, excluindo `temp_blocks`), permitindo visualizar documentos, abrir o áudio no player do sistema (`▶ Ouvir`) e iniciar re-transcrição.
-  - `RetranscribeModal` + `ZoomTranscriberApp.start_retranscription`: configura título, glossário/nomes, tamanho do bloco e re-processamento acústico sobre qualquer `.wav` salvo (ou selecionado no disco), gerando nova transcrição e nova Ata Executiva sem sobrescrever versões anteriores.
+### 3.5 Interface Gráfica v2.0 (`src/gui.py`)
+- Classe principal `ZoomTranscriberApp(ctk.CTk)` com paleta dupla `(Light, Dark)` (**Modo Escuro** como padrão + alternador instantâneo `☀️ Claro / 🌙 Escuro` persistido em `atas_reunioes/ui_settings.json`) e navegação limpa em **4 abas principais** no topo (`🎙️ Gravação`, `📋 Ata`, `🗂️ Histórico`, `⚙️ Config & Voz`):
+  - **Aba `🎙️ Gravação`**: título, glossário/nomes, seletor simplificado de modo (`🌐 Online (Sistema+Mic)` vs `🏢 Presencial (Só Mic)`), botão único principal (`▶ Iniciar Gravação` ↔ `⏹ Encerrar e Gerar Ata`), cronômetro, medidores VU e ampla área de transcrição ao vivo.
+  - **Aba `📋 Ata`**: leitura da Ata Executiva com `📂 Abrir Pasta` e `📋 Copiar Ata Markdown`.
+  - **Aba `🗂️ Histórico`**: listagem nativa unificada de `.wav` e `.md` (excluindo `temp_blocks`) via helper compartilhado `render_history_cards_into()`, com filtros por tipo, player (`▶ Ouvir`), visualização e botão `🔄 Re-transcrever`.
+  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + tamanho do bloco + Noise Gate, `GEMINI_API_KEY` + medidor de cota diária Free Tier, resumo/gerenciamento de Voiceprints e gaveta de logs técnicos recolhível.
+- Modais auxiliares (`VoiceProfilesModal`, `RetranscribeModal`, `ApiKeyModal`, `UsageModal`, `HistoryModal`) todos compatíveis com os temas Claro e Escuro.
 
 ### 3.6 Mascote 3D OmniMic (`src/mascot_3d.py` e `src/mascot_widget.py`)
-- **Renderização (`OmniMic3DRenderer`)**: malha articulada `Mesh3D` (`OmniMic #03-A Ultra Low-Poly`) renderizada em software (`128x144` ampliada com `NEAREST` para `192x216`), usando Painter's Algorithm, backface culling e iluminação flat-shading estilo Windows 95.
+- **Renderização (`OmniMic3DRenderer`)**: carrega diretamente as **sprite sheets RGBA transparentes** de `assets/mascot/` (`idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning`, `sleeping`, `spin`) renderizadas em Blender EEVEE com o shader `NG_PS1_Bayer4x4` e os 4 props oficiais, fazendo composição limpa sobre o fundo do tema ativo (com fallback automático para a malha procedural caso `assets/mascot/` não exista).
 - **Interatividade (`OmniMicWidget`)**:
-  - Overlay flutuante/arrastável no canto da janela com balão de fala estilo XP (`#FFFFE1`) e menu de contexto (`⋮` / clique direito).
-  - Rastreamento do cursor do mouse nas pupilas.
-  - Reação a eventos da aplicação: `greeting`, `idle`, `sleeping` (após 45s sem interação), `listening` (reage ao RMS do áudio), `transcribing` (segura bloquinho amarelo e caneta), `celebrating` (troféu dourado ao finalizar ata), `warning` e `spin`.
-  - Visibilidade alternável pelo botão `🎙️ OmniMic` no rodapé da GUI.
+  - Overlay flutuante/arrastável no canto da janela com método `set_theme("Dark" | "Light")` sincronizando card, fundo do sprite e balão XP ao alternador de tema da GUI.
+  - Reação a eventos da aplicação: `greeting`, `idle`, `sleeping` (após 45s sem interação), `listening` (com mini-mic LED ciano e velocidade sensível ao RMS), `transcribing` (bloquinho amarelo + lápis), `celebrating` (troféu dourado ao finalizar ata), `warning` e `spin` (rotação 360° em câmera orbital).
+  - Visibilidade alternável pelo botão `🤖 OmniMic` na barra superior.
 - **Assets 3D em Blender (`assets/blender/omnimic_tpose.blend` e `assets/references/`)**:
   - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
   - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
