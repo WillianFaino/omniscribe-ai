@@ -51,9 +51,9 @@ THEME_CARD = ("#ffffff", "#111827")          # Cartões principais (30%)
 THEME_CARD_ALT = ("#f8fafc", "#182235")      # Cartões secundários / itens
 THEME_BORDER = ("#cbd5e1", "#1f2937")        # Bordas sutis
 THEME_INPUT = ("#f8fafc", "#070b12")         # Campos de entrada e texto
-THEME_TEXT_PRIMARY = ("#0f172a", "#f8fafc")  # Texto principal
-THEME_TEXT_MUTED = ("#475569", "#94a3b8")    # Texto secundário
-THEME_TEXT_DIM = ("#64748b", "#64748b")      # Metadados discretos
+THEME_TEXT_PRIMARY = ("#0f172a", "#f8fafc")  # Texto principal (WCAG AAA)
+THEME_TEXT_MUTED = ("#475569", "#cbd5e1")    # Texto secundário (>= 4.5:1 Dark/Light)
+THEME_TEXT_DIM = ("#64748b", "#94a3b8")      # Metadados discretos (>= 4.5:1 Dark/Light)
 
 BTN_NEUTRAL = ("#e2e8f0", "#1f2937")
 BTN_NEUTRAL_HOVER = ("#cbd5e1", "#374151")
@@ -63,9 +63,24 @@ COLOR_PRIMARY_HOVER = ("#1d4ed8", "#2563eb")
 COLOR_PRIMARY_SOFT = ("#dbeafe", "#1e293b")
 COLOR_SUCCESS = ("#059669", "#10b981")
 COLOR_DANGER = ("#dc2626", "#ef4444")
+COLOR_AMBER = ("#d97706", "#f59e0b")
 COLOR_TEAL = ("#0e7490", "#0891b2")
 COLOR_INDIGO = ("#4f46e5", "#6366f1")
 COLOR_PURPLE = ("#7c3aed", "#8b5cf6")
+
+
+def _style_option_menu(menu: ctk.CTkOptionMenu) -> ctk.CTkOptionMenu:
+    """Padroniza a aparência de CTkOptionMenu com os tokens do tema Claro/Escuro."""
+    menu.configure(
+        fg_color=BTN_NEUTRAL,
+        button_color=COLOR_PRIMARY,
+        button_hover_color=COLOR_PRIMARY_HOVER,
+        text_color=THEME_TEXT_PRIMARY,
+        dropdown_fg_color=THEME_CARD,
+        dropdown_hover_color=BTN_NEUTRAL_HOVER,
+        dropdown_text_color=THEME_TEXT_PRIMARY,
+    )
+    return menu
 
 
 def _open_path_in_os(target_path: Path) -> None:
@@ -116,8 +131,9 @@ class RetranscribeModal(ctk.CTkToplevel):
         self.wav_info = get_wav_info(self.wav_path)
 
         self.title("Re-transcrever Áudio Salvo - OmniScribe AI")
-        self.geometry("560x430")
-        self.resizable(False, False)
+        self.geometry("580x475")
+        self.minsize(560, 460)
+        self.resizable(True, False)
         self.configure(fg_color=THEME_BG)
         self.grab_set()
 
@@ -166,16 +182,18 @@ class RetranscribeModal(ctk.CTkToplevel):
         ctk.CTkLabel(form, text="Tamanho do Bloco:", font=ctk.CTkFont(weight="bold")).grid(
             row=2, column=0, padx=14, pady=8, sticky="w"
         )
-        self.opt_block = ctk.CTkOptionMenu(form, values=["1 minuto", "3 minutos", "5 minutos"])
+        self.opt_block = _style_option_menu(ctk.CTkOptionMenu(form, values=["1 minuto", "3 minutos", "5 minutos"]))
         self.opt_block.set("1 minuto")
         self.opt_block.grid(row=2, column=1, padx=14, pady=8, sticky="w")
 
         ctk.CTkLabel(form, text="Motor de IA:", font=ctk.CTkFont(weight="bold")).grid(
             row=3, column=0, padx=14, pady=8, sticky="w"
         )
-        self.opt_engine = ctk.CTkOptionMenu(
-            form,
-            values=["☁️ Online (Gemini 2.5)", "💻 Offline (Whisper ONNX)"],
+        self.opt_engine = _style_option_menu(
+            ctk.CTkOptionMenu(
+                form,
+                values=["☁️ Online (Gemini 2.5)", "💻 Offline (Whisper ONNX)"],
+            )
         )
         default_eng = "💻 Offline (Whisper ONNX)" if getattr(parent, "engine_mode", "online") == "offline" else "☁️ Online (Gemini 2.5)"
         self.opt_engine.set(default_eng)
@@ -1100,6 +1118,8 @@ def render_history_cards_into(
     on_open_archive=None,
     on_play_archive=None,
     on_retranscribe_archive=None,
+    search_query: str = "",
+    on_empty_action=None,
 ) -> None:
     """Popula um container rolável com cartões de pacotes .omniscribe, .wav, atas e transcrições."""
     for child in scroll_container.winfo_children():
@@ -1107,13 +1127,25 @@ def render_history_cards_into(
 
     atas_root = get_base_dir() / "atas_reunioes"
     if not atas_root.exists():
+        empty_box = ctk.CTkFrame(scroll_container, fg_color="transparent")
+        empty_box.pack(pady=44)
         ctk.CTkLabel(
-            scroll_container,
-            text="Nenhuma ata ou gravação salva ainda.\nSuas reuniões aparecerão aqui automaticamente!",
+            empty_box,
+            text="Nenhuma ata ou gravação salva ainda.\nInicie uma gravação ou importe um pacote .omniscribe.",
             font=ctk.CTkFont(size=13),
             text_color=THEME_TEXT_MUTED,
             justify="center",
-        ).pack(pady=40)
+        ).pack(pady=(0, 12))
+        if on_empty_action is not None:
+            ctk.CTkButton(
+                empty_box,
+                text="🎙️ Ir para Gravação",
+                font=ctk.CTkFont(size=12, weight="bold"),
+                fg_color=COLOR_PRIMARY,
+                hover_color=COLOR_PRIMARY_HOVER,
+                height=34,
+                command=on_empty_action,
+            ).pack()
         return
 
     patterns = ("**/*.omniscribe", "**/*.md", "**/*.wav")
@@ -1135,12 +1167,16 @@ def render_history_cards_into(
     elif "Transcrições" in filter_mode:
         files = [f for f in files if "transcricao" in f.name]
 
+    q = (search_query or "").strip().lower()
+    if q:
+        files = [f for f in files if q in f.name.lower() or q in str(f.parent.name).lower()]
+
     files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
 
     if not files:
         ctk.CTkLabel(
             scroll_container,
-            text="Nenhum item encontrado para este filtro.",
+            text="Nenhum item encontrado para este filtro/busca." if q else "Nenhum item encontrado para este filtro.",
             font=ctk.CTkFont(size=13),
             text_color=THEME_TEXT_MUTED,
         ).pack(pady=40)
@@ -1673,13 +1709,13 @@ class ZoomTranscriberApp(ctk.CTk):
         sess_card.grid(row=0, column=0, sticky="ew")
         sess_card.grid_columnconfigure((0, 1), weight=1)
 
-        # Linha 0: Título, Glossário e Modo de Captação
+        # Linha 0: Título + Glossário (50%/50%) e Linha 1: Captação + Motor de IA
         inputs_row = ctk.CTkFrame(sess_card, fg_color="transparent")
         inputs_row.grid(row=0, column=0, columnspan=2, padx=16, pady=(14, 10), sticky="ew")
         inputs_row.grid_columnconfigure((0, 1), weight=1)
 
         title_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
-        title_col.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+        title_col.grid(row=0, column=0, padx=(0, 8), sticky="ew")
         ctk.CTkLabel(
             title_col, text="TÍTULO DA REUNIÃO", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
         ).pack(anchor="w", pady=(0, 4))
@@ -1694,7 +1730,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.entry_meeting_title.pack(fill="x")
 
         ctx_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
-        ctx_col.grid(row=0, column=1, padx=(0, 10), sticky="ew")
+        ctx_col.grid(row=0, column=1, padx=(8, 0), sticky="ew")
         ctk.CTkLabel(
             ctx_col, text="GLOSSÁRIO / NOMES (OPCIONAL)", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
         ).pack(anchor="w", pady=(0, 4))
@@ -1708,11 +1744,15 @@ class ZoomTranscriberApp(ctk.CTk):
         )
         self.entry_context_notes.pack(fill="x")
 
-        mode_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
-        mode_col.grid(row=0, column=2, padx=(0, 10), sticky="e")
+        modes_subrow = ctk.CTkFrame(inputs_row, fg_color="transparent")
+        modes_subrow.grid(row=1, column=0, columnspan=2, pady=(10, 0), sticky="ew")
+        modes_subrow.grid_columnconfigure((0, 1), weight=1)
+
+        mode_col = ctk.CTkFrame(modes_subrow, fg_color="transparent")
+        mode_col.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             mode_col, text="CAPTAÇÃO", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(side="left", padx=(0, 8))
         self.seg_capture_mode = ctk.CTkSegmentedButton(
             mode_col,
             values=[self.MODE_ONLINE, self.MODE_PRESENCIAL],
@@ -1723,17 +1763,17 @@ class ZoomTranscriberApp(ctk.CTk):
             unselected_color=THEME_INPUT,
             unselected_hover_color=BTN_NEUTRAL_HOVER,
             text_color=THEME_TEXT_PRIMARY,
-            height=36,
+            height=32,
             command=self._on_capture_mode_change,
         )
         self.seg_capture_mode.set(self.MODE_ONLINE)
-        self.seg_capture_mode.pack()
+        self.seg_capture_mode.pack(side="left")
 
-        eng_col = ctk.CTkFrame(inputs_row, fg_color="transparent")
-        eng_col.grid(row=0, column=3, sticky="e")
+        eng_col = ctk.CTkFrame(modes_subrow, fg_color="transparent")
+        eng_col.grid(row=0, column=1, sticky="e")
         ctk.CTkLabel(
             eng_col, text="MOTOR DE IA", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
-        ).pack(anchor="w", pady=(0, 4))
+        ).pack(side="left", padx=(0, 8))
         self.seg_engine_mode = ctk.CTkSegmentedButton(
             eng_col,
             values=[self.ENGINE_ONLINE, self.ENGINE_OFFLINE],
@@ -1744,11 +1784,11 @@ class ZoomTranscriberApp(ctk.CTk):
             unselected_color=THEME_INPUT,
             unselected_hover_color=BTN_NEUTRAL_HOVER,
             text_color=THEME_TEXT_PRIMARY,
-            height=36,
+            height=32,
             command=self._on_engine_mode_change,
         )
         self.seg_engine_mode.set(self.ENGINE_OFFLINE if self.engine_mode == "offline" else self.ENGINE_ONLINE)
-        self.seg_engine_mode.pack()
+        self.seg_engine_mode.pack(side="left")
 
         # Linha 1: Botão Único Principal + Timer + Status + VU compactos
         sep = ctk.CTkFrame(sess_card, height=1, fg_color=THEME_BORDER)
@@ -1822,6 +1862,11 @@ class ZoomTranscriberApp(ctk.CTk):
             vu_mic_row, text="0%", font=ctk.CTkFont(size=11), text_color=THEME_TEXT_DIM, width=30
         )
         self.lbl_vu_mic_val.pack(side="left")
+
+        # Barra de progresso discreta exibida apenas durante processamento assíncrono/downloads
+        self.bar_async_progress = ctk.CTkProgressBar(
+            sess_card, height=4, progress_color=COLOR_PRIMARY, fg_color=THEME_INPUT, corner_radius=2, mode="indeterminate"
+        )
 
         # Linha discreta de resumo do hardware + atalho para Config & Voz
         meta_bar = ctk.CTkFrame(page, fg_color="transparent")
@@ -1997,6 +2042,57 @@ class ZoomTranscriberApp(ctk.CTk):
         top.grid(row=0, column=0, pady=(2, 10), sticky="ew")
         top.grid_columnconfigure(0, weight=1)
 
+        search_row = ctk.CTkFrame(top, fg_color="transparent")
+        search_row.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        search_row.grid_columnconfigure(0, weight=1)
+
+        self.entry_hist_search = ctk.CTkEntry(
+            search_row,
+            placeholder_text="🔍 Buscar por título, data ou nome do arquivo...",
+            fg_color=THEME_CARD,
+            border_color=THEME_BORDER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=34,
+        )
+        self.entry_hist_search.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+        self.entry_hist_search.bind("<KeyRelease>", lambda _e: self._refresh_history_tab())
+
+        hist_btns = ctk.CTkFrame(search_row, fg_color="transparent")
+        hist_btns.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkButton(
+            hist_btns,
+            text="↻ Atualizar",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            width=92,
+            height=34,
+            command=self._refresh_history_tab,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            hist_btns,
+            text="📥 Importar .omniscribe",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#7c3aed",
+            hover_color="#6d28d9",
+            height=34,
+            command=self._import_external_archive_dialog,
+        ).pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            hist_btns,
+            text="📂 Abrir arquivo...",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=BTN_NEUTRAL,
+            hover_color=BTN_NEUTRAL_HOVER,
+            text_color=THEME_TEXT_PRIMARY,
+            height=34,
+            command=self._browse_external_history_file,
+        ).pack(side="left")
+
         self.seg_hist_filter = ctk.CTkSegmentedButton(
             top,
             values=["Tudo", "📦 .omniscribe", "🔊 Áudios (.wav)", "📋 Atas", "🎙️ Transcrições"],
@@ -2011,43 +2107,7 @@ class ZoomTranscriberApp(ctk.CTk):
             command=lambda _v: self._refresh_history_tab(),
         )
         self.seg_hist_filter.set("Tudo")
-        self.seg_hist_filter.grid(row=0, column=0, sticky="w")
-
-        hist_btns = ctk.CTkFrame(top, fg_color="transparent")
-        hist_btns.grid(row=0, column=1, sticky="e")
-
-        ctk.CTkButton(
-            hist_btns,
-            text="↻ Atualizar",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=BTN_NEUTRAL,
-            hover_color=BTN_NEUTRAL_HOVER,
-            text_color=THEME_TEXT_PRIMARY,
-            width=92,
-            height=32,
-            command=self._refresh_history_tab,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            hist_btns,
-            text="📥 Importar .omniscribe",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color="#7c3aed",
-            hover_color="#6d28d9",
-            height=32,
-            command=self._import_external_archive_dialog,
-        ).pack(side="left", padx=(0, 8))
-
-        ctk.CTkButton(
-            hist_btns,
-            text="📂 Abrir arquivo...",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            fg_color=BTN_NEUTRAL,
-            hover_color=BTN_NEUTRAL_HOVER,
-            text_color=THEME_TEXT_PRIMARY,
-            height=32,
-            command=self._browse_external_history_file,
-        ).pack(side="left")
+        self.seg_hist_filter.grid(row=1, column=0, sticky="w")
 
         self.hist_scroll = ctk.CTkScrollableFrame(
             page,
@@ -2102,22 +2162,28 @@ class ZoomTranscriberApp(ctk.CTk):
         a_body.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(a_body, text="Áudio do Sistema (Loopback L):", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(anchor="w")
-        self.opt_loopback = ctk.CTkOptionMenu(
-            a_body, values=["Procurando dispositivos..."], command=lambda _v: self._on_loopback_selected()
+        self.opt_loopback = _style_option_menu(
+            ctk.CTkOptionMenu(
+                a_body, values=["Procurando dispositivos..."], command=lambda _v: self._on_loopback_selected()
+            )
         )
         self.opt_loopback.pack(fill="x", pady=(3, 10))
 
         ctk.CTkLabel(a_body, text="Microfone Local (R / Presencial):", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(anchor="w")
-        self.opt_mic = ctk.CTkOptionMenu(
-            a_body, values=["Procurando dispositivos..."], command=lambda _v: self._update_hw_summary_label()
+        self.opt_mic = _style_option_menu(
+            ctk.CTkOptionMenu(
+                a_body, values=["Procurando dispositivos..."], command=lambda _v: self._update_hw_summary_label()
+            )
         )
         self.opt_mic.pack(fill="x", pady=(3, 10))
 
         blk_row = ctk.CTkFrame(a_body, fg_color="transparent")
         blk_row.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(blk_row, text="Tamanho do Bloco:", font=ctk.CTkFont(size=11, weight="bold"), text_color=THEME_TEXT_MUTED).pack(side="left")
-        self.opt_block_duration = ctk.CTkOptionMenu(
-            blk_row, values=["1 minuto", "3 minutos", "5 minutos"], width=130, command=lambda _v: self._update_hw_summary_label()
+        self.opt_block_duration = _style_option_menu(
+            ctk.CTkOptionMenu(
+                blk_row, values=["1 minuto", "3 minutos", "5 minutos"], width=130, command=lambda _v: self._update_hw_summary_label()
+            )
         )
         self.opt_block_duration.set("1 minuto")
         self.opt_block_duration.pack(side="right")
@@ -2271,11 +2337,13 @@ class ZoomTranscriberApp(ctk.CTk):
         off_btns = ctk.CTkFrame(off_card, fg_color="transparent")
         off_btns.grid(row=0, column=1, padx=16, pady=(14, 6), sticky="e")
 
-        self.opt_whisper_variant = ctk.CTkOptionMenu(
-            off_btns,
-            values=["small", "base"],
-            width=96,
-            command=self._on_whisper_variant_change,
+        self.opt_whisper_variant = _style_option_menu(
+            ctk.CTkOptionMenu(
+                off_btns,
+                values=["small", "base"],
+                width=96,
+                command=self._on_whisper_variant_change,
+            )
         )
         self.opt_whisper_variant.set(self.offline_whisper_variant)
         self.opt_whisper_variant.pack(side="left", padx=(0, 8))
@@ -2293,6 +2361,10 @@ class ZoomTranscriberApp(ctk.CTk):
 
         off_bottom = ctk.CTkFrame(off_card, fg_color="transparent")
         off_bottom.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="ew")
+        self.bar_offline_progress = ctk.CTkProgressBar(
+            off_bottom, height=6, progress_color="#7c3aed", fg_color=THEME_INPUT, corner_radius=4
+        )
+        self.bar_offline_progress.set(0.0)
         self.chk_auto_sqlite = ctk.CTkCheckBox(
             off_bottom,
             text="Gerar pacote portátil SQLite (.omniscribe com áudio compactado) automaticamente ao encerrar",
@@ -2478,16 +2550,23 @@ class ZoomTranscriberApp(ctk.CTk):
 
     def _download_offline_models_async(self) -> None:
         self.btn_download_whisper.configure(state="disabled", text="⏳ Baixando...")
+        self.bar_offline_progress.set(0.02)
+        self.bar_offline_progress.pack(fill="x", pady=(0, 8))
+
+        def _on_prog(msg_txt: str, pct: float) -> None:
+            def _ui():
+                self.lbl_offline_status.configure(text=f"{msg_txt} ({int(pct * 100)}%)")
+                self.bar_offline_progress.set(max(0.0, min(1.0, float(pct))))
+            self.after(0, _ui)
 
         def _worker():
             ok, msg = self.gemini_service.offline_asr_service.ensure_models_ready(
                 variant=self.offline_whisper_variant,
-                progress_cb=lambda m, p: self.after(
-                    0, lambda txt=f"{m} ({int(p*100)}%)": self.lbl_offline_status.configure(text=txt)
-                ),
+                progress_cb=_on_prog,
             )
             def _done():
                 self.btn_download_whisper.configure(state="normal", text="⬇️ Baixar / Verificar Offline")
+                self.bar_offline_progress.pack_forget()
                 self._log_gui(f"[OFFLINE] {msg}")
                 self._refresh_offline_status()
             self.after(0, _done)
@@ -2519,6 +2598,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self._update_hw_summary_label()
 
     def _refresh_history_tab(self) -> None:
+        query = self.entry_hist_search.get() if hasattr(self, "entry_hist_search") else ""
         render_history_cards_into(
             self.hist_scroll,
             filter_mode=self.seg_hist_filter.get(),
@@ -2527,6 +2607,8 @@ class ZoomTranscriberApp(ctk.CTk):
             on_open_archive=self.load_archive,
             on_play_archive=self.play_archive_audio,
             on_retranscribe_archive=self.retranscribe_archive,
+            search_query=query,
+            on_empty_action=lambda: self._switch_tab(self.TAB_REC),
         )
 
     def _browse_external_history_file(self) -> None:
@@ -2798,12 +2880,16 @@ class ZoomTranscriberApp(ctk.CTk):
                 hover_color="#dc2626",
                 state="normal",
             )
+            self.bar_async_progress.stop()
+            self.bar_async_progress.grid_forget()
         elif not idle:
             self.btn_rec_action.configure(
                 text="🔄 Processando...",
                 fg_color=COLOR_PRIMARY,
                 state="disabled",
             )
+            self.bar_async_progress.grid(row=3, column=0, columnspan=2, padx=16, pady=(0, 10), sticky="ew")
+            self.bar_async_progress.start()
         else:
             self.btn_rec_action.configure(
                 text="▶ Iniciar Gravação",
@@ -2811,6 +2897,8 @@ class ZoomTranscriberApp(ctk.CTk):
                 hover_color="#059669",
                 state="normal",
             )
+            self.bar_async_progress.stop()
+            self.bar_async_progress.grid_forget()
 
     def _toggle_recording_action(self) -> None:
         if self.is_recording:
@@ -3091,7 +3179,19 @@ class ZoomTranscriberApp(ctk.CTk):
         self.after(0, update)
 
     def _handle_status_change(self, status: str) -> None:
-        self.after(0, lambda: self.lbl_status.configure(text=f"● {status}"))
+        def _apply():
+            low = status.lower()
+            if any(k in low for k in ("erro", "falha")):
+                color = COLOR_DANGER
+            elif any(k in low for k in ("concluíd", "pronto", "salva")):
+                color = COLOR_SUCCESS
+            elif any(k in low for k in ("baixando", "compactando", "refinando")):
+                color = COLOR_AMBER
+            else:
+                color = COLOR_PRIMARY
+            self.lbl_status.configure(text=f"● {status}", text_color=color)
+
+        self.after(0, _apply)
 
     def _log_gui(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
