@@ -23,10 +23,12 @@ dist/
 temp_blocks/
 *.wav
 
-# Atas e Transcrições Geradas Localmente
+# Atas, Transcrições e Pacotes Gerados Localmente
 atas_reunioes/
 models/
 *.onnx
+*.omniscribe
+*.omniscribe.tmp
 .vscode/
 .idea/
 
