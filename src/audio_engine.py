@@ -386,7 +386,7 @@ def _find_pause_cut_frame(audio_array: np.ndarray, nominal_frame: int, sample_ra
 def slice_wav_for_retranscription(
     source_wav_path: Path,
     temp_dir: Path,
-    block_duration_seconds: int = 180,
+    block_duration_seconds: int = 60,
     overlap_seconds: float = BLOCK_OVERLAP_SECONDS,
     apply_enhancement: Optional[bool] = None,
 ) -> List[Tuple[Path, int, float, float, bool]]:
@@ -577,7 +577,7 @@ class AudioEngine:
 
         self.is_recording = False
         self.is_mic_muted = False
-        self.block_duration_seconds = 180
+        self.block_duration_seconds = 60
 
         self._pyaudio_instance: Optional[pyaudio.PyAudio] = None
         self._loopback_stream = None
@@ -627,7 +627,7 @@ class AudioEngine:
         self,
         loopback_index: Optional[int],
         mic_index: Optional[int],
-        block_duration_seconds: int = 180,
+        block_duration_seconds: int = 60,
         session_wav_path: Optional[Path] = None,
     ) -> bool:
         """Inicia a gravação sincronizada (suporta Loopback, Microfone ou Ambos)."""

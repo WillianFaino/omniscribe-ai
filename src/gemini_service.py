@@ -186,6 +186,7 @@ DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO E IDENTIFICAÇÃO DE VOZES:
    - Ignore chiados estáticos, ruído elétrico ou respiração.
    - Se o trecho inteiro não possuir fala humana perceptível, retorne exatamente: *[Silêncio / Sem fala identificada no período]*
    - Não resuma nem omita palavras nesta etapa; forneça o diálogo completo.
+   - REGRA CRÍTICA ANTI-LOOP: Nunca repita palavras, gaguejos, partículas ("que o, que o...") ou turnos idênticos em ciclo repetitivo; em hesitações, registre no máximo 1 vez (ou `[incompreensível]`) e avance no áudio. Mantenha estritamente o idioma português e o formato `[MM:SS] **Falante**: <fala>` do início ao fim (nunca mude para cabeçalhos `**MM:SS - MM:SS**` nem verbos em inglês como `speaks.`).
 """
 
     PRESENTIAL_TRANSCRIPTION_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do OmniScribe AI.
@@ -214,6 +215,7 @@ DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO ACÚSTICA EM SALA ÚNICA:
    - Se os segundos iniciais (~2,5s) repetirem o final exato do contexto anterior por sobreposição de bloco, dê continuidade natural sem truncar palavras na fronteira.
    - Se o trecho inteiro não possuir fala humana perceptível, retorne exatamente: *[Silêncio / Sem fala identificada no período]*
    - Não resuma nem corrija livremente o estilo oral; transcreva todas as falas na íntegra.
+   - REGRA CRÍTICA ANTI-LOOP: Nunca repita palavras, gaguejos, partículas ("que o, que o...") ou turnos idênticos em ciclo repetitivo; em hesitações, registre no máximo 1 vez (ou `[incompreensível]`) e avance no áudio. Mantenha estritamente o idioma português e o formato `[MM:SS] **Falante**: <fala>` do início ao fim (nunca mude para cabeçalhos `**MM:SS - MM:SS**` nem verbos em inglês como `speaks.`).
 """
 
     REFINEMENT_SYSTEM_PROMPT = """Você é um revisor especialista em transcrições corporativas e correção fono-semântica em português brasileiro e termos técnicos de TI/negócios.
@@ -487,13 +489,233 @@ Transcrição completa da reunião:
         """Seleciona o prompt especializado conforme o layout de canais (1=Mono Presencial, 2=Estéreo Online)."""
         return self.PRESENTIAL_TRANSCRIPTION_PROMPT if num_channels == 1 else self.TRANSCRIPTION_SYSTEM_PROMPT
 
-    def _build_generation_config(self, temperature: float = 0.0, top_p: float = 0.95):
-        """Constrói GenerateContentConfig determinístico quando `google.genai.types` estiver carregado."""
+    _STANDARD_TURN_RE = re.compile(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s+\*\*(.+?)\*\*:\s*(.*)$")
+    _INTRA_NGRAM_LOOP_RE = re.compile(
+        r"(\b[\wÀ-ÿ]{1,24}(?:[,\s]+[\wÀ-ÿ]{1,24}){0,5}?\b)(?:[,\s]+\1){4,}",
+        flags=re.IGNORECASE,
+    )
+    _BROKEN_RANGE_HEADER_RE = re.compile(r"^\s*\*\*(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*\d{1,2}:\d{2}(?::\d{2})?\*\*\s*$")
+    _ENGLISH_SPEAKS_LINE_RE = re.compile(r'^\s*[-*]\s+(.+?)\s+\bspeaks\.\s*(?:"(.*)"|(.*))$', flags=re.IGNORECASE)
+    _ENGLISH_LEAK_RE = re.compile(r"\bthat'?s\s+that'?s\s+the\s+first\s+part\b[.!]*", flags=re.IGNORECASE)
+
+    def _build_generation_config(
+        self,
+        temperature: float = 0.2,
+        top_p: float = 0.95,
+        max_output_tokens: Optional[int] = None,
+    ):
+        """Constrói GenerateContentConfig quando `google.genai.types` estiver carregado."""
         if types is None:
             _ensure_genai_loaded()
         if types is not None and hasattr(types, "GenerateContentConfig"):
-            return types.GenerateContentConfig(temperature=temperature, top_p=top_p)
+            kwargs = {"temperature": temperature, "top_p": top_p}
+            if max_output_tokens is not None and max_output_tokens > 0:
+                kwargs["max_output_tokens"] = int(max_output_tokens)
+            return types.GenerateContentConfig(**kwargs)
         return None
+
+    @classmethod
+    def _collapse_intraline_loops(cls, line: str) -> Tuple[str, int]:
+        """Colapsa repetições consecutivas anômalas (5+x) de palavras/n-gramas dentro de uma linha."""
+        removed_copies = 0
+
+        def _repl(match: re.Match) -> str:
+            nonlocal removed_copies
+            unit = match.group(1).strip()
+            total_span = len(match.group(0))
+            unit_len = max(1, len(unit) + 1)
+            est_copies = max(4, (total_span // unit_len) - 1)
+            removed_copies += est_copies
+            return unit
+
+        cleaned = cls._INTRA_NGRAM_LOOP_RE.sub(_repl, line)
+        if cls._ENGLISH_LEAK_RE.search(cleaned):
+            cleaned = cls._ENGLISH_LEAK_RE.sub("", cleaned).strip()
+            removed_copies += 4
+        # Limpa sobras de pontuação após colapso ("..., , ..." ou vírgula solta no fim)
+        cleaned = re.sub(r"(?:,\s*){2,}", ", ", cleaned)
+        cleaned = re.sub(r",\s*\.", ".", cleaned)
+        if removed_copies > 0:
+            cleaned = re.sub(r",\s*$", "", cleaned)
+        cleaned = cleaned.strip()
+        return cleaned, removed_copies
+
+    @classmethod
+    def _normalize_broken_format(cls, text: str) -> Tuple[str, bool]:
+        """Detecta e converte cabeçalhos `**MM:SS - MM:SS**` / `- Falante speaks.` para o padrão OmniScribe."""
+        out_lines: List[str] = []
+        broken_detected = False
+        pending_ts: Optional[str] = None
+
+        for raw_line in text.splitlines():
+            hdr_m = cls._BROKEN_RANGE_HEADER_RE.match(raw_line)
+            if hdr_m:
+                pending_ts = hdr_m.group(1)
+                broken_detected = True
+                continue
+
+            spk_m = cls._ENGLISH_SPEAKS_LINE_RE.match(raw_line)
+            if spk_m:
+                broken_detected = True
+                speaker = spk_m.group(1).strip().strip("*")
+                spoken = (spk_m.group(2) if spk_m.group(2) is not None else spk_m.group(3) or "").strip()
+                ts_prefix = f"[{pending_ts}] " if pending_ts else ""
+                if speaker and spoken:
+                    out_lines.append(f"{ts_prefix}**{speaker}**: {spoken}")
+                continue
+
+            if raw_line.strip():
+                pending_ts = None
+            out_lines.append(raw_line)
+
+        return "\n".join(out_lines), broken_detected
+
+    @classmethod
+    def _turn_signature(cls, line: str) -> Optional[Tuple[str, str]]:
+        """Extrai assinatura normalizada `(falante, fala)` ignorando timestamp `[MM:SS]`."""
+        m = cls._STANDARD_TURN_RE.match(line.strip())
+        if not m:
+            return None
+        speaker = re.sub(r"\s+", " ", m.group(2)).strip().lower()
+        utterance = re.sub(r"[\s.,!?;:\"'`()\-]+", " ", m.group(3)).strip().lower()
+        return speaker, utterance
+
+    @classmethod
+    def _deduplicate_turn_cycles(cls, text: str) -> Tuple[str, int]:
+        """Remove loops consecutivos de turnos únicos ou alternados (ciclos de período 1 a 4)."""
+        lines = text.splitlines()
+        turns: List[Tuple[int, int, Tuple[str, str]]] = []
+        run_id = 0
+        for idx, raw_line in enumerate(lines):
+            sig = cls._turn_signature(raw_line)
+            if sig is not None:
+                turns.append((idx, run_id, sig))
+            elif raw_line.strip():
+                # Cabeçalhos, notas ou linhas não-turno quebram contiguidade de ciclo
+                run_id += 1
+
+        if len(turns) < 3:
+            return text, 0
+
+        drop_indices: set[int] = set()
+        insert_marker_after: set[int] = set()
+        pruned_count = 0
+        pos = 0
+        n = len(turns)
+
+        while pos < n:
+            matched_cycle = False
+            curr_run = turns[pos][1]
+            for period in (1, 2, 3, 4):
+                if pos + 3 * period > n:
+                    continue
+                if any(turns[pos + k][1] != curr_run for k in range(3 * period)):
+                    continue
+                base_sigs = [turns[pos + k][2] for k in range(period)]
+                if period > 1 and not any(len(s[1]) >= 8 for s in base_sigs):
+                    continue
+
+                reps = 1
+                while pos + (reps + 1) * period <= n:
+                    if any(turns[pos + reps * period + k][1] != curr_run for k in range(period)):
+                        break
+                    cand_sigs = [turns[pos + reps * period + k][2] for k in range(period)]
+                    if cand_sigs != base_sigs:
+                        break
+                    reps += 1
+
+                min_reps = 3 if (period > 1 or len(base_sigs[0][1]) >= 10) else 4
+                if reps >= min_reps:
+                    last_kept_line_idx = turns[pos + period - 1][0]
+                    for r in range(1, reps):
+                        for k in range(period):
+                            drop_indices.add(turns[pos + r * period + k][0])
+                            pruned_count += 1
+                    pos += reps * period
+                    # Consome eventual prefixo incompleto pendente do próximo ciclo repetido (ex.: turno ímpar final)
+                    tail_k = 0
+                    while pos < n and tail_k < period and turns[pos][1] == curr_run and turns[pos][2] == base_sigs[tail_k]:
+                        drop_indices.add(turns[pos][0])
+                        pruned_count += 1
+                        pos += 1
+                        tail_k += 1
+                    insert_marker_after.add(last_kept_line_idx)
+                    matched_cycle = True
+                    break
+            if not matched_cycle:
+                pos += 1
+
+        if pruned_count == 0:
+            return text, 0
+
+        rebuilt: List[str] = []
+        for idx, line in enumerate(lines):
+            if idx in drop_indices:
+                continue
+            rebuilt.append(line)
+            if idx in insert_marker_after:
+                rebuilt.append("*[Trecho em repetição suprimido automaticamente]*")
+
+        # Colapsa linhas em branco excessivas deixadas pela poda
+        cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(rebuilt)).strip()
+        return cleaned, pruned_count
+
+    @classmethod
+    def _detect_and_sanitize_repetition(cls, text: str) -> Tuple[str, bool, str]:
+        """Detecta e saneia loops intra-linha, ciclos de turnos e desvios de formato do Gemini."""
+        if not text or not text.strip():
+            return text, False, ""
+
+        normalized_text, broken_format = cls._normalize_broken_format(text)
+
+        cleaned_lines: List[str] = []
+        total_intraline_removed = 0
+        for raw_line in normalized_text.splitlines():
+            clean_line, removed = cls._collapse_intraline_loops(raw_line)
+            total_intraline_removed += removed
+            if clean_line.strip() or not raw_line.strip():
+                cleaned_lines.append(clean_line)
+
+        stage1 = "\n".join(cleaned_lines)
+        stage2, pruned_turns = cls._deduplicate_turn_cycles(stage1)
+
+        reasons: List[str] = []
+        if total_intraline_removed >= 4:
+            reasons.append(f"loop intra-linha ({total_intraline_removed}x)")
+        if pruned_turns >= 2:
+            reasons.append(f"ciclo de turnos ({pruned_turns} linhas)")
+        if broken_format:
+            reasons.append("desvio de formato/idioma")
+
+        had_loop = bool(reasons)
+        return stage2.strip() or text.strip(), had_loop, ", ".join(reasons)
+
+    def _build_safe_recent_context(self, max_turns: int = 6) -> str:
+        """Seleciona apenas turnos válidos e não-repetitivos recentes para guiar o próximo bloco."""
+        if not self.accumulated_transcript.strip():
+            return ""
+
+        valid_turns: List[str] = []
+        prev_sig: Optional[Tuple[str, str]] = None
+        for raw_line in self.accumulated_transcript.splitlines():
+            line = raw_line.strip()
+            if not self._STANDARD_TURN_RE.match(line):
+                continue
+            sig = self._turn_signature(line)
+            if sig == prev_sig:
+                continue
+            prev_sig = sig
+            valid_turns.append(line)
+
+        if not valid_turns:
+            return ""
+
+        last_turns = valid_turns[-max_turns:]
+        return (
+            "\n--- CONTEXTO DAS FALAS ANTERIORES (Use para manter nomes e diarização consistentes) ---\n"
+            + "\n".join(last_turns)
+            + "\n--------------------------------------------------------------------------------------\n\n"
+        )
 
     def _build_priority_vocabulary_section(self) -> str:
         """Gera bloco de vocabulário prioritário a partir de `context_notes` e palavras-chave do `title`."""
@@ -555,22 +777,8 @@ Transcrição completa da reunião:
             self._log(f"[UPLOAD] Enviando {task.wav_path.name} para a nuvem Gemini...")
             uploaded_remote_file = self._client.files.upload(file=str(task.wav_path))
 
-            # 2. Chamada determinística com gemini-2.5-flash (temperature=0.0, top_p=0.95)
-            recent_context = ""
-            if self.accumulated_transcript.strip():
-                # Coleta os últimos turnos de fala significativos para manter continuidade de vozes e nomes
-                lines = [
-                    l.strip()
-                    for l in self.accumulated_transcript.strip().split("\n")
-                    if l.strip() and not l.startswith("###") and not l.startswith("---") and not l.startswith("*[")
-                ]
-                last_turns = lines[-8:] if len(lines) > 8 else lines
-                if last_turns:
-                    recent_context = (
-                        "\n--- CONTEXTO DAS FALAS ANTERIORES (Use para manter nomes e diarização consistentes) ---\n"
-                        + "\n".join(last_turns)
-                        + "\n--------------------------------------------------------------------------------------\n\n"
-                    )
+            # 2. Chamada com temperature=0.2, limite de tokens proporcional e proteção anti-loop
+            recent_context = self._build_safe_recent_context(max_turns=6)
 
             vocab_section = self._build_priority_vocabulary_section()
             biometric_hints = ""
@@ -601,21 +809,47 @@ Transcrição completa da reunião:
                 f"{system_prompt}"
             )
 
-            gen_config = self._build_generation_config(temperature=0.0, top_p=0.95)
-            kwargs = {
-                "model": "gemini-2.5-flash",
-                "contents": [uploaded_remote_file, prompt],
-            }
-            if gen_config is not None:
-                kwargs["config"] = gen_config
+            audio_dur = max(0.0, task.end_seconds - task.start_seconds)
+            block_max_tokens = min(8192, max(3072, int(max(60.0, audio_dur) * 35)))
 
-            response = self._client.models.generate_content(**kwargs)
+            def _invoke_block(temp: float) -> Tuple[str, int, int]:
+                cfg = self._build_generation_config(
+                    temperature=temp,
+                    top_p=0.95,
+                    max_output_tokens=block_max_tokens,
+                )
+                req_kwargs = {
+                    "model": "gemini-2.5-flash",
+                    "contents": [uploaded_remote_file, prompt],
+                }
+                if cfg is not None:
+                    req_kwargs["config"] = cfg
+                resp = self._client.models.generate_content(**req_kwargs)
+                req_in, req_out = self._extract_usage_tokens(resp)
+                txt = resp.text.strip() if getattr(resp, "text", None) else ""
+                return txt, req_in, req_out
 
-            transcription_text = response.text.strip() if response.text else "*[Áudio sem transcrição disponível]*"
+            raw_text, in_tok, out_tok = _invoke_block(0.2)
+            transcription_text, had_loop, loop_reason = self._detect_and_sanitize_repetition(raw_text)
+
+            if had_loop and raw_text:
+                self._log(
+                    f"[AVISO] Bloco #{task.block_index}: {loop_reason} detectado; "
+                    f"reexecutando 1x com temperature=0.45 para quebrar repetição..."
+                )
+                retry_raw, retry_in, retry_out = _invoke_block(0.45)
+                in_tok += retry_in
+                out_tok += retry_out
+                if retry_raw:
+                    retry_clean, retry_had_loop, _ = self._detect_and_sanitize_repetition(retry_raw)
+                    # Prefere o retry se eliminou o loop ou preservou conteúdo sem quebra de formato
+                    if not retry_had_loop or len(retry_clean) > len(transcription_text):
+                        transcription_text = retry_clean
+
+            if not transcription_text:
+                transcription_text = "*[Áudio sem transcrição disponível]*"
 
             # Rastreamento de tokens e cota da API
-            in_tok, out_tok = self._extract_usage_tokens(response)
-            audio_dur = max(0.0, task.end_seconds - task.start_seconds)
             self.tracker.register_request(audio_seconds=audio_dur, input_tokens=in_tok, output_tokens=out_tok)
 
             # 3. Formatação no Markdown
@@ -667,14 +901,17 @@ Transcrição completa da reunião:
             if not body_raw.strip():
                 return raw_transcript
 
+            # Saneia eventuais loops antes da revisão para não distorcer a janela de contexto nem o limiar de tamanho
+            body_clean, _, _ = self._detect_and_sanitize_repetition(body_raw)
+
             vocab_section = self._build_priority_vocabulary_section()
             prompt = self.REFINEMENT_SYSTEM_PROMPT.format(
                 vocab_section=vocab_section,
                 title=self.meeting_title or "Reunião",
-                raw_transcript=body_raw,
+                raw_transcript=body_clean,
             )
 
-            gen_config = self._build_generation_config(temperature=0.0, top_p=0.95)
+            gen_config = self._build_generation_config(temperature=0.15, top_p=0.95)
             kwargs = {
                 "model": "gemini-2.5-flash",
                 "contents": [prompt],
@@ -686,11 +923,12 @@ Transcrição completa da reunião:
             in_tok, out_tok = self._extract_usage_tokens(response)
             self.tracker.register_request(audio_seconds=0.0, input_tokens=in_tok, output_tokens=out_tok)
 
-            refined_text = response.text.strip() if getattr(response, "text", None) else ""
-            # Proteção contra resposta vazia ou truncamento anômalo pela API
-            if not refined_text or len(refined_text) < int(0.35 * len(body_raw.strip())):
-                logger.warning("Revisão fono-semântica retornou conteúdo curto/vazio; mantendo transcrição original.")
-                return raw_transcript
+            refined_raw = response.text.strip() if getattr(response, "text", None) else ""
+            refined_text, _, _ = self._detect_and_sanitize_repetition(refined_raw) if refined_raw else ("", False, "")
+            # Proteção contra resposta vazia ou truncamento anômalo pela API (medido contra o corpo já sem loops)
+            if not refined_text or len(refined_text) < int(0.35 * len(body_clean.strip())):
+                logger.warning("Revisão fono-semântica retornou conteúdo curto/vazio; mantendo transcrição sanitizada.")
+                return header_prefix + body_clean + "\n" if body_clean != body_raw else raw_transcript
 
             self._log("[REVISÃO] Passada fono-semântica concluída com sucesso.")
             return header_prefix + refined_text + "\n"

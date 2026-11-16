@@ -164,7 +164,7 @@ class RetranscribeModal(ctk.CTkToplevel):
             row=2, column=0, padx=14, pady=8, sticky="w"
         )
         self.opt_block = ctk.CTkOptionMenu(form, values=["1 minuto", "3 minutos", "5 minutos"])
-        self.opt_block.set("3 minutos")
+        self.opt_block.set("1 minuto")
         self.opt_block.grid(row=2, column=1, padx=14, pady=8, sticky="w")
 
         self.chk_enhance = ctk.CTkCheckBox(
@@ -1964,7 +1964,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.opt_block_duration = ctk.CTkOptionMenu(
             blk_row, values=["1 minuto", "3 minutos", "5 minutos"], width=130, command=lambda _v: self._update_hw_summary_label()
         )
-        self.opt_block_duration.set("3 minutos")
+        self.opt_block_duration.set("1 minuto")
         self.opt_block_duration.pack(side="right")
 
         self.chk_noise_gate = ctk.CTkCheckBox(
@@ -2542,7 +2542,7 @@ class ZoomTranscriberApp(ctk.CTk):
         wav_path: Path,
         title: str,
         context_notes: str = "",
-        block_seconds: int = 180,
+        block_seconds: int = 60,
         apply_enhancement: Optional[bool] = None,
     ) -> None:
         if self.is_recording or self.is_retranscribing:
