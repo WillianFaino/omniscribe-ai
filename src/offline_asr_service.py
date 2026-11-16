@@ -200,7 +200,7 @@ class OfflineAsrService:
 
         # 1. Garante Silero VAD + WeSpeaker (usados na segmentação e diarização local)
         if self.voiceprint_service:
-            ok_vp, msg_vp = self.voiceprint_service.ensure_models_downloaded(progress_cb=progress_cb)
+            ok_vp, msg_vp = self.voiceprint_service.ensure_models_downloaded(on_progress=progress_cb)
             if not ok_vp:
                 logger.warning(f"Aviso ao baixar modelos auxiliares VAD/Voiceprint: {msg_vp}")
 
@@ -250,6 +250,16 @@ class OfflineAsrService:
             if target_dir.exists():
                 shutil.rmtree(target_dir, ignore_errors=True)
             shutil.move(str(sub_dir), str(target_dir))
+
+            # Remove pesos FP32 redundantes se os equivalentes INT8 existirem (reduz ~500 MB)
+            int8_enc = target_dir / f"{spec['prefix']}-encoder.int8.onnx"
+            int8_dec = target_dir / f"{spec['prefix']}-decoder.int8.onnx"
+            fp32_enc = target_dir / f"{spec['prefix']}-encoder.onnx"
+            fp32_dec = target_dir / f"{spec['prefix']}-decoder.onnx"
+            if int8_enc.exists() and fp32_enc.exists():
+                fp32_enc.unlink(missing_ok=True)
+            if int8_dec.exists() and fp32_dec.exists():
+                fp32_dec.unlink(missing_ok=True)
 
             if self._resolve_model_files(var) is None:
                 return False, f"Arquivos Whisper inválidos após extração em {target_dir}."
