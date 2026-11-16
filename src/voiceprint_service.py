@@ -101,7 +101,14 @@ class VoiceprintService:
         profiles_path: Optional[Path] = None,
     ):
         base_dir = _get_base_dir()
-        self.models_dir = Path(models_dir) if models_dir else (base_dir / "models" / "voiceprint")
+        if models_dir:
+            self.models_dir = Path(models_dir)
+        else:
+            cand = base_dir / "models" / "voiceprint"
+            meipass = getattr(sys, "_MEIPASS", None)
+            if not cand.exists() and meipass and (Path(meipass) / "models" / "voiceprint").exists():
+                cand = Path(meipass) / "models" / "voiceprint"
+            self.models_dir = cand
         self.profiles_path = (
             Path(profiles_path)
             if profiles_path

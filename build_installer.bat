@@ -43,7 +43,22 @@ if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
 
 :build_setup
 echo.
-echo [2/2] Gerando pacote compacto e compilando Instalador Nativo Instantaneo...
+echo [2/3] Preparando modelos locais ONNX (Voiceprints + Whisper small INT8)...
+python src/offline_asr_service.py --prepare small
+if %errorlevel% neq 0 (
+    echo [AVISO] Falha ao baixar modelos offline agora; o app fara o download sob demanda no primeiro uso.
+)
+if exist "models\voiceprint" (
+    if not exist "dist\OmniScribe\models\voiceprint" mkdir "dist\OmniScribe\models\voiceprint"
+    xcopy /E /I /Y "models\voiceprint" "dist\OmniScribe\models\voiceprint" >nul
+)
+if exist "models\asr\sherpa-onnx-whisper-small" (
+    if not exist "dist\OmniScribe\models\asr\sherpa-onnx-whisper-small" mkdir "dist\OmniScribe\models\asr\sherpa-onnx-whisper-small"
+    xcopy /E /I /Y "models\asr\sherpa-onnx-whisper-small" "dist\OmniScribe\models\asr\sherpa-onnx-whisper-small" >nul
+)
+
+echo.
+echo [3/3] Gerando pacote compacto e compilando Instalador Nativo Instantaneo...
 echo       (Stub Win32/.NET ~32 KB com Payload EOF -> Abertura em menos de 0.1s!)
 echo.
 

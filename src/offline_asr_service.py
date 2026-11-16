@@ -127,7 +127,14 @@ class OfflineAsrService:
         default_variant: str = "small",
     ):
         base_dir = _get_base_dir()
-        self.models_dir = Path(models_dir) if models_dir else (base_dir / "models" / "asr")
+        if models_dir:
+            self.models_dir = Path(models_dir)
+        else:
+            cand = base_dir / "models" / "asr"
+            meipass = getattr(sys, "_MEIPASS", None)
+            if not cand.exists() and meipass and (Path(meipass) / "models" / "asr").exists():
+                cand = Path(meipass) / "models" / "asr"
+            self.models_dir = cand
         self.voiceprint_service = voiceprint_service or VoiceprintService()
         self.default_variant = default_variant if default_variant in WHISPER_MODELS else "small"
 
@@ -552,3 +559,19 @@ class OfflineAsrService:
         out.extend(questions if questions else ["- Nenhuma pergunta aberta identificada."])
         out.append("")
         return "\n".join(out)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Gerenciador de modelos offline OmniScribe AI")
+    parser.add_argument("--prepare", choices=list(WHISPER_MODELS.keys()), default="small")
+    args = parser.parse_args()
+
+    svc = OfflineAsrService(default_variant=args.prepare)
+    ok, msg = svc.ensure_models_ready(
+        variant=args.prepare,
+        progress_cb=lambda m, p: print(f"[{int(p * 100):3d}%] {m}", flush=True),
+    )
+    print(f"{'[OK]' if ok else '[ERRO]'} {msg}")
+    sys.exit(0 if ok else 1)
