@@ -23,6 +23,7 @@ from audio_engine import (
     AudioEngine,
     get_wav_info,
     listar_dispositivos_audio,
+    record_mic_sample,
     slice_wav_for_retranscription,
 )
 from mascot_widget import OmniMicWidget
@@ -215,6 +216,523 @@ class RetranscribeModal(ctk.CTkToplevel):
             block_seconds=block_seconds,
             apply_enhancement=apply_enh,
         )
+
+
+def parse_time_to_seconds(raw_value: str) -> float:
+    """Converte string `SS`, `MM:SS` ou `HH:MM:SS` em segundos."""
+    txt = raw_value.strip()
+    if not txt:
+        return 0.0
+    if ":" not in txt:
+        return max(0.0, float(txt.replace(",", ".")))
+    parts = [float(p.replace(",", ".")) for p in txt.split(":")]
+    if len(parts) == 2:
+        return max(0.0, parts[0] * 60.0 + parts[1])
+    if len(parts) == 3:
+        return max(0.0, parts[0] * 3600.0 + parts[1] * 60.0 + parts[2])
+    raise ValueError("Formato de tempo inválido (use SS ou MM:SS).")
+
+
+class VoiceProfilesModal(ctk.CTkToplevel):
+    """Modal para gerenciar modelos ONNX locais e cadastrar voiceprints (Microfone ou WAV salvo)."""
+
+    CALIBRATION_PHRASES = [
+        "Olá, aqui é {name} cadastrando minha voz no OmniScribe AI para reuniões.",
+        "Hoje vamos alinhar os indicadores de BI, entregas do sprint e próximos passos.",
+        "Mesmo quando várias pessoas falam na sala, o sistema diferencia cada timbre vocal.",
+    ]
+
+    def __init__(self, parent: "ZoomTranscriberApp"):
+        super().__init__(parent)
+        self.parent = parent
+        self.vp = parent.gemini_service.voiceprint_service
+        self.captured_samples: List = []
+        self.is_busy = False
+        self.selected_wav_path: Optional[Path] = None
+
+        self.title("Perfis Biométricos de Voz (Voiceprints) - OmniScribe AI")
+        self.geometry("760x660")
+        self.minsize(680, 580)
+        self.configure(fg_color=THEME_BG)
+        self.grab_set()
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        # 1. Cabeçalho
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, padx=20, pady=(14, 6), sticky="ew")
+        ctk.CTkLabel(
+            head,
+            text="🗣️ Perfis Biométricos de Voz (Voiceprints Locais)",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            head,
+            text="Identifica você e colegas automaticamente por timbre vocal sem depender de apresentações na reunião.",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_MUTED,
+        ).pack(anchor="w")
+
+        # 2. Banner de Status dos Modelos ONNX
+        model_card = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
+        model_card.grid(row=1, column=0, padx=20, pady=6, sticky="ew")
+        model_card.grid_columnconfigure(0, weight=1)
+
+        self.lbl_model_status = ctk.CTkLabel(
+            model_card,
+            text="Verificando motor biométrico...",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#38bdf8",
+        )
+        self.lbl_model_status.grid(row=0, column=0, padx=14, pady=(10, 4), sticky="w")
+
+        self.btn_download_models = ctk.CTkButton(
+            model_card,
+            text="⬇ Baixar Modelos (~26 MB)",
+            width=195,
+            height=30,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#0891b2",
+            hover_color="#0e7490",
+            command=self._start_model_download,
+        )
+        self.btn_download_models.grid(row=0, column=1, padx=14, pady=(10, 4), sticky="e")
+
+        self.prog_model = ctk.CTkProgressBar(model_card, height=8)
+        self.prog_model.set(0.0)
+        self.prog_model.grid(row=1, column=0, columnspan=2, padx=14, pady=(2, 10), sticky="ew")
+
+        # 3. Abas de Cadastro (Microfone estilo Ok Google vs Trecho de WAV)
+        self.enroll_tabs = ctk.CTkTabview(
+            self,
+            fg_color=THEME_CARD,
+            segmented_button_fg_color="#070b12",
+            segmented_button_selected_color=COLOR_PRIMARY,
+            segmented_button_unselected_color="#1f2937",
+            height=245,
+        )
+        self.enroll_tabs.grid(row=2, column=0, padx=20, pady=6, sticky="ew")
+
+        tab_mic = self.enroll_tabs.add("🎙️ Cadastrar pelo Microfone")
+        tab_mic.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(tab_mic, text="Nome do Locutor:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=12, pady=(10, 6), sticky="w"
+        )
+        self.entry_mic_name = ctk.CTkEntry(tab_mic, fg_color=THEME_INPUT, border_color=THEME_BORDER)
+        default_name = "Willian" if not self.vp.has_profiles() else ""
+        if default_name:
+            self.entry_mic_name.insert(0, default_name)
+        else:
+            self.entry_mic_name.configure(placeholder_text="Ex: Carlos, Ana, Marcos...")
+        self.entry_mic_name.grid(row=0, column=1, columnspan=2, padx=12, pady=(10, 6), sticky="ew")
+
+        self.lbl_phrase_box = ctk.CTkLabel(
+            tab_mic,
+            text="",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#0f172a",
+            text_color="#e2e8f0",
+            corner_radius=8,
+            wraplength=640,
+            justify="center",
+            height=58,
+        )
+        self.lbl_phrase_box.grid(row=1, column=0, columnspan=3, padx=12, pady=6, sticky="ew")
+
+        mic_btn_row = ctk.CTkFrame(tab_mic, fg_color="transparent")
+        mic_btn_row.grid(row=2, column=0, columnspan=3, padx=12, pady=(6, 4), sticky="ew")
+
+        self.btn_rec_phrase = ctk.CTkButton(
+            mic_btn_row,
+            text="🎙️ Gravar Frase 1/3 (5s)",
+            fg_color=COLOR_PRIMARY,
+            hover_color="#2563eb",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._record_next_phrase,
+        )
+        self.btn_rec_phrase.pack(side="left", padx=(0, 8))
+
+        self.btn_clear_phrases = ctk.CTkButton(
+            mic_btn_row,
+            text="Limpar",
+            width=75,
+            fg_color="#4b5563",
+            hover_color="#374151",
+            command=self._clear_captured_phrases,
+        )
+        self.btn_clear_phrases.pack(side="left", padx=(0, 12))
+
+        self.lbl_mic_progress = ctk.CTkLabel(
+            mic_btn_row,
+            text="0/3 amostras capturadas",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_MUTED,
+        )
+        self.lbl_mic_progress.pack(side="left")
+
+        self.btn_save_mic_profile = ctk.CTkButton(
+            mic_btn_row,
+            text="💾 Salvar Voiceprint",
+            fg_color=COLOR_SUCCESS,
+            hover_color="#059669",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            state="disabled",
+            command=self._save_mic_profile,
+        )
+        self.btn_save_mic_profile.pack(side="right")
+
+        # Tab 2: Importar de trecho WAV salvo
+        tab_wav = self.enroll_tabs.add("📁 Cadastrar de Gravação (.wav)")
+        tab_wav.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(tab_wav, text="Arquivo WAV:", font=ctk.CTkFont(weight="bold")).grid(
+            row=0, column=0, padx=12, pady=(10, 6), sticky="w"
+        )
+        wav_pick_row = ctk.CTkFrame(tab_wav, fg_color="transparent")
+        wav_pick_row.grid(row=0, column=1, columnspan=3, padx=12, pady=(10, 6), sticky="ew")
+        wav_pick_row.grid_columnconfigure(0, weight=1)
+
+        self.lbl_wav_file = ctk.CTkLabel(
+            wav_pick_row,
+            text="Nenhum arquivo selecionado",
+            fg_color=THEME_INPUT,
+            corner_radius=6,
+            anchor="w",
+            padx=10,
+            height=28,
+        )
+        self.lbl_wav_file.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(
+            wav_pick_row,
+            text="📂 Selecionar .wav",
+            width=130,
+            fg_color="#374151",
+            hover_color="#4b5563",
+            command=self._pick_wav_file,
+        ).grid(row=0, column=1)
+
+        ctk.CTkLabel(tab_wav, text="Nome do Locutor:", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=0, padx=12, pady=6, sticky="w"
+        )
+        self.entry_wav_name = ctk.CTkEntry(
+            tab_wav,
+            placeholder_text="Ex: Carlos (Colega BI)",
+            fg_color=THEME_INPUT,
+            border_color=THEME_BORDER,
+        )
+        self.entry_wav_name.grid(row=1, column=1, padx=12, pady=6, sticky="ew")
+
+        ctk.CTkLabel(tab_wav, text="Canal:", font=ctk.CTkFont(weight="bold")).grid(
+            row=1, column=2, padx=(8, 4), pady=6, sticky="w"
+        )
+        self.opt_wav_channel = ctk.CTkOptionMenu(
+            tab_wav,
+            values=["Auto (Maior Energia)", "Canal L (Remoto)", "Canal R (Mic Local)"],
+            width=175,
+        )
+        self.opt_wav_channel.grid(row=1, column=3, padx=12, pady=6, sticky="e")
+
+        ctk.CTkLabel(tab_wav, text="Trecho (MM:SS):", font=ctk.CTkFont(weight="bold")).grid(
+            row=2, column=0, padx=12, pady=6, sticky="w"
+        )
+        time_row = ctk.CTkFrame(tab_wav, fg_color="transparent")
+        time_row.grid(row=2, column=1, columnspan=3, padx=12, pady=6, sticky="ew")
+        self.entry_wav_start = ctk.CTkEntry(time_row, width=90, fg_color=THEME_INPUT, border_color=THEME_BORDER)
+        self.entry_wav_start.insert(0, "00:00")
+        self.entry_wav_start.pack(side="left")
+        ctk.CTkLabel(time_row, text=" até ").pack(side="left", padx=4)
+        self.entry_wav_end = ctk.CTkEntry(time_row, width=90, fg_color=THEME_INPUT, border_color=THEME_BORDER)
+        self.entry_wav_end.insert(0, "00:20")
+        self.entry_wav_end.pack(side="left", padx=(0, 12))
+
+        self.btn_enroll_wav = ctk.CTkButton(
+            time_row,
+            text="✨ Extrair e Salvar Voiceprint",
+            fg_color=COLOR_SUCCESS,
+            hover_color="#059669",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._save_wav_profile,
+        )
+        self.btn_enroll_wav.pack(side="right")
+
+        # 4. Lista de perfis salvos
+        list_card = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
+        list_card.grid(row=3, column=0, padx=20, pady=6, sticky="nsew")
+        list_card.grid_columnconfigure(0, weight=1)
+        list_card.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            list_card,
+            text="Perfis Cadastrados (voice_profiles.json)",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color=THEME_TEXT_PRIMARY,
+        ).grid(row=0, column=0, padx=14, pady=(8, 4), sticky="w")
+
+        self.scroll_profiles = ctk.CTkScrollableFrame(list_card, fg_color="#0f172a", corner_radius=8)
+        self.scroll_profiles.grid(row=1, column=0, padx=12, pady=(0, 10), sticky="nsew")
+        self.scroll_profiles.grid_columnconfigure(0, weight=1)
+
+        # Rodapé
+        foot = ctk.CTkFrame(self, fg_color="transparent")
+        foot.grid(row=4, column=0, padx=20, pady=(4, 14), sticky="ew")
+        self.lbl_feedback = ctk.CTkLabel(foot, text="", font=ctk.CTkFont(size=12), text_color="#38bdf8")
+        self.lbl_feedback.pack(side="left")
+        ctk.CTkButton(foot, text="Fechar", width=100, fg_color="#4b5563", hover_color="#374151", command=self.destroy).pack(side="right")
+
+        self._refresh_model_status()
+        self._update_phrase_preview()
+        self._refresh_profiles_list()
+
+    def _refresh_model_status(self) -> None:
+        if not self.vp.is_runtime_available():
+            self.lbl_model_status.configure(
+                text="❌ Biblioteca 'sherpa-onnx' não instalada (execute: pip install sherpa-onnx)",
+                text_color="#ef4444",
+            )
+            self.btn_download_models.configure(state="disabled")
+            self.prog_model.set(0.0)
+        elif self.vp.are_models_ready():
+            self.lbl_model_status.configure(
+                text="✅ Modelos biométricos prontos offline (WeSpeaker ResNet34-LM + Silero VAD)",
+                text_color="#10b981",
+            )
+            self.btn_download_models.configure(text="✅ Modelos Prontos", state="disabled", fg_color="#059669")
+            self.prog_model.set(1.0)
+        else:
+            self.lbl_model_status.configure(
+                text="⚠️ Modelos ONNX locais ainda não baixados (~26 MB únicos para uso offline)",
+                text_color="#f59e0b",
+            )
+            self.btn_download_models.configure(text="⬇ Baixar Modelos (~26 MB)", state="normal")
+            self.prog_model.set(0.0)
+
+    def _update_phrase_preview(self) -> None:
+        step = min(len(self.captured_samples), len(self.CALIBRATION_PHRASES) - 1)
+        name_preview = self.entry_mic_name.get().strip() or "seu nome"
+        phrase = self.CALIBRATION_PHRASES[step].format(name=name_preview)
+        self.lbl_phrase_box.configure(text=f"Leia em voz natural ({step + 1}/3):\n\"{phrase}\"")
+
+        count = len(self.captured_samples)
+        self.lbl_mic_progress.configure(text=f"{count}/3 amostras capturadas")
+        if count >= 3:
+            self.btn_rec_phrase.configure(text="🎙️ Gravar Extra (+5s)")
+        else:
+            self.btn_rec_phrase.configure(text=f"🎙️ Gravar Frase {count + 1}/3 (5s)")
+        self.btn_save_mic_profile.configure(state="normal" if count >= 1 and not self.is_busy else "disabled")
+
+    def _refresh_profiles_list(self) -> None:
+        for w in self.scroll_profiles.winfo_children():
+            w.destroy()
+        profiles = self.vp.list_profiles()
+        if not profiles:
+            ctk.CTkLabel(
+                self.scroll_profiles,
+                text="Nenhum perfil de voz cadastrado ainda.",
+                font=ctk.CTkFont(size=12),
+                text_color="#9ca3af",
+            ).pack(pady=18)
+            return
+
+        for prof in profiles:
+            row = ctk.CTkFrame(self.scroll_profiles, fg_color="#182235", corner_radius=6)
+            row.pack(fill="x", padx=4, pady=3)
+            row.grid_columnconfigure(0, weight=1)
+            meta = (
+                f"👤 {prof['name']}   •   {prof['samples_count']} amostra(s)   •   "
+                f"{prof['total_speech_seconds']:.1f}s de fala útil"
+            )
+            ctk.CTkLabel(row, text=meta, font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(
+                row=0, column=0, padx=10, pady=8, sticky="w"
+            )
+            ctk.CTkButton(
+                row,
+                text="🗑️ Remover",
+                width=92,
+                height=26,
+                fg_color="#991b1b",
+                hover_color="#dc2626",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=lambda n=prof["name"]: self._delete_profile(n),
+            ).grid(row=0, column=1, padx=10, pady=6, sticky="e")
+
+    def _delete_profile(self, name: str) -> None:
+        if self.vp.delete_profile(name):
+            self.lbl_feedback.configure(text=f"Perfil '{name}' removido.", text_color="#f59e0b")
+            self._refresh_profiles_list()
+
+    def _start_model_download(self) -> None:
+        if self.is_busy:
+            return
+        self.is_busy = True
+        self.btn_download_models.configure(state="disabled")
+
+        def worker():
+            def on_prog(msg: str, frac: float):
+                self.after(0, lambda: (self.lbl_feedback.configure(text=msg, text_color="#38bdf8"), self.prog_model.set(frac)))
+
+            ok, msg = self.vp.ensure_models_downloaded(on_progress=on_prog)
+
+            def done():
+                self.is_busy = False
+                self.lbl_feedback.configure(text=msg, text_color="#10b981" if ok else "#ef4444")
+                self._refresh_model_status()
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True, name="VoiceprintDownload").start()
+
+    def _record_next_phrase(self) -> None:
+        if self.is_busy:
+            return
+        selected_mic_str = self.parent.opt_mic.get()
+        mic_index = self.parent.mic_map.get(selected_mic_str)
+        if mic_index is None:
+            self.lbl_feedback.configure(text="Selecione um Microfone na janela principal primeiro.", text_color="#ef4444")
+            return
+
+        self.is_busy = True
+        self.btn_rec_phrase.configure(state="disabled", text="🔴 Gravando (5s)...")
+        self.btn_save_mic_profile.configure(state="disabled")
+        self.lbl_feedback.configure(text="Fale naturalmente por 5 segundos...", text_color="#ef4444")
+        self._update_phrase_preview_label_only()
+
+        def worker():
+            try:
+                samples = record_mic_sample(mic_index=mic_index, duration_seconds=5.0)
+                if len(samples) > 0:
+                    self.captured_samples.append(samples)
+                    ok_msg = f"Amostra {len(self.captured_samples)} capturada com sucesso!"
+                    color = "#10b981"
+                else:
+                    ok_msg = "Nenhum áudio capturado pelo microfone."
+                    color = "#f59e0b"
+            except Exception as e:
+                ok_msg = f"Erro ao gravar microfone: {e}"
+                color = "#ef4444"
+
+            def done():
+                self.is_busy = False
+                self.btn_rec_phrase.configure(state="normal")
+                self.lbl_feedback.configure(text=ok_msg, text_color=color)
+                self._update_phrase_preview()
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True, name="VoiceprintMicRecord").start()
+
+    def _update_phrase_preview_label_only(self) -> None:
+        step = min(len(self.captured_samples), len(self.CALIBRATION_PHRASES) - 1)
+        name_preview = self.entry_mic_name.get().strip() or "seu nome"
+        phrase = self.CALIBRATION_PHRASES[step].format(name=name_preview)
+        self.lbl_phrase_box.configure(text=f"Gravando frase {step + 1}/3:\n\"{phrase}\"")
+
+    def _clear_captured_phrases(self) -> None:
+        self.captured_samples = []
+        self.lbl_feedback.configure(text="Amostras limpas.", text_color="#94a3b8")
+        self._update_phrase_preview()
+
+    def _save_mic_profile(self) -> None:
+        if self.is_busy or not self.captured_samples:
+            return
+        name = self.entry_mic_name.get().strip()
+        if not name:
+            self.lbl_feedback.configure(text="Informe o Nome do Locutor antes de salvar.", text_color="#ef4444")
+            return
+
+        self.is_busy = True
+        self.btn_save_mic_profile.configure(state="disabled")
+        self.lbl_feedback.configure(text=f"Processando biometria de '{name}'...", text_color="#38bdf8")
+
+        samples_copy = list(self.captured_samples)
+
+        def worker():
+            try:
+                res = self.vp.enroll_profile_from_arrays(name=name, samples_list=samples_copy, sample_rate=16000)
+                msg = f"✅ Voiceprint salvo para '{res['name']}' ({res['total_speech_seconds']:.1f}s úteis)!"
+                ok = True
+            except Exception as e:
+                msg = f"Erro ao cadastrar voiceprint: {e}"
+                ok = False
+
+            def done():
+                self.is_busy = False
+                if ok:
+                    self.captured_samples = []
+                self._refresh_model_status()
+                self._update_phrase_preview()
+                self._refresh_profiles_list()
+                self.lbl_feedback.configure(text=msg, text_color="#10b981" if ok else "#ef4444")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True, name="VoiceprintEnrollMic").start()
+
+    def _pick_wav_file(self) -> None:
+        atas_root = get_base_dir() / "atas_reunioes"
+        chosen = filedialog.askopenfilename(
+            parent=self,
+            title="Selecione uma gravação WAV da reunião",
+            initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
+            filetypes=[("Áudios WAV", "*.wav"), ("Todos os Arquivos", "*.*")],
+        )
+        if chosen:
+            self.selected_wav_path = Path(chosen)
+            self.lbl_wav_file.configure(text=self.selected_wav_path.name)
+
+    def _save_wav_profile(self) -> None:
+        if self.is_busy:
+            return
+        if not self.selected_wav_path or not self.selected_wav_path.exists():
+            self.lbl_feedback.configure(text="Selecione um arquivo .wav válido.", text_color="#ef4444")
+            return
+        name = self.entry_wav_name.get().strip()
+        if not name:
+            self.lbl_feedback.configure(text="Informe o Nome do Locutor.", text_color="#ef4444")
+            return
+        try:
+            s_sec = parse_time_to_seconds(self.entry_wav_start.get())
+            e_sec = parse_time_to_seconds(self.entry_wav_end.get())
+        except Exception:
+            self.lbl_feedback.configure(text="Formato de tempo inválido (use MM:SS ou segundos).", text_color="#ef4444")
+            return
+
+        ch_choice = self.opt_wav_channel.get()
+        ch_idx = 0 if "Canal L" in ch_choice else (1 if "Canal R" in ch_choice else -1)
+
+        self.is_busy = True
+        self.btn_enroll_wav.configure(state="disabled")
+        self.lbl_feedback.configure(text=f"Extraindo voiceprint de '{name}'...", text_color="#38bdf8")
+
+        wav_path = self.selected_wav_path
+
+        def worker():
+            try:
+                res = self.vp.enroll_profile_from_wav_segment(
+                    name=name,
+                    wav_path=wav_path,
+                    start_seconds=s_sec,
+                    end_seconds=e_sec,
+                    channel=ch_idx,
+                )
+                msg = f"✅ Voiceprint extraído para '{res['name']}' ({res['total_speech_seconds']:.1f}s úteis)!"
+                ok = True
+            except Exception as e:
+                msg = f"Erro ao extrair de WAV: {e}"
+                ok = False
+
+            def done():
+                self.is_busy = False
+                self.btn_enroll_wav.configure(state="normal")
+                self._refresh_model_status()
+                self._refresh_profiles_list()
+                self.lbl_feedback.configure(text=msg, text_color="#10b981" if ok else "#ef4444")
+
+            self.after(0, done)
+
+        threading.Thread(target=worker, daemon=True, name="VoiceprintEnrollWav").start()
 
 
 class ApiKeyModal(ctk.CTkToplevel):
@@ -791,13 +1309,24 @@ class ZoomTranscriberApp(ctk.CTk):
         header_actions = ctk.CTkFrame(header_frame, fg_color="transparent")
         header_actions.grid(row=0, column=1, padx=16, pady=10, sticky="e")
 
+        self.btn_voiceprints = ctk.CTkButton(
+            header_actions,
+            text="🗣️ Perfis de Voz",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#0891b2",
+            hover_color="#0e7490",
+            width=126,
+            command=self._open_voiceprints_modal,
+        )
+        self.btn_voiceprints.pack(side="left", padx=(0, 8))
+
         self.btn_header_history = ctk.CTkButton(
             header_actions,
             text="📜 Histórico",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=COLOR_PURPLE,
             hover_color="#7c3aed",
-            width=110,
+            width=104,
             command=self._open_history_modal,
         )
         self.btn_header_history.pack(side="left", padx=(0, 8))
@@ -808,7 +1337,7 @@ class ZoomTranscriberApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=COLOR_INDIGO,
             hover_color="#4f46e5",
-            width=140,
+            width=134,
             command=self._open_usage_modal,
         )
         self.btn_usage.pack(side="left", padx=(0, 8))
@@ -819,7 +1348,7 @@ class ZoomTranscriberApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=COLOR_PRIMARY,
             hover_color="#2563eb",
-            width=110,
+            width=98,
             command=self._open_api_key_dialog,
         )
         self.btn_config_key.pack(side="left")
@@ -1303,6 +1832,10 @@ class ZoomTranscriberApp(ctk.CTk):
     def _open_usage_modal(self) -> None:
         """Abre o modal de monitoramento de cotas e custos da API."""
         UsageModal(self)
+
+    def _open_voiceprints_modal(self) -> None:
+        """Abre o modal de gerenciamento e cadastro de voiceprints biométricos."""
+        VoiceProfilesModal(self)
 
     def _on_api_key_saved(self, new_key: str) -> None:
         """Callback acionado quando o usuário salva a chave API."""
