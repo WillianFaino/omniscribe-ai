@@ -13,6 +13,7 @@ import re
 import sys
 import threading
 import time
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -20,8 +21,15 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
+try:
+    import winsound
+except ImportError:
+    winsound = None
+
 from audio_engine import (
     AudioEngine,
+    analyze_audio_diagnostics,
+    extract_preview_clip,
     get_wav_info,
     listar_dispositivos_audio,
     record_mic_sample,
@@ -122,20 +130,52 @@ def infer_title_from_audio_name(wav_path: Path) -> str:
 
 
 class RetranscribeModal(ctk.CTkToplevel):
-    """Modal para configurar e iniciar a re-transcrição de um áudio WAV salvo."""
+    """Modal para diagnosticar o áudio, testar restauração e iniciar re-transcrição."""
+
+    ENHANCEMENT_PRESETS = {
+        "🤖 Automático (Recomendado pelo Diagnóstico)": "auto",
+        "🎙️ Clarificação Vocal + De-Mud (Sala/Reunião)": "clarify_room",
+        "🛡️ Isolamento Neural de Voz (GTCRN + Clarificação)": "neural_voice_isolation",
+        "🌬️ Redução de Ruído + Clarificação Vocal": "denoise_and_clarify",
+        "⚡ Leve (Passa-Alta 85 Hz + AGC)": "light",
+        "🚫 Desativado (Áudio Original Puro)": "none",
+    }
+    _PRESET_DESC = {
+        "clarify_room": "Clarificação Vocal + De-Mud (remove abafamento de sala)",
+        "neural_voice_isolation": "Isolamento Neural GTCRN + De-Mud + Clarificação",
+        "denoise_and_clarify": "Redução Espectral de Ruído + Clarificação Vocal",
+        "light": "Filtro Passa-Alta 85 Hz + AGC suave",
+        "none": "Sem alteração (áudio silencioso ou já tratado)",
+    }
 
     def __init__(self, parent: "ZoomTranscriberApp", wav_path: Path):
         super().__init__(parent)
         self.parent = parent
         self.wav_path = Path(wav_path).resolve()
         self.wav_info = get_wav_info(self.wav_path)
+        self._is_playing_preview = False
+        self._preview_wav_path = parent.temp_dir / "_preview_treated.wav"
+
+        try:
+            self.diagnostics = analyze_audio_diagnostics(self.wav_path)
+        except Exception as diag_err:
+            self.diagnostics = {
+                "snr_db": 0.0,
+                "mud_pct": 0.0,
+                "presence_pct": 0.0,
+                "speech_ratio_pct": 0.0,
+                "status_level": "warning",
+                "issues": [f"Diagnóstico indisponível: {diag_err}"],
+                "recommended_preset": "clarify_room",
+            }
 
         self.title("Re-transcrever Áudio Salvo - Escutaí")
-        self.geometry("580x475")
-        self.minsize(560, 460)
-        self.resizable(True, False)
+        self.geometry("660x625")
+        self.minsize(610, 575)
+        self.resizable(True, True)
         self.configure(fg_color=THEME_BG)
         self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         ch_label = "Mono (Presencial)" if self.wav_info["channels"] == 1 else "Estéreo (Online L/R)"
         dur_label = format_seconds(self.wav_info["duration_seconds"])
@@ -147,7 +187,7 @@ class RetranscribeModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=17, weight="bold"),
             text_color=THEME_TEXT_PRIMARY,
         )
-        lbl_head.pack(anchor="w", padx=24, pady=(18, 4))
+        lbl_head.pack(anchor="w", padx=24, pady=(16, 4))
 
         lbl_meta = ctk.CTkLabel(
             self,
@@ -155,39 +195,85 @@ class RetranscribeModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=12),
             text_color="#38bdf8",
         )
-        lbl_meta.pack(anchor="w", padx=24, pady=(0, 14))
+        lbl_meta.pack(anchor="w", padx=24, pady=(0, 10))
+
+        # Card de Diagnóstico Acústico Automático
+        diag_level = self.diagnostics.get("status_level", "ok")
+        diag_color = COLOR_SUCCESS if diag_level == "ok" else (COLOR_DANGER if diag_level == "critical" else COLOR_AMBER)
+        diag_title = (
+            "✅ Saúde Acústica Boa"
+            if diag_level == "ok"
+            else ("🚨 Atenção Crítica no Áudio" if diag_level == "critical" else "⚠️ Áudio Precisa de Restauração")
+        )
+        rec_preset = self.diagnostics.get("recommended_preset", "clarify_room")
+        rec_desc = self._PRESET_DESC.get(rec_preset, "Clarificação Vocal")
+
+        diag_card = ctk.CTkFrame(
+            self, fg_color=THEME_CARD, border_color=diag_color, border_width=1, corner_radius=10
+        )
+        diag_card.pack(fill="x", padx=24, pady=(0, 10))
+
+        ctk.CTkLabel(
+            diag_card,
+            text=f"{diag_title}  •  Recomendado: {rec_desc}",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=diag_color,
+        ).pack(anchor="w", padx=14, pady=(10, 2))
+
+        ctk.CTkLabel(
+            diag_card,
+            text=(
+                f"SNR: {self.diagnostics.get('snr_db', 0.0):.1f} dB  •  "
+                f"Abafamento (100–350 Hz): {self.diagnostics.get('mud_pct', 0.0):.1f}%  •  "
+                f"Clareza Vocal (1–4,5 kHz): {self.diagnostics.get('presence_pct', 0.0):.1f}%  •  "
+                f"Fala ativa: {self.diagnostics.get('speech_ratio_pct', 0.0):.0f}%"
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color=THEME_TEXT_PRIMARY,
+        ).pack(anchor="w", padx=14, pady=(0, 4))
+
+        issues = self.diagnostics.get("issues") or []
+        issues_txt = " • ".join(issues[:2]) if issues else "Nenhuma anomalia acústica grave detectada."
+        ctk.CTkLabel(
+            diag_card,
+            text=issues_txt,
+            font=ctk.CTkFont(size=11),
+            text_color=THEME_TEXT_MUTED,
+            wraplength=580,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 10))
 
         form = ctk.CTkFrame(self, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=10)
         form.pack(fill="x", padx=24, pady=4)
         form.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(form, text="Título da Nova Ata:", font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=0, padx=14, pady=(14, 8), sticky="w"
+            row=0, column=0, padx=14, pady=(12, 6), sticky="w"
         )
         self.entry_title = ctk.CTkEntry(form, fg_color=THEME_INPUT, border_color=THEME_BORDER)
         self.entry_title.insert(0, infer_title_from_audio_name(self.wav_path))
-        self.entry_title.grid(row=0, column=1, padx=14, pady=(14, 8), sticky="ew")
+        self.entry_title.grid(row=0, column=1, padx=14, pady=(12, 6), sticky="ew")
 
         ctk.CTkLabel(form, text="Glossário / Nomes:", font=ctk.CTkFont(weight="bold")).grid(
-            row=1, column=0, padx=14, pady=8, sticky="w"
+            row=1, column=0, padx=14, pady=6, sticky="w"
         )
         self.entry_context = ctk.CTkEntry(
             form,
-            placeholder_text="Ex: Participantes: Carlos, Juliana; Termos: BI, Deploy, WASAPI",
+            placeholder_text="Ex: Participantes: Raiana, Irio, Jonathan; Termos: Bizagi, BPMN",
             fg_color=THEME_INPUT,
             border_color=THEME_BORDER,
         )
-        self.entry_context.grid(row=1, column=1, padx=14, pady=8, sticky="ew")
+        self.entry_context.grid(row=1, column=1, padx=14, pady=6, sticky="ew")
 
         ctk.CTkLabel(form, text="Tamanho do Bloco:", font=ctk.CTkFont(weight="bold")).grid(
-            row=2, column=0, padx=14, pady=8, sticky="w"
+            row=2, column=0, padx=14, pady=6, sticky="w"
         )
         self.opt_block = _style_option_menu(ctk.CTkOptionMenu(form, values=["1 minuto", "3 minutos", "5 minutos"]))
         self.opt_block.set("1 minuto")
-        self.opt_block.grid(row=2, column=1, padx=14, pady=8, sticky="w")
+        self.opt_block.grid(row=2, column=1, padx=14, pady=6, sticky="w")
 
         ctk.CTkLabel(form, text="Motor de IA:", font=ctk.CTkFont(weight="bold")).grid(
-            row=3, column=0, padx=14, pady=8, sticky="w"
+            row=3, column=0, padx=14, pady=6, sticky="w"
         )
         self.opt_engine = _style_option_menu(
             ctk.CTkOptionMenu(
@@ -197,16 +283,16 @@ class RetranscribeModal(ctk.CTkToplevel):
         )
         default_eng = "💻 Offline (Whisper ONNX)" if getattr(parent, "engine_mode", "online") == "offline" else "☁️ Online (Gemini 2.5)"
         self.opt_engine.set(default_eng)
-        self.opt_engine.grid(row=3, column=1, padx=14, pady=8, sticky="w")
+        self.opt_engine.grid(row=3, column=1, padx=14, pady=6, sticky="w")
 
-        self.chk_enhance = ctk.CTkCheckBox(
-            form,
-            text="Aplicar filtro passa-alta (~80 Hz) e normalização dinâmica (recomendado para WAV externo)",
-            font=ctk.CTkFont(size=12),
+        ctk.CTkLabel(form, text="Tratamento Vocal:", font=ctk.CTkFont(weight="bold")).grid(
+            row=4, column=0, padx=14, pady=(6, 12), sticky="w"
         )
-        if sr_hz != 16000:
-            self.chk_enhance.select()
-        self.chk_enhance.grid(row=4, column=0, columnspan=2, padx=14, pady=(6, 14), sticky="w")
+        self.opt_enhancement = _style_option_menu(
+            ctk.CTkOptionMenu(form, values=list(self.ENHANCEMENT_PRESETS.keys()), width=360)
+        )
+        self.opt_enhancement.set("🤖 Automático (Recomendado pelo Diagnóstico)")
+        self.opt_enhancement.grid(row=4, column=1, padx=14, pady=(6, 12), sticky="ew")
 
         lbl_note = ctk.CTkLabel(
             self,
@@ -214,7 +300,7 @@ class RetranscribeModal(ctk.CTkToplevel):
             font=ctk.CTkFont(size=11),
             text_color=THEME_TEXT_DIM,
         )
-        lbl_note.pack(anchor="w", padx=24, pady=(8, 10))
+        lbl_note.pack(anchor="w", padx=24, pady=(8, 8))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=24, pady=(4, 16))
@@ -224,9 +310,19 @@ class RetranscribeModal(ctk.CTkToplevel):
             text="Cancelar",
             fg_color="#4b5563",
             hover_color="#374151",
-            width=110,
-            command=self.destroy,
+            width=96,
+            command=self._on_close,
         ).pack(side="left")
+
+        self.btn_preview_audio = ctk.CTkButton(
+            btn_row,
+            text="🔊 Ouvir Prévia Tratada (6s)",
+            fg_color="#0891b2",
+            hover_color="#0e7490",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._toggle_preview_audio,
+        )
+        self.btn_preview_audio.pack(side="left", padx=(8, 0))
 
         ctk.CTkButton(
             btn_row,
@@ -237,20 +333,89 @@ class RetranscribeModal(ctk.CTkToplevel):
             command=self._confirm,
         ).pack(side="right")
 
+    def _stop_preview_playback(self) -> None:
+        self._is_playing_preview = False
+        if winsound is not None:
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+        if self.winfo_exists():
+            self.btn_preview_audio.configure(state="normal", text="🔊 Ouvir Prévia Tratada (6s)")
+
+    def _on_close(self) -> None:
+        self._stop_preview_playback()
+        self.destroy()
+
+    def _selected_enhancement_mode(self) -> str:
+        sel = self.opt_enhancement.get()
+        mode = self.ENHANCEMENT_PRESETS.get(sel, "auto")
+        if mode == "auto":
+            return str(self.diagnostics.get("recommended_preset", "clarify_room"))
+        return mode
+
+    def _toggle_preview_audio(self) -> None:
+        if self._is_playing_preview:
+            self._stop_preview_playback()
+            return
+
+        eff_mode = self._selected_enhancement_mode()
+        self.btn_preview_audio.configure(state="disabled", text="⏳ Processando 6s...")
+
+        def _worker():
+            try:
+                asr = self.parent.gemini_service.offline_asr_service
+                clip_pcm, sr = extract_preview_clip(
+                    self.wav_path,
+                    duration_seconds=6.0,
+                    enhancement_mode=eff_mode,
+                    preprocess_channel_fn=asr.denoise_and_isolate_voice,
+                )
+                if len(clip_pcm) == 0:
+                    self.after(0, lambda: self.btn_preview_audio.configure(state="normal", text="🔊 Sem áudio válido"))
+                    return
+                nch = 2 if clip_pcm.ndim > 1 else 1
+                self._preview_wav_path.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(self._preview_wav_path), "wb") as pwf:
+                    pwf.setnchannels(nch)
+                    pwf.setsampwidth(2)
+                    pwf.setframerate(sr)
+                    pwf.writeframes(clip_pcm.tobytes())
+
+                def _play():
+                    if not self.winfo_exists():
+                        return
+                    if winsound is not None:
+                        self._is_playing_preview = True
+                        self.btn_preview_audio.configure(state="normal", text="⏹ Parar Prévia")
+                        winsound.PlaySound(str(self._preview_wav_path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+                    else:
+                        open_file_in_os(self._preview_wav_path)
+                        self.btn_preview_audio.configure(state="normal", text="🔊 Ouvir Prévia Tratada (6s)")
+
+                self.after(0, _play)
+            except Exception as err:
+                logger.warning(f"Erro ao gerar prévia tratada: {err}")
+                self.after(0, lambda: self.btn_preview_audio.configure(state="normal", text="🔊 Erro na prévia"))
+
+        threading.Thread(target=_worker, daemon=True, name="AudioPreviewWorker").start()
+
     def _confirm(self) -> None:
+        self._stop_preview_playback()
         title = self.entry_title.get().strip() or infer_title_from_audio_name(self.wav_path)
         context_notes = self.entry_context.get().strip()
         block_str = self.opt_block.get()
         block_seconds = 60 if "1" in block_str else (300 if "5" in block_str else 180)
         eng_mode = "offline" if "Offline" in self.opt_engine.get() else "online"
-        apply_enh = bool(self.chk_enhance.get())
+        enh_mode = self._selected_enhancement_mode()
         self.destroy()
         self.parent.start_retranscription(
             wav_path=self.wav_path,
             title=title,
             context_notes=context_notes,
             block_seconds=block_seconds,
-            apply_enhancement=apply_enh,
+            apply_enhancement=(enh_mode != "none"),
+            enhancement_mode=enh_mode,
             engine_mode=eng_mode,
         )
 
@@ -1487,8 +1652,10 @@ class ZoomTranscriberApp(ctk.CTk):
         ui_cfg = self._load_ui_settings()
         self.theme_mode = "Light" if str(ui_cfg.get("theme", "")).lower() == "light" else "Dark"
         self.engine_mode = "offline" if str(ui_cfg.get("engine_mode", "")).lower() == "offline" else "online"
-        self.offline_whisper_variant = "base" if ui_cfg.get("whisper_variant") == "base" else "small"
+        raw_var = str(ui_cfg.get("whisper_variant", "small") or "small").lower()
+        self.offline_whisper_variant = raw_var if raw_var in ("small", "turbo", "base") else "small"
         self.offline_ollama_model = str(ui_cfg.get("ollama_model", "") or "")
+        self.offline_isolate_voice = bool(ui_cfg.get("offline_isolate_voice", False))
         self.auto_export_sqlite = bool(ui_cfg.get("auto_export_sqlite", True))
         ctk.set_appearance_mode(self.theme_mode)
 
@@ -1525,6 +1692,10 @@ class ZoomTranscriberApp(ctk.CTk):
         self.gemini_service.engine_mode = self.engine_mode
         self.gemini_service.offline_whisper_variant = self.offline_whisper_variant
         self.gemini_service.offline_ollama_model = self.offline_ollama_model
+        self.gemini_service.offline_isolate_voice = self.offline_isolate_voice
+        self.gemini_service.offline_enhancement_mode = (
+            "neural_voice_isolation" if self.offline_isolate_voice else "clarify_room"
+        )
         self.gemini_service.auto_export_sqlite = self.auto_export_sqlite
 
         self.audio_engine = AudioEngine(
@@ -1573,6 +1744,7 @@ class ZoomTranscriberApp(ctk.CTk):
                         "engine_mode": self.engine_mode,
                         "whisper_variant": self.offline_whisper_variant,
                         "ollama_model": self.offline_ollama_model,
+                        "offline_isolate_voice": self.offline_isolate_voice,
                         "auto_export_sqlite": self.auto_export_sqlite,
                     },
                     indent=2,
@@ -2340,8 +2512,8 @@ class ZoomTranscriberApp(ctk.CTk):
         self.opt_whisper_variant = _style_option_menu(
             ctk.CTkOptionMenu(
                 off_btns,
-                values=["small", "base"],
-                width=96,
+                values=["small", "turbo", "base"],
+                width=108,
                 command=self._on_whisper_variant_change,
             )
         )
@@ -2365,6 +2537,16 @@ class ZoomTranscriberApp(ctk.CTk):
             off_bottom, height=6, progress_color="#7c3aed", fg_color=THEME_INPUT, corner_radius=4
         )
         self.bar_offline_progress.set(0.0)
+        self.chk_offline_isolate = ctk.CTkCheckBox(
+            off_bottom,
+            text="Ativar Isolamento Neural de Voz (GTCRN) + Clarificação nas gravações Offline",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_PRIMARY,
+            command=self._on_toggle_offline_isolate,
+        )
+        if self.offline_isolate_voice:
+            self.chk_offline_isolate.select()
+        self.chk_offline_isolate.pack(anchor="w", pady=(0, 6))
         self.chk_auto_sqlite = ctk.CTkCheckBox(
             off_bottom,
             text="Gerar pacote portátil SQLite (.escutai com áudio compactado) automaticamente ao encerrar",
@@ -2519,10 +2701,18 @@ class ZoomTranscriberApp(ctk.CTk):
         self._log_gui(f"[MOTOR] Alterado para modo {'100% Offline (Whisper ONNX)' if self.engine_mode == 'offline' else 'Online (Gemini 2.5)'}.")
 
     def _on_whisper_variant_change(self, val: str) -> None:
-        self.offline_whisper_variant = "base" if val == "base" else "small"
+        self.offline_whisper_variant = val if val in ("small", "turbo", "base") else "small"
         self.gemini_service.offline_whisper_variant = self.offline_whisper_variant
         self._save_ui_settings()
         self._refresh_offline_status()
+
+    def _on_toggle_offline_isolate(self) -> None:
+        self.offline_isolate_voice = bool(self.chk_offline_isolate.get())
+        self.gemini_service.offline_isolate_voice = self.offline_isolate_voice
+        self.gemini_service.offline_enhancement_mode = (
+            "neural_voice_isolation" if self.offline_isolate_voice else "clarify_room"
+        )
+        self._save_ui_settings()
 
     def _on_toggle_auto_sqlite(self) -> None:
         self.auto_export_sqlite = bool(self.chk_auto_sqlite.get())
@@ -2938,6 +3128,10 @@ class ZoomTranscriberApp(ctk.CTk):
 
         meeting_title = self.entry_meeting_title.get().strip() or "Reunião de Alinhamento"
         context_notes = self.entry_context_notes.get().strip()
+        self.gemini_service.offline_isolate_voice = self.offline_isolate_voice
+        self.gemini_service.offline_enhancement_mode = (
+            "neural_voice_isolation" if self.offline_isolate_voice else "clarify_room"
+        )
         self.gemini_service.start_session(meeting_title, context_notes=context_notes, engine_mode=active_engine)
         session_audio_path = self.gemini_service.get_session_audio_path()
 
@@ -3013,6 +3207,7 @@ class ZoomTranscriberApp(ctk.CTk):
         context_notes: str = "",
         block_seconds: int = 60,
         apply_enhancement: Optional[bool] = None,
+        enhancement_mode: Optional[str] = None,
         engine_mode: Optional[str] = None,
     ) -> None:
         if self.is_recording or self.is_retranscribing:
@@ -3048,7 +3243,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         threading.Thread(
             target=self._async_retranscribe_worker,
-            args=(wav_path, title, context_notes, block_seconds, apply_enhancement, target_engine),
+            args=(wav_path, title, context_notes, block_seconds, apply_enhancement, enhancement_mode, target_engine),
             daemon=True,
             name="AsyncRetranscribeWorker",
         ).start()
@@ -3060,10 +3255,26 @@ class ZoomTranscriberApp(ctk.CTk):
         context_notes: str,
         block_seconds: int,
         apply_enhancement: Optional[bool],
+        enhancement_mode: Optional[str] = None,
         engine_mode: str = "online",
     ) -> None:
         try:
+            eff_mode = enhancement_mode or ("clarify_room" if apply_enhancement else "none")
             self._log_gui(f"[RE-TRANSCRIÇÃO] Iniciando reprocessamento ({engine_mode}): {wav_path.name}")
+            if eff_mode != "none":
+                self._log_gui(f"[RESTAURAÇÃO] Aplicando preset vocal: {eff_mode}")
+
+            # Em modo offline (dual-branch), preservamos o WAV natural para Voiceprint e
+            # aplicamos a restauração/isolamento exclusivamente no ramo ASR do Whisper.
+            if engine_mode == "offline":
+                self.gemini_service.offline_enhancement_mode = eff_mode
+                self.gemini_service.offline_isolate_voice = (eff_mode == "neural_voice_isolation")
+                slice_apply = False
+                slice_mode = "none"
+            else:
+                slice_apply = apply_enhancement
+                slice_mode = enhancement_mode
+
             transc_path, minute_path = self.gemini_service.start_session(
                 title=title,
                 context_notes=context_notes,
@@ -3076,7 +3287,9 @@ class ZoomTranscriberApp(ctk.CTk):
                 source_wav_path=wav_path,
                 temp_dir=self.temp_dir,
                 block_duration_seconds=block_seconds,
-                apply_enhancement=apply_enhancement,
+                apply_enhancement=slice_apply,
+                enhancement_mode=slice_mode,
+                preprocess_channel_fn=self.gemini_service.offline_asr_service.denoise_and_isolate_voice,
             )
 
             if not blocks:
@@ -3103,6 +3316,10 @@ class ZoomTranscriberApp(ctk.CTk):
             logger.exception(f"Erro na re-transcrição de {wav_path}: {e}")
             self._log_gui(f"[ERRO] Falha ao re-transcrever {wav_path.name}: {e}")
         finally:
+            self.gemini_service.offline_isolate_voice = self.offline_isolate_voice
+            self.gemini_service.offline_enhancement_mode = (
+                "neural_voice_isolation" if self.offline_isolate_voice else "clarify_room"
+            )
             self.is_retranscribing = False
             self.after(0, lambda: self._set_session_controls_state(idle=True))
 

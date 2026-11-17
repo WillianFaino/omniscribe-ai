@@ -312,6 +312,8 @@ Transcrição completa da reunião:
         self.engine_mode = "online"
         self.offline_whisper_variant = "small"
         self.offline_ollama_model = ""
+        self.offline_isolate_voice = False
+        self.offline_enhancement_mode = "clarify_room"
         self.auto_export_sqlite = True
         self._offline_unknown_clusters = []
 
@@ -801,11 +803,18 @@ Transcrição completa da reunião:
                     return
 
             self._set_status(f"Transcrevendo Bloco #{task.block_index} (Offline Whisper)...")
+            enrolled_names = [p["name"] for p in self.voiceprint_service.list_profiles()] if self.voiceprint_service else []
+            eff_mode = getattr(self, "offline_enhancement_mode", "clarify_room") or "clarify_room"
             raw_text = self.offline_asr_service.transcribe_wav_block(
                 task.wav_path,
                 block_offset_seconds=task.start_seconds,
                 variant=self.offline_whisper_variant,
                 session_unknown_clusters=self._offline_unknown_clusters,
+                context_notes=f"{self.meeting_title} {self.context_notes}".strip(),
+                enrolled_names=enrolled_names,
+                isolate_voice=bool(self.offline_isolate_voice or eff_mode == "neural_voice_isolation"),
+                clarify_audio=(eff_mode != "none"),
+                enhancement_mode=eff_mode,
             )
             transcription_text, _, _ = self._detect_and_sanitize_repetition(raw_text)
             if not transcription_text:

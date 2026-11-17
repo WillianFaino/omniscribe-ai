@@ -14,7 +14,7 @@ import threading
 import time
 import wave
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -257,17 +257,283 @@ def _apply_highpass_fft(samples: np.ndarray, sample_rate: int, cutoff_hz: float 
     return filtered_full[num_taps - 1 : num_taps - 1 + len(samples)]
 
 
-def enhance_speech_audio(samples_int16: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Pré-processa áudio de fala para máxima clareza em reuniões presenciais e online.
+def _compute_frame_spectral_stats(mono_f: np.ndarray, sample_rate: int) -> Dict[str, float]:
+    """Calcula métricas acústicas de SNR, nível vocal e distribuição espectral por faixa."""
+    if len(mono_f) == 0 or sample_rate <= 0:
+        return {
+            "rms": 0.0, "peak": 0.0, "clipping_pct": 0.0,
+            "noise_floor": 0.0, "speech_level": 0.0, "snr_db": -60.0, "speech_ratio_pct": 0.0,
+            "hum_low_pct": 0.0, "mud_pct": 0.0, "presence_pct": 0.0, "hiss_pct": 0.0,
+        }
 
-    Etapas aplicadas:
-    1. Remoção de offset DC e filtragem passa-alta suave (~80 Hz) para eliminar ruído grave.
-    2. Normalização dinâmica por janelas (AGC suave de RMS/pico) com guarda de piso de ruído.
-    3. Limiter soft-knee anti-clipping em -1 dBFS.
+    x = mono_f.astype(np.float64)
+    rms = float(np.sqrt(np.mean(x * x)))
+    peak = float(np.max(np.abs(x)))
+    clipping_pct = 100.0 * float(np.mean(np.abs(x) >= 0.985))
+
+    frame_len = max(64, int(round(0.025 * sample_rate)))
+    n_frames = len(x) // frame_len
+    if n_frames < 1:
+        frames = x[np.newaxis, :]
+        frame_len = len(x)
+    else:
+        frames = x[: n_frames * frame_len].reshape(n_frames, frame_len)
+
+    f_rms = np.sqrt(np.mean(frames * frames, axis=1)) + 1e-9
+    noise_floor = float(np.percentile(f_rms, 15))
+    speech_level = float(np.percentile(f_rms, 85))
+    snr_db = 20.0 * math.log10(max(speech_level, 1e-7) / max(noise_floor, 1e-7)) if peak > 1e-5 else -60.0
+    speech_thresh = max(0.012, 2.0 * noise_floor)
+    speech_ratio_pct = 100.0 * float(np.mean(f_rms >= speech_thresh))
+
+    active_mask = f_rms >= speech_thresh
+    sel_frames = frames[active_mask] if np.any(active_mask) else frames
+    # Limita a até 1600 frames (~40s de fala) para análise instantânea
+    if len(sel_frames) > 1600:
+        step = max(1, len(sel_frames) // 1600)
+        sel_frames = sel_frames[::step]
+
+    win = np.hanning(frame_len)
+    spec = np.abs(np.fft.rfft(sel_frames * win, axis=1)) ** 2
+    freqs = np.fft.rfftfreq(frame_len, d=1.0 / float(sample_rate))
+    tot_e = float(np.sum(spec))
+    if tot_e <= 1e-12:
+        hum_low_pct = mud_pct = presence_pct = hiss_pct = 0.0
+    else:
+        hum_low_pct = 100.0 * float(np.sum(spec[:, freqs < 100.0])) / tot_e
+        mud_pct = 100.0 * float(np.sum(spec[:, (freqs >= 100.0) & (freqs < 350.0)])) / tot_e
+        presence_pct = 100.0 * float(np.sum(spec[:, (freqs >= 1000.0) & (freqs <= 4500.0)])) / tot_e
+        hiss_pct = 100.0 * float(np.sum(spec[:, freqs > 6000.0])) / tot_e
+
+    return {
+        "rms": rms,
+        "peak": peak,
+        "clipping_pct": clipping_pct,
+        "noise_floor": noise_floor,
+        "speech_level": speech_level,
+        "snr_db": snr_db,
+        "speech_ratio_pct": speech_ratio_pct,
+        "hum_low_pct": hum_low_pct,
+        "mud_pct": mud_pct,
+        "presence_pct": presence_pct,
+        "hiss_pct": hiss_pct,
+    }
+
+
+def analyze_audio_diagnostics(
+    source: Union[Path, str, np.ndarray],
+    sample_rate: int = TARGET_SAMPLE_RATE,
+    max_analyze_seconds: float = 120.0,
+) -> Dict[str, Any]:
+    """Analisa a saúde acústica de um WAV ou vetor de amostras e recomenda o tratamento ideal."""
+    dur_seconds = 0.0
+    nchannels = 1
+    sr = sample_rate
+    channel_silent_note = ""
+
+    if isinstance(source, (Path, str)):
+        wav_path = Path(source)
+        with wave.open(str(wav_path), "rb") as wf:
+            nchannels = int(wf.getnchannels())
+            sampwidth = int(wf.getsampwidth())
+            sr = int(wf.getframerate())
+            total_frames = int(wf.getnframes())
+            dur_seconds = (total_frames / float(sr)) if sr > 0 else 0.0
+            if sampwidth != 2 or total_frames == 0 or sr <= 0:
+                mono_f = np.zeros(0, dtype=np.float32)
+            else:
+                max_frames = int(round(max_analyze_seconds * sr))
+                if total_frames <= max_frames:
+                    raw = wf.readframes(total_frames)
+                else:
+                    # Amostra início (60s) e trecho intermediário (60s) em arquivos longos
+                    half_f = max_frames // 2
+                    raw1 = wf.readframes(half_f)
+                    wf.setpos(min(total_frames - half_f, total_frames // 2))
+                    raw2 = wf.readframes(half_f)
+                    raw = raw1 + raw2
+                arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                if nchannels > 1:
+                    mat = arr.reshape(-1, nchannels)
+                    ch_rms = [float(np.sqrt(np.mean(mat[:, c] ** 2))) for c in range(min(2, nchannels))]
+                    best_c = int(np.argmax(ch_rms))
+                    mono_f = mat[:, best_c]
+                    if min(ch_rms) < 1e-4 and max(ch_rms) >= 1e-4:
+                        silent_lbl = "Esquerdo (Remoto)" if ch_rms[0] < 1e-4 else "Direito (Mic)"
+                        channel_silent_note = f"Canal {silent_lbl} sem áudio captado."
+                else:
+                    mono_f = arr
+    else:
+        arr = np.asarray(source)
+        if arr.ndim > 1:
+            nchannels = arr.shape[1]
+            arr = arr[:, 0]
+        mono_f = (arr.astype(np.float32) / 32768.0) if np.issubdtype(arr.dtype, np.integer) else arr.astype(np.float32)
+        dur_seconds = len(mono_f) / float(max(1, sr))
+
+    stats = _compute_frame_spectral_stats(mono_f, sr)
+    issues: List[str] = []
+    if channel_silent_note:
+        issues.append(channel_silent_note)
+
+    if stats["rms"] < 1e-4 or stats["peak"] < 1e-3:
+        issues.append("Áudio praticamente silencioso (nenhum sinal útil de voz detectado).")
+        status_level = "critical"
+        recommended_preset = "none"
+    else:
+        if stats["clipping_pct"] >= 0.5:
+            issues.append(f"Saturação/clipping detectado em {stats['clipping_pct']:.1f}% das amostras.")
+        if stats["snr_db"] < 16.0 or stats["noise_floor"] >= 0.012:
+            issues.append(f"Ruído de fundo elevado (SNR estimado em {stats['snr_db']:.1f} dB).")
+        if stats["hum_low_pct"] >= 8.0:
+            issues.append(f"Zumbido grave excessivo abaixo de 100 Hz ({stats['hum_low_pct']:.1f}%).")
+        if stats["mud_pct"] >= 30.0 and stats["presence_pct"] < 12.0:
+            issues.append(
+                f"Áudio abafado/distante: {stats['mud_pct']:.1f}% em médio-graves (100–350 Hz) "
+                f"e apenas {stats['presence_pct']:.1f}% em clareza vocal (1–4,5 kHz)."
+            )
+        elif stats["presence_pct"] < 8.0:
+            issues.append(f"Baixa definição nas consoantes vocais ({stats['presence_pct']:.1f}% em 1–4,5 kHz).")
+        if stats["hiss_pct"] >= 10.0:
+            issues.append(f"Chiado agudo acima de 6 kHz ({stats['hiss_pct']:.1f}%).")
+        if stats["speech_level"] < 0.045:
+            issues.append("Volume de fala muito baixo (participantes distantes do microfone).")
+
+        noisy = stats["snr_db"] < 18.0 or stats["noise_floor"] >= 0.008 or stats["hiss_pct"] >= 10.0
+        muffled = stats["mud_pct"] >= 28.0 or stats["presence_pct"] < 12.0 or stats["hum_low_pct"] >= 6.0 or stats["speech_level"] < 0.05
+
+        if noisy and muffled:
+            recommended_preset = "neural_voice_isolation"
+        elif noisy:
+            recommended_preset = "denoise_and_clarify"
+        elif muffled:
+            recommended_preset = "clarify_room"
+        else:
+            recommended_preset = "light"
+
+        if stats["snr_db"] < 12.0 or stats["clipping_pct"] >= 2.0:
+            status_level = "critical"
+        elif issues:
+            status_level = "warning"
+        else:
+            status_level = "ok"
+
+    summary_parts = [
+        f"SNR {stats['snr_db']:.0f} dB",
+        f"Médio-graves {stats['mud_pct']:.0f}%",
+        f"Clareza Vocal {stats['presence_pct']:.1f}%",
+    ]
+    if issues:
+        summary_text = " • ".join(summary_parts) + " — " + issues[0]
+    else:
+        summary_text = " • ".join(summary_parts) + " — Qualidade acústica saudável."
+
+    return {
+        **stats,
+        "duration_seconds": dur_seconds,
+        "channels": nchannels,
+        "sample_rate": sr,
+        "status_level": status_level,
+        "issues": issues,
+        "recommended_preset": recommended_preset,
+        "summary_text": summary_text,
+    }
+
+
+def _apply_spectral_noise_gate(samples: np.ndarray, sample_rate: int, strength: float = 0.55) -> np.ndarray:
+    """Atenua ruído estacionário de fundo (ar-condicionado, chiado, ventilador) via STFT Wiener suave."""
+    if len(samples) < 1024 or strength <= 0.01:
+        return samples
+
+    n_fft = 512
+    hop = 256
+    win = np.hanning(n_fft).astype(np.float64)
+    n_samples = len(samples)
+    pad_tail = (hop - ((n_samples - n_fft) % hop)) % hop if n_samples >= n_fft else (n_fft - n_samples)
+    x_pad = np.pad(samples.astype(np.float64), (0, pad_tail), mode="constant")
+    n_frames = 1 + (len(x_pad) - n_fft) // hop
+
+    frames = np.lib.stride_tricks.sliding_window_view(x_pad, n_fft)[::hop][:n_frames]
+    spec = np.fft.rfft(frames * win, axis=1)
+    mag2 = (spec.real ** 2) + (spec.imag ** 2)
+    frame_energy = np.sum(mag2, axis=1)
+    quiet_thresh = float(np.percentile(frame_energy, 18))
+    quiet_mask = frame_energy <= quiet_thresh
+    noise_psd = np.mean(mag2[quiet_mask], axis=0, keepdims=True) if np.any(quiet_mask) else np.min(mag2, axis=0, keepdims=True)
+
+    ratio = np.sqrt(noise_psd / np.maximum(mag2, 1e-14))
+    gains = np.clip(1.0 - float(strength) * ratio, 0.14, 1.0)
+    # Suavização temporal evita artefatos metálicos ("musical noise") entre sílabas
+    for idx in range(1, len(gains)):
+        gains[idx] = 0.65 * gains[idx] + 0.35 * gains[idx - 1]
+
+    cleaned_frames = np.fft.irfft(spec * gains, n=n_fft, axis=1) * win
+    out = np.zeros(len(x_pad), dtype=np.float64)
+    norm = np.zeros(len(x_pad), dtype=np.float64)
+    win2 = win * win
+    for idx in range(n_frames):
+        s = idx * hop
+        out[s : s + n_fft] += cleaned_frames[idx]
+        norm[s : s + n_fft] += win2
+    out /= np.maximum(norm, 1e-8)
+    return out[:n_samples]
+
+
+def _apply_adaptive_vocal_eq(
+    samples: np.ndarray,
+    sample_rate: int,
+    mud_pct: float,
+    presence_pct: float,
+) -> np.ndarray:
+    """Remove zumbido grave (60/120 Hz), reduz abafamento de sala e realça clareza vocal (1–4,5 kHz)."""
+    n = len(samples)
+    if n < 64 or sample_rate <= 8000:
+        return samples
+
+    nfft = 1 << (n - 1).bit_length()
+    spec = np.fft.rfft(samples.astype(np.float64), n=nfft)
+    freqs = np.fft.rfftfreq(nfft, d=1.0 / float(sample_rate))
+
+    # 1. Passa-alta 85 Hz + notch suave em 60/120 Hz (zumbido de rede elétrica)
+    hp = 1.0 / (1.0 + (85.0 / np.maximum(freqs, 1.0)) ** 6)
+    hp[0] = 0.0
+    notch_60 = 1.0 - 0.60 * np.exp(-0.5 * ((freqs - 60.0) / 3.5) ** 2)
+    notch_120 = 1.0 - 0.45 * np.exp(-0.5 * ((freqs - 120.0) / 4.5) ** 2)
+
+    # 2. Intensidade adaptativa conforme quão abafado está o áudio (limpa sala sem distorcer VoIP limpo)
+    mud_severity = min(1.0, max(0.0, (mud_pct - 22.0) / 22.0))
+    clarity_deficit = min(1.0, max(0.0, (16.0 - presence_pct) / 11.0))
+    blend = max(mud_severity, clarity_deficit)
+
+    mud_cut = 1.0 - (0.62 * blend) * np.exp(-0.5 * ((freqs - 210.0) / 125.0) ** 2)
+    pres_boost = 1.0 + (2.15 * blend) * np.exp(-0.5 * ((freqs - 2650.0) / 900.0) ** 2)
+    lp = 1.0 / (1.0 + (freqs / 6800.0) ** 6)
+
+    eq_curve = hp * notch_60 * notch_120 * mud_cut * pres_boost * lp
+    return np.fft.irfft(spec * eq_curve, n=nfft)[:n]
+
+
+def enhance_speech_audio(
+    samples_int16: np.ndarray,
+    sample_rate: int,
+    mode: Union[str, bool] = "clarify_room",
+    denoise_strength: float = 0.55,
+) -> np.ndarray:
+    """Pré-processa áudio de fala com restauração adaptativa em estágios.
+
+    Modos aceitos:
+      - `"none"` / `False`: mantém o áudio original intacto.
+      - `"light"`: passa-alta (~80 Hz) + AGC suave + limiter (-1 dBFS).
+      - `"clarify_room"` / `True` (padrão): limpa zumbido, reduz abafamento adaptativamente e realça consoantes + AGC.
+      - `"denoise_and_clarify"` / `"neural_voice_isolation"`: inclui redução espectral STFT de ruído + EQ vocal + AGC.
     """
     arr = np.asarray(samples_int16, dtype=np.int16)
     if len(arr) == 0 or sample_rate <= 0:
         return arr.copy()
+
+    if mode is False or mode == "none":
+        return arr.copy()
+    eff_mode = "clarify_room" if mode is True else str(mode or "clarify_room")
 
     # Evita trabalho desnecessário em blocos digitais totalmente silenciosos
     if not np.any(arr):
@@ -275,13 +541,25 @@ def enhance_speech_audio(samples_int16: np.ndarray, sample_rate: int) -> np.ndar
 
     x = arr.astype(np.float64) / 32768.0
     x -= np.mean(x)
-    x = _apply_highpass_fft(x, sample_rate, cutoff_hz=80.0)
+
+    if eff_mode == "light":
+        x = _apply_highpass_fft(x, sample_rate, cutoff_hz=80.0)
+    else:
+        if eff_mode in ("denoise_and_clarify", "neural_voice_isolation"):
+            x = _apply_spectral_noise_gate(x, sample_rate, strength=denoise_strength)
+        stats = _compute_frame_spectral_stats(x.astype(np.float32), sample_rate)
+        x = _apply_adaptive_vocal_eq(
+            x,
+            sample_rate,
+            mud_pct=stats["mud_pct"],
+            presence_pct=stats["presence_pct"],
+        )
 
     # Parâmetros do AGC por janelas de 100 ms e limiter em -1 dBFS
     target_rms = 10.0 ** (-18.0 / 20.0)   # ~0.1259 (-18 dBFS)
     peak_limit = 10.0 ** (-1.0 / 20.0)    # ~0.8913 (-1 dBFS)
     silence_rms = 10.0 ** (-48.0 / 20.0)  # ~0.0040 (não amplifica piso de silêncio)
-    max_gain = 10.0 ** (16.0 / 20.0)      # +16 dB máx. para participantes distantes na sala
+    max_gain = 10.0 ** (18.0 / 20.0)      # +18 dB máx. para participantes distantes na sala
     min_gain = 0.25
 
     win_len = max(1, int(round(0.10 * sample_rate)))
@@ -334,6 +612,73 @@ def enhance_speech_audio(samples_int16: np.ndarray, sample_rate: int) -> np.ndar
 
     y = np.clip(y, -peak_limit, peak_limit)
     return np.clip(np.round(y * 32768.0), -32768, 32767).astype(np.int16)
+
+
+def _apply_channel_restoration(
+    samples_16k: np.ndarray,
+    eff_mode: str,
+    preprocess_channel_fn: Optional[Callable[[np.ndarray, int], np.ndarray]] = None,
+) -> np.ndarray:
+    """Executa isolamento neural (quando solicitado) seguido pelo pipeline DSP de restauração."""
+    out = samples_16k
+    if eff_mode == "neural_voice_isolation" and preprocess_channel_fn is not None and len(out) > 0:
+        out_f32 = out.astype(np.float32) / 32768.0
+        isolated_f32 = preprocess_channel_fn(out_f32, TARGET_SAMPLE_RATE)
+        out = np.clip(np.round(np.asarray(isolated_f32, dtype=np.float32) * 32768.0), -32768, 32767).astype(np.int16)
+    if eff_mode != "none":
+        out = enhance_speech_audio(out, TARGET_SAMPLE_RATE, mode=eff_mode)
+    return out
+
+
+def extract_preview_clip(
+    wav_path: Path,
+    duration_seconds: float = 6.0,
+    enhancement_mode: str = "clarify_room",
+    preprocess_channel_fn: Optional[Callable[[np.ndarray, int], np.ndarray]] = None,
+) -> Tuple[np.ndarray, int]:
+    """Extrai o trecho de ~6s com fala mais nítida de um WAV e aplica o preset escolhido para prévia."""
+    wav_path = Path(wav_path)
+    with wave.open(str(wav_path), "rb") as wf:
+        nchannels = int(wf.getnchannels())
+        sampwidth = int(wf.getsampwidth())
+        orig_rate = int(wf.getframerate())
+        total_frames = int(wf.getnframes())
+        if sampwidth != 2 or total_frames == 0 or orig_rate <= 0:
+            return np.zeros(0, dtype=np.int16), TARGET_SAMPLE_RATE
+        scan_frames = min(total_frames, int(round(90.0 * orig_rate)))
+        raw = wf.readframes(scan_frames)
+
+    arr = np.frombuffer(raw, dtype=np.int16)
+    if nchannels > 1:
+        arr = arr.reshape(-1, nchannels)[:, :2]
+    clip_frames = min(len(arr), max(orig_rate, int(round(duration_seconds * orig_rate))))
+    if len(arr) > clip_frames:
+        hop = max(1, orig_rate)
+        best_pos = 0
+        best_score = -1.0
+        for pos in range(0, len(arr) - clip_frames + 1, hop):
+            sub = arr[pos : pos + clip_frames].astype(np.float32)
+            sc = float(np.sqrt(np.mean(sub * sub)))
+            if sc > best_score:
+                best_score = sc
+                best_pos = pos
+        chunk = arr[best_pos : best_pos + clip_frames]
+    else:
+        chunk = arr
+
+    eff_mode = str(enhancement_mode or "clarify_room")
+    if eff_mode == "auto":
+        eff_mode = analyze_audio_diagnostics(wav_path).get("recommended_preset", "clarify_room")
+
+    if chunk.ndim == 1:
+        s_16k = resample_to_16k(chunk, orig_rate, TARGET_SAMPLE_RATE)
+        return _apply_channel_restoration(s_16k, eff_mode, preprocess_channel_fn), TARGET_SAMPLE_RATE
+
+    ch_l = _apply_channel_restoration(resample_to_16k(chunk[:, 0], orig_rate, TARGET_SAMPLE_RATE), eff_mode, preprocess_channel_fn)
+    ch_r = _apply_channel_restoration(resample_to_16k(chunk[:, 1], orig_rate, TARGET_SAMPLE_RATE), eff_mode, preprocess_channel_fn)
+    tlen = min(len(ch_l), len(ch_r))
+    stereo = np.column_stack([ch_l[:tlen], ch_r[:tlen]]).astype(np.int16)
+    return stereo, TARGET_SAMPLE_RATE
 
 
 def get_wav_info(wav_path: Path) -> Dict:
@@ -389,8 +734,10 @@ def slice_wav_for_retranscription(
     block_duration_seconds: int = 60,
     overlap_seconds: float = BLOCK_OVERLAP_SECONDS,
     apply_enhancement: Optional[bool] = None,
+    enhancement_mode: Optional[str] = None,
+    preprocess_channel_fn: Optional[Callable[[np.ndarray, int], np.ndarray]] = None,
 ) -> List[Tuple[Path, int, float, float, bool]]:
-    """Fatia um WAV salvo em blocos temporários (16 kHz) com pausa inteligente e overlap de 2,5s para re-transcrição.
+    """Fatia um WAV salvo em blocos temporários (16 kHz) com pausa inteligente, restauração e overlap de 2,5s.
 
     Retorna uma lista de tuplas: `(block_wav_path, block_index, start_seconds, end_seconds, is_final)`.
     """
@@ -417,7 +764,17 @@ def slice_wav_for_retranscription(
         # Preserva apenas L/R se houver mais canais
         samples = samples[:, :2]
 
-    should_enhance = (orig_rate != TARGET_SAMPLE_RATE) if apply_enhancement is None else bool(apply_enhancement)
+    if enhancement_mode == "auto":
+        eff_mode = analyze_audio_diagnostics(source_wav_path).get("recommended_preset", "clarify_room")
+    elif enhancement_mode in ("none", "light", "clarify_room", "denoise_and_clarify", "neural_voice_isolation"):
+        eff_mode = enhancement_mode
+    elif apply_enhancement is False:
+        eff_mode = "none"
+    elif apply_enhancement is True:
+        eff_mode = "clarify_room"
+    else:
+        eff_mode = "clarify_room" if orig_rate != TARGET_SAMPLE_RATE else "none"
+
     step_frames = max(orig_rate * 10, int(round(max(30, block_duration_seconds) * orig_rate)))
     ov_frames = int(round(max(0.0, overlap_seconds) * orig_rate))
     min_tail_frames = int(round(5.0 * orig_rate))
@@ -445,15 +802,13 @@ def slice_wav_for_retranscription(
         if out_channels == 1:
             mono = chunk if chunk.ndim == 1 else chunk[:, 0]
             out_16k = resample_to_16k(mono, orig_rate, TARGET_SAMPLE_RATE)
-            if should_enhance:
-                out_16k = enhance_speech_audio(out_16k, TARGET_SAMPLE_RATE)
+            out_16k = _apply_channel_restoration(out_16k, eff_mode, preprocess_channel_fn)
             pcm_bytes = out_16k.tobytes()
         else:
             ch_l = resample_to_16k(chunk[:, 0], orig_rate, TARGET_SAMPLE_RATE)
             ch_r = resample_to_16k(chunk[:, 1], orig_rate, TARGET_SAMPLE_RATE)
-            if should_enhance:
-                ch_l = enhance_speech_audio(ch_l, TARGET_SAMPLE_RATE)
-                ch_r = enhance_speech_audio(ch_r, TARGET_SAMPLE_RATE)
+            ch_l = _apply_channel_restoration(ch_l, eff_mode, preprocess_channel_fn)
+            ch_r = _apply_channel_restoration(ch_r, eff_mode, preprocess_channel_fn)
             tlen = max(len(ch_l), len(ch_r))
             stereo = np.empty((tlen, 2), dtype=np.int16)
             stereo[:, 0] = ch_l[:tlen] if len(ch_l) >= tlen else np.pad(ch_l, (0, tlen - len(ch_l)))
