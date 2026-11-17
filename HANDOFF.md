@@ -1,7 +1,7 @@
 # Handoff Técnico — Escutaí
 
 > Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **Escutaí** (anteriormente *OmniScribe AI*).
-> Última atualização: 17/11/2026 (baseado no commit `33f5adc` na branch `main` após PR #21 + padronização completa na branch `refactor/rename-vozito-escutai-assets`).
+> Última atualização: 17/11/2026 (baseado no commit `fd470f9` na branch `main` após PR #22 + pipeline de diagnóstico/restauração vocal, voiceprints compensados e Whisper offline aprimorado).
 
 ---
 
@@ -73,16 +73,17 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
   - Modo mudo (`set_mic_muted`) e **noise gate suave** (`_apply_mic_noise_gate`, limiar padrão `0.015`, atenuação suave `0.15x` e *hold* de `150 ms` para preservar consoantes e falas baixas).
   - Thread `_vu_meter_loop` enviando RMS em dB normalizado (`0.0` a `1.0`) para a GUI.
   - Thread `_slicer_loop` fatiando blocos com **espera inteligente de pausa natural (até `4s`)** após `block_duration_seconds` (**`60s` padrão** para máxima precisão temporal, selecionável entre 1/3/5 min) e mantendo **buffer circular de overlap de `2,5s`** entre blocos consecutivos e no encerramento (`stop_recording(finalize_block=True)`).
-- **Processamento DSP & WAV (`_create_block_file`)**:
+- **Processamento DSP, Diagnóstico & Restauração (`src/audio_engine.py`)**:
   - Reamostragem anti-aliasing para **16 kHz** via `resample_to_16k` (`scipy.signal.resample_poly` com fallback FIR passa-baixa janela Hamming em NumPy).
-  - Pré-processamento acústico (`enhance_speech_audio`): remoção de offset DC, filtro passa-alta linear-phase `~80 Hz`, normalização dinâmica por janelas (AGC suave RMS/pico com guarda de silêncio) e *limiter soft-knee* anti-clipping em `-1 dBFS`.
+  - **Diagnóstico Acústico (`analyze_audio_diagnostics`)**: analisa SNR (`dB`), piso de ruído, clipping, taxa de fala ativa e distribuição espectral (`hum <100 Hz`, médio-graves/abafamento `100–350 Hz`, clareza vocal `1–4,5 kHz`, chiado `>6 kHz`), recomendando automaticamente o preset ideal de restauração.
+  - **Restauração Vocal Multiestágio (`enhance_speech_audio`)**: suporta presets `none`, `light`, `clarify_room`, `denoise_and_clarify` e `neural_voice_isolation`, combinando passa-alta `85 Hz` + notch `60/120 Hz`, redução espectral STFT/Wiener de ruído estacionário, EQ adaptativa de de-mudding (`~210 Hz`) e presença vocal (`~2,55 kHz`), além de AGC por janelas e *limiter soft-knee* (`-1 dBFS`).
   - **Detecção automática de modo**:
     - **Mono Presencial (`1 canal`, `16000 Hz`)**: quando `_loopback_stream is None` e `_mic_stream is not None`.
     - **Estéreo Online (`2 canais`, `16000 Hz`)**: Canal Esquerdo (L) = Loopback / Sistema, Canal Direito (R) = Microfone local.
   - **Gravação Oficial Contínua (`session_wav_path`)**: ao informar `session_wav_path` em `start_recording`, os frames inéditos de cada bloco (descontado o prefixo de overlap de 2,5s) são gravados continuamente em `atas_reunioes/AAAA/MM/audio_YYYYMMDD_HHMM[_titulo].wav` para reprodução e reprocessamento futuro.
-  - **Reprocessamento (`slice_wav_for_retranscription`)**: fatia um `.wav` salvo em blocos de `16 kHz` (com corte em pausa natural ±2s e overlap de 2,5s) mantendo o áudio original intacto.
+  - **Reprocessamento (`slice_wav_for_retranscription` e `extract_preview_clip`)**: fatia um `.wav` salvo em blocos de `16 kHz` com corte em pausa natural ±2s, overlap de 2,5s e aplicação do preset escolhido (incluindo prévia interativa de 6s).
 
-### 3.3 Pipeline Gemini (`src/gemini_service.py`)
+### 3.3 Pipeline Gemini e Offline (`src/gemini_service.py` & `src/offline_asr_service.py`)
 - `start_session(title, context_notes="", source_audio_path=None)` cria `atas_reunioes/AAAA/MM/transcricao_YYYYMMDD_HHMM[_titulo].md`, `ata_executiva_YYYYMMDD_HHMM[_titulo].md` e define `audio_YYYYMMDD_HHMM[_titulo].wav` (via `get_session_audio_path()`), extrai palavras-chave/glossário prioritário e inicia a thread `GeminiWorker`.
 - Cada bloco WAV enfileirado (`enqueue_block`) passa por `_process_single_block`:
   1. Detecta automaticamente pelo cabeçalho `wave` se o WAV possui `1 canal` (selecionando `PRESENTIAL_TRANSCRIPTION_PROMPT` para diarização acústica em sala única com marcação `⚡ [Falas Sobrepostas]:`) ou `2 canais` (selecionando `TRANSCRIPTION_SYSTEM_PROMPT` estritamente separado L/R).
@@ -90,7 +91,10 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
   3. Envia contexto seguro recente (`_build_safe_recent_context`, até 6 turnos válidos) + vocabulário prioritário + âncoras biométricas + prompt especializado (com regras anti-loop) para `gemini-2.5-flash` com `types.GenerateContentConfig(temperature=0.2, top_p=0.95, max_output_tokens=3072..8192)`.
   4. **Guarda Anti-Loop (`_detect_and_sanitize_repetition`)**: detecta repetições intra-linha (`5+x`), ciclos alternados de turnos (períodos 1–4) ou desvios de idioma/formato; em caso de colapso, executa 1 *retry* automático com `temperature=0.45` no mesmo arquivo remoto e saneia sobras antes de salvar.
   5. Registra áudio e tokens no `UsageTracker`, anexa no Markdown e apaga o `.wav` temporário somente após escrita confirmada (removendo o arquivo remoto no `finally`).
-- No modo **Offline** (`engine_mode="offline"`), `_process_single_block_offline` transcreve localmente via `OfflineAsrService` (Whisper INT8 ONNX + Silero VAD + `VoiceprintService`) sem chamadas à nuvem.
+- No modo **Offline** (`engine_mode="offline"`), `_process_single_block_offline` transcreve localmente via `OfflineAsrService`:
+  1. Opcionalmente aplica **isolamento neural de voz GTCRN** (`gtcrn_simple.onnx` via `sherpa_onnx.OfflineSpeechDenoiser`) e restauração espectral;
+  2. Segmenta via Silero VAD, diariza com `VoiceprintService.diarize_speech_segments` (dividindo turnos >5,5s em trocas sustentadas de locutor), **mescla segmentos consecutivos do mesmo locutor** (`<=24s`) para acelerar o Whisper e aumentar contexto, e decodifica em lote via `decode_streams` (`small`, `turbo` `Large-v3 Turbo INT8` ou `base`);
+  3. Aplica sanitização de marcadores/alongamentos e ancoragem fonética contra o glossário e nomes cadastrados (`_apply_glossary_and_phonetic_fixes`).
 - Ao receber a sentinela `None` via `finish_session()`, `_generate_executive_minutes()`:
   1. Em modo Online, executa **segunda passada fono-semântica** (`_refine_transcript_phonetics`, `temperature=0.15`, validada sobre o texto já limpo de loops) e gera a Ata via `MINUTES_SYSTEM_PROMPT`; em modo Offline, gera via **Ollama local** ou sintetizador determinístico estruturado.
   2. Quando `auto_export_sqlite` está ativo (padrão), empacota texto, metadados, segmentos e áudio compactado (`b4p_zlib`) em `atas_reunioes/AAAA/MM/reuniao_YYYYMMDD_HHMM[_titulo].escutai`.
@@ -103,7 +107,8 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
 
 ### 3.4b Biometria Vocal / Voiceprints (`src/voiceprint_service.py`)
 - Roda localmente em CPU via **`sherpa-onnx`** (`wespeaker_en_voxceleb_resnet34_LM.onnx`, 256 dims + `silero_vad.onnx`, ~26 MB sob demanda em `models/voiceprint/`, ignorados pelo `.gitignore`).
-- Armazena perfis L2-normalizados em `atas_reunioes/voice_profiles.json` (`enroll_profile_from_arrays`, `enroll_profile_from_wav_segment`, `export_profiles` e `import_profiles` com validação de modelo `ResNet34-LM` e estratégias `merge`/`skip`/`overwrite`).
+- Armazena perfis L2-normalizados em `atas_reunioes/voice_profiles.json` com **recarga automática por `mtime` (`ensure_profiles_loaded`)** e migração automática da pasta legada `OmniScribe AI`, quando aplicável.
+- **Compensação de Viés de Sala/Microfone (Cohort Mean-Centering):** quando múltiplos perfis compartilham assinatura acústica semelhante da mesma sala/microfone (`similaridade média >= 0.50`), combina similaridade bruta com centragem na coorte (`alpha = 0.65`) e histerese na janela deslizante de diarização (`diarize_speech_segments`) para separar locutores distintos sem falsas inversões.
 - Antes da chamada ao Gemini em `_process_single_block`, `analyze_wav_speakers()` segmenta o áudio Mono (ou Canal L remoto em Estéreo), gera um mapa temporal biométrico com similaridade de cosseno (incluindo detecção de possíveis sobreposições) e injeta as âncoras no prompt com **zero requisições extras no Free Tier**.
 
 ### 3.5 Interface Gráfica v2.0 (`src/gui.py`)
@@ -111,8 +116,8 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
   - **Aba `🎙️ Gravação`**: título + glossário (50%/50%), sublinha limpa com `Captação` (`Online`/`Presencial`) e `Motor de IA` (`☁️ Gemini` / `💻 Offline`), botão único principal, cronômetro, medidores VU, barra de progresso assíncrona (`bar_async_progress`) e transcrição ao vivo.
   - **Aba `📋 Ata`**: leitura da Ata Executiva com `📂 Abrir Pasta`, `📦 Exportar .escutai` e `📋 Copiar Ata Markdown`.
   - **Aba `🗂️ Histórico`**: listagem nativa unificada de `.escutai`/`.omniscribe`, `.wav` e `.md` via `render_history_cards_into()`, com **busca instantânea**, filtros por tipo (`📦 Pacotes`), `📥 Importar Pacote`, player (`▶ Ouvir`), abertura direta e `🔄 Re-transcrever`.
-  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + bloco (1/3/5 min) + Noise Gate, `GEMINI_API_KEY` + medidor Free Tier, Voiceprints, card Offline (`Whisper small/base` + download com barra de progresso + detector Ollama + checkbox `.escutai`) e gaveta de logs técnicos recolhível.
-- Modais auxiliares (`VoiceProfilesModal`, `RetranscribeModal` com seletor Online/Offline, `ApiKeyModal`, `UsageModal`, `HistoryModal`) estilizados uniformemente com `_style_option_menu`.
+  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + bloco (1/3/5 min) + Noise Gate, `GEMINI_API_KEY` + medidor Free Tier, Voiceprints, card Offline (`Whisper small / turbo / base` + download + detector Ollama + checkbox Isolamento Neural GTCRN + checkbox `.escutai`) e gaveta de logs técnicos recolhível.
+- Modais auxiliares (`VoiceProfilesModal`, `RetranscribeModal` com **Diagnóstico Acústico**, seletor de **Tratamento/Isolamento Vocal** e botão **🔊 Ouvir Prévia Tratada (6s)**, `ApiKeyModal`, `UsageModal`, `HistoryModal`) estilizados uniformemente com `_style_option_menu`.
 
 ### 3.6 Mascote 3D Vozito (`src/mascot_3d.py` e `src/mascot_widget.py`)
 - **Renderização (`Vozito3DRenderer`)**: carrega diretamente as **sprite sheets RGBA transparentes** de `assets/mascot/` (`idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning`, `sleeping`, `spin`) renderizadas em Blender EEVEE com o shader `NG_PS1_Bayer4x4` e os 4 props oficiais, fazendo composição limpa sobre o fundo do tema ativo (com fallback automático para a malha procedural caso `assets/mascot/` não exista).
@@ -208,8 +213,8 @@ python src/main.py
 
 ## 6. Estado Atual do Git e Pontos de Atenção
 
-- **Branch base**: `main` (sincronizada com `origin/main` após PR #21 `33f5adc`, com padronização completa dos nomes de assets e identificadores na branch `refactor/rename-vozito-escutai-assets`).
-- **Instalador Windows (`Escutai_Setup.exe`)**: compilado com `417,00 MB` (`1.205` arquivos, incluindo `Escutai.exe`, `models/voiceprint` e `models/asr/sherpa-onnx-whisper-small` INT8 embutidos) para uso imediato offline desde a instalação.
+- **Branch base**: `main` (sincronizada com `origin/main` após PR #22 `fd470f9`; melhorias de voiceprint, diagnóstico/restauração vocal e Whisper offline na branch `feat/offline-whisper-voiceprint-audio-enhancer`).
+- **Instalador Windows (`Escutai_Setup.exe`)**: recompilar após o merge no Windows Desktop caso deseje embutir no `.exe` as atualizações desta entrega (`Escutai.exe` + `gtcrn_simple.onnx` baixado sob demanda).
 - **Dependência externa principal (apenas modo Online)**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal). No modo **Offline**, o app opera integralmente sem API Key.
 - **Observações técnicas conhecidas no código atual**:
   - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` e `src/offline_asr_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).

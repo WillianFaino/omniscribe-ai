@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 import sys
 import threading
 import time
@@ -38,7 +40,11 @@ VAD_MODEL_URL = (
 
 DEFAULT_MATCH_THRESHOLD = 0.56
 DEFAULT_OVERLAP_MARGIN = 0.08
-DEFAULT_UNKNOWN_CLUSTER_THRESHOLD = 0.58
+DEFAULT_UNKNOWN_CLUSTER_THRESHOLD = 0.72
+DEFAULT_COHORT_PAIRWISE_MIN = 0.50
+DEFAULT_COHORT_ALPHA = 0.65
+DEFAULT_CENTERED_MIN = 0.18
+DEFAULT_CENTERED_WEIGHT = 0.65
 
 sherpa_onnx = None
 HAS_SHERPA_ONNX: Optional[bool] = None
@@ -109,6 +115,7 @@ class VoiceprintService:
             if not cand.exists() and meipass and (Path(meipass) / "models" / "voiceprint").exists():
                 cand = Path(meipass) / "models" / "voiceprint"
             self.models_dir = cand
+        self._custom_profiles_path = profiles_path is not None
         self.profiles_path = (
             Path(profiles_path)
             if profiles_path
@@ -122,14 +129,83 @@ class VoiceprintService:
         self._extractor = None
         self._vad = None
         self._profiles: Dict[str, Dict] = {}
+        self._last_mtime: float = 0.0
+        self._legacy_checked: bool = False
+        self._cohort_centroid: Optional[np.ndarray] = None
+        self._use_cohort_centering: bool = False
+        self._centered_profiles: Dict[str, np.ndarray] = {}
         self._load_profiles()
+
+    def _recompute_cohort_stats(self) -> None:
+        """Calcula centroide da coorte para compensar viés de sala/microfone entre perfis."""
+        self._cohort_centroid = None
+        self._use_cohort_centering = False
+        self._centered_profiles = {}
+        if len(self._profiles) < 2:
+            return
+        names = list(self._profiles.keys())
+        mat = np.stack([self._profiles[k]["embedding"] for k in names], axis=0)
+        sim_mat = mat @ mat.T
+        n = len(names)
+        off_diag = (float(np.sum(sim_mat)) - float(np.trace(sim_mat))) / float(max(1, n * (n - 1)))
+        centroid = _l2_normalize(np.mean(mat, axis=0))
+        self._cohort_centroid = centroid
+        self._use_cohort_centering = off_diag >= DEFAULT_COHORT_PAIRWISE_MIN
+        self._centered_profiles = {
+            k: _l2_normalize(self._profiles[k]["embedding"] - DEFAULT_COHORT_ALPHA * centroid)
+            for k in names
+        }
+
+    def _try_migrate_legacy_profiles(self) -> None:
+        """Migra perfis salvos na instalação anterior OmniScribe AI caso Escutaí ainda não tenha arquivo."""
+        if self._legacy_checked or self.profiles_path.exists():
+            return
+        self._legacy_checked = True
+        candidates = [
+            self.profiles_path.parent.parent.parent / "OmniScribe AI" / "atas_reunioes" / "voice_profiles.json"
+        ]
+        if not self._custom_profiles_path:
+            local_app = os.environ.get("LOCALAPPDATA")
+            if local_app:
+                candidates.append(Path(local_app) / "Programs" / "OmniScribe AI" / "atas_reunioes" / "voice_profiles.json")
+        for legacy_path in candidates:
+            try:
+                if legacy_path.is_file() and legacy_path.resolve() != self.profiles_path.resolve():
+                    self.profiles_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(legacy_path, self.profiles_path)
+                    logger.info(f"[VOICEPRINT] Perfis migrados automaticamente de {legacy_path} para {self.profiles_path}.")
+                    return
+            except Exception as e:
+                logger.debug(f"Falha ao migrar perfil legado de {legacy_path}: {e}")
+
+    def ensure_profiles_loaded(self) -> None:
+        """Recarrega perfis automaticamente se o arquivo em disco foi criado ou atualizado."""
+        if not self.profiles_path.exists():
+            self._try_migrate_legacy_profiles()
+            if not self.profiles_path.exists():
+                if self._profiles:
+                    self._profiles = {}
+                    self._last_mtime = 0.0
+                    self._recompute_cohort_stats()
+                return
+        try:
+            mtime = float(self.profiles_path.stat().st_mtime)
+        except OSError:
+            return
+        if not self._profiles or mtime != self._last_mtime:
+            self._load_profiles()
 
     # ---------------- PERSISTÊNCIA DE PERFIS ----------------
     def _load_profiles(self) -> None:
         if not self.profiles_path.exists():
+            self._try_migrate_legacy_profiles()
+        if not self.profiles_path.exists():
             self._profiles = {}
+            self._last_mtime = 0.0
+            self._recompute_cohort_stats()
             return
         try:
+            stat_mtime = float(self.profiles_path.stat().st_mtime)
             with open(self.profiles_path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             profs = raw.get("profiles", {})
@@ -144,9 +220,13 @@ class VoiceprintService:
                         "updated_at": str(entry.get("updated_at", "")),
                     }
             self._profiles = loaded
+            self._last_mtime = stat_mtime
+            self._recompute_cohort_stats()
         except Exception as e:
             logger.warning(f"Erro ao carregar perfis de voz ({self.profiles_path}): {e}")
             self._profiles = {}
+            self._last_mtime = 0.0
+            self._recompute_cohort_stats()
 
     def _save_profiles(self) -> None:
         self.profiles_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,6 +247,11 @@ class VoiceprintService:
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         tmp_path.replace(self.profiles_path)
+        try:
+            self._last_mtime = float(self.profiles_path.stat().st_mtime)
+        except OSError:
+            self._last_mtime = time.time()
+        self._recompute_cohort_stats()
 
     def list_profiles(self) -> List[Dict]:
         """Retorna lista ordenada dos perfis biométricos cadastrados."""
@@ -658,6 +743,76 @@ class VoiceprintService:
         )
 
     # ---------------- IDENTIFICAÇÃO EM BLOCOS ----------------
+    def _match_embedding_details(
+        self,
+        emb: np.ndarray,
+        unknown_clusters: List[Tuple[str, np.ndarray, int]],
+        match_threshold: float,
+        overlap_margin: float,
+    ) -> Tuple[str, Optional[float], bool]:
+        """Classifica um embedding em `(nome_limpo, raw_score_ou_None, is_overlap)` com centragem de coorte."""
+        self.ensure_profiles_loaded()
+
+        use_cen = bool(self._use_cohort_centering and self._cohort_centroid is not None and self._centered_profiles)
+        emb_c = (
+            _l2_normalize(emb - DEFAULT_COHORT_ALPHA * self._cohort_centroid)
+            if use_cen
+            else emb
+        )
+
+        if self._profiles:
+            candidates: List[Tuple[str, float, float, float]] = []
+            for name, pdata in self._profiles.items():
+                raw_s = float(np.dot(emb, pdata["embedding"]))
+                if use_cen and name in self._centered_profiles:
+                    cen_s = float(np.dot(emb_c, self._centered_profiles[name]))
+                    rank_s = DEFAULT_CENTERED_WEIGHT * cen_s + (1.0 - DEFAULT_CENTERED_WEIGHT) * raw_s
+                else:
+                    cen_s = raw_s
+                    rank_s = raw_s
+                candidates.append((name, raw_s, cen_s, rank_s))
+
+            candidates.sort(key=lambda item: item[3], reverse=True)
+            top_name, top_raw, top_cen, top_rank = candidates[0]
+            if top_raw >= match_threshold and (not use_cen or top_cen >= DEFAULT_CENTERED_MIN):
+                if len(candidates) > 1 and top_raw < 0.78:
+                    sec_name, sec_raw, sec_cen, sec_rank = candidates[1]
+                    sec_ok = sec_raw >= (match_threshold - 0.06) and (not use_cen or sec_cen >= 0.12)
+                    margin = (top_rank - sec_rank) if use_cen else (top_raw - sec_raw)
+                    if sec_ok and margin <= overlap_margin:
+                        return f"Possível sobreposição ({top_name} / {sec_name})", top_raw, True
+                return top_name, top_raw, False
+
+        # Agrupa locutores desconhecidos consistentes dentro do bloco
+        best_u_idx = -1
+        best_u_rank = -1.0
+        best_u_raw = -1.0
+        best_u_cen = -1.0
+        for idx, (_uname, uemb, _ucnt) in enumerate(unknown_clusters):
+            raw_u = float(np.dot(emb, uemb))
+            if use_cen:
+                uemb_c = _l2_normalize(uemb - DEFAULT_COHORT_ALPHA * self._cohort_centroid)
+                cen_u = float(np.dot(emb_c, uemb_c))
+                rank_u = DEFAULT_CENTERED_WEIGHT * cen_u + (1.0 - DEFAULT_CENTERED_WEIGHT) * raw_u
+            else:
+                cen_u = raw_u
+                rank_u = raw_u
+            if rank_u > best_u_rank:
+                best_u_rank = rank_u
+                best_u_raw = raw_u
+                best_u_cen = cen_u
+                best_u_idx = idx
+
+        if best_u_idx >= 0 and best_u_raw >= DEFAULT_UNKNOWN_CLUSTER_THRESHOLD and (not use_cen or best_u_cen >= 0.35):
+            uname, uemb, ucnt = unknown_clusters[best_u_idx]
+            new_uemb = _l2_normalize((uemb * float(ucnt) + emb) / float(ucnt + 1))
+            unknown_clusters[best_u_idx] = (uname, new_uemb, ucnt + 1)
+            return uname, None, False
+
+        new_label = f"Locutor Desconhecido {len(unknown_clusters) + 1}"
+        unknown_clusters.append((new_label, emb, 1))
+        return new_label, None, False
+
     def _match_embedding(
         self,
         emb: np.ndarray,
@@ -665,38 +820,140 @@ class VoiceprintService:
         match_threshold: float,
         overlap_margin: float,
     ) -> str:
-        scores = [
-            (name, float(np.dot(emb, pdata["embedding"])))
-            for name, pdata in self._profiles.items()
-        ]
-        scores.sort(key=lambda item: item[1], reverse=True)
+        clean_lbl, raw_score, is_overlap = self._match_embedding_details(
+            emb, unknown_clusters, match_threshold, overlap_margin
+        )
+        if is_overlap:
+            return f"⚡ {clean_lbl}"
+        if raw_score is not None:
+            return f"**{clean_lbl}** (score {raw_score:.2f})"
+        return f"**{clean_lbl}**"
 
-        if scores and scores[0][1] >= match_threshold:
-            top_name, top_score = scores[0]
-            if len(scores) > 1 and top_score < 0.78:
-                sec_name, sec_score = scores[1]
-                if sec_score >= (match_threshold - 0.06) and (top_score - sec_score) <= overlap_margin:
-                    return f"⚡ Possível sobreposição ({top_name} / {sec_name})"
-            return f"**{top_name}** (score {top_score:.2f})"
+    def identify_speaker_segment(
+        self,
+        samples_f32: np.ndarray,
+        sample_rate: int = TARGET_SAMPLE_RATE,
+        unknown_clusters: Optional[List[Tuple[str, np.ndarray, int]]] = None,
+        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
+        overlap_margin: float = DEFAULT_OVERLAP_MARGIN,
+    ) -> str:
+        """Identifica o locutor de um trecho retornando nome limpo (sem marcação Markdown)."""
+        self.ensure_profiles_loaded()
+        clusters = unknown_clusters if unknown_clusters is not None else []
+        if not self.are_models_ready():
+            return "Participante 1"
+        emb = self.compute_embedding(samples_f32, sample_rate)
+        if emb is None:
+            return "Participante 1"
+        clean_lbl, _score, _ov = self._match_embedding_details(emb, clusters, match_threshold, overlap_margin)
+        return clean_lbl
 
-        # Agrupa locutores desconhecidos consistentes dentro do bloco
-        best_u_idx = -1
-        best_u_score = -1.0
-        for idx, (_uname, uemb, _ucnt) in enumerate(unknown_clusters):
-            sc = float(np.dot(emb, uemb))
-            if sc > best_u_score:
-                best_u_score = sc
-                best_u_idx = idx
+    def diarize_speech_segments(
+        self,
+        vad_segments: List[Tuple[float, float, np.ndarray]],
+        sample_rate: int = TARGET_SAMPLE_RATE,
+        unknown_clusters: Optional[List[Tuple[str, np.ndarray, int]]] = None,
+        max_segment_len_sec: float = 5.5,
+        win_sec: float = 2.4,
+        hop_sec: float = 1.2,
+        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
+        overlap_margin: float = DEFAULT_OVERLAP_MARGIN,
+    ) -> List[Tuple[float, float, str, np.ndarray]]:
+        """Diariza segmentos VAD e divide trechos longos (>5,5s) apenas em trocas sustentadas de locutor."""
+        self.ensure_profiles_loaded()
+        clusters = unknown_clusters if unknown_clusters is not None else []
+        out: List[Tuple[float, float, str, np.ndarray]] = []
+        if not vad_segments:
+            return out
 
-        if best_u_idx >= 0 and best_u_score >= DEFAULT_UNKNOWN_CLUSTER_THRESHOLD:
-            uname, uemb, ucnt = unknown_clusters[best_u_idx]
-            new_uemb = _l2_normalize((uemb * float(ucnt) + emb) / float(ucnt + 1))
-            unknown_clusters[best_u_idx] = (uname, new_uemb, ucnt + 1)
-            return f"**{uname}**"
+        models_ok = self.is_runtime_available() and self.are_models_ready()
+        win_samples = max(1, int(round(win_sec * sample_rate)))
+        hop_samples = max(1, int(round(hop_sec * sample_rate)))
+        min_tail_samples = max(1, int(round(0.65 * sample_rate)))
+        min_split_samples = max(1, int(round(1.6 * sample_rate)))
+        max_samples = int(round(max_segment_len_sec * sample_rate))
 
-        new_label = f"Locutor Desconhecido {len(unknown_clusters) + 1}"
-        unknown_clusters.append((new_label, emb, 1))
-        return f"**{new_label}**"
+        for s_t, e_t, seg_arr in vad_segments:
+            n_samp = len(seg_arr)
+            if n_samp == 0:
+                continue
+            if not models_ok:
+                out.append((s_t, e_t, "Participante 1", seg_arr))
+                continue
+
+            if n_samp <= max_samples:
+                lbl = self.identify_speaker_segment(
+                    seg_arr, sample_rate, clusters, match_threshold, overlap_margin
+                )
+                out.append((s_t, e_t, lbl, seg_arr))
+                continue
+
+            # Segmento longo: varre com janela deslizante e exige histerese contra picos isolados
+            win_labels: List[Tuple[int, int, str]] = []
+            pos = 0
+            while pos < n_samp:
+                end_pos = min(n_samp, pos + win_samples)
+                sub = seg_arr[pos:end_pos]
+                if len(sub) < min_tail_samples and win_labels:
+                    prev_s, _prev_e, prev_lbl = win_labels[-1]
+                    win_labels[-1] = (prev_s, n_samp, prev_lbl)
+                    break
+                lbl = self.identify_speaker_segment(
+                    sub, sample_rate, clusters, match_threshold, overlap_margin
+                )
+                win_labels.append((pos, end_pos, lbl))
+                if end_pos >= n_samp:
+                    break
+                pos += hop_samples
+
+            if not win_labels:
+                lbl = self.identify_speaker_segment(
+                    seg_arr, sample_rate, clusters, match_threshold, overlap_margin
+                )
+                out.append((s_t, e_t, lbl, seg_arr))
+                continue
+
+            # Remove picos isolados de 1 única janela no meio da frase (A -> B -> A passa a A -> A -> A)
+            smoothed = [list(w) for w in win_labels]
+            for idx in range(1, len(smoothed) - 1):
+                if smoothed[idx - 1][2] == smoothed[idx + 1][2] and smoothed[idx][2] != smoothed[idx - 1][2]:
+                    smoothed[idx][2] = smoothed[idx - 1][2]
+
+            runs: List[Tuple[int, int, str]] = []
+            cur_slice_start = 0
+            cur_lbl = smoothed[0][2]
+            prev_center = (smoothed[0][0] + smoothed[0][1]) // 2
+
+            for idx in range(1, len(smoothed)):
+                w_s, w_e, w_lbl = smoothed[idx]
+                w_center = (w_s + w_e) // 2
+                is_confirmed = (idx + 1 < len(smoothed) and smoothed[idx + 1][2] == w_lbl) or (
+                    idx == len(smoothed) - 1 and (n_samp - prev_center) >= min_split_samples
+                )
+                if (
+                    is_confirmed
+                    and w_lbl != cur_lbl
+                    and not cur_lbl.startswith("Possível sobreposição")
+                    and not w_lbl.startswith("Possível sobreposição")
+                ):
+                    cut = (prev_center + w_center) // 2
+                    if (cut - cur_slice_start) >= min_split_samples and (n_samp - cut) >= min_split_samples:
+                        runs.append((cur_slice_start, cut, cur_lbl))
+                        cur_slice_start = cut
+                        cur_lbl = w_lbl
+                prev_center = w_center
+
+            runs.append((cur_slice_start, n_samp, cur_lbl))
+
+            for sub_s, sub_e, sub_lbl in runs:
+                sub_arr = seg_arr[sub_s:sub_e]
+                if len(sub_arr) == 0:
+                    continue
+                abs_s = s_t + (sub_s / float(sample_rate))
+                abs_e = s_t + (sub_e / float(sample_rate))
+                out.append((abs_s, abs_e, sub_lbl, sub_arr))
+
+        return out
 
     def analyze_wav_speakers(
         self,

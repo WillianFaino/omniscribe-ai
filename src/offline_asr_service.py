@@ -22,12 +22,14 @@ import urllib.error
 import urllib.request
 import wave
 from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+import unicodedata
 
 import numpy as np
 
-from audio_engine import TARGET_SAMPLE_RATE, resample_to_16k
+from audio_engine import TARGET_SAMPLE_RATE, enhance_speech_audio, resample_to_16k
 from voiceprint_service import (
     DEFAULT_MATCH_THRESHOLD,
     DEFAULT_OVERLAP_MARGIN,
@@ -37,12 +39,24 @@ from voiceprint_service import (
 
 logger = logging.getLogger("escutai.offline_asr")
 
+DENOISER_MODEL_NAME = "gtcrn_simple.onnx"
+DENOISER_MODEL_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+    "speech-enhancement-models/gtcrn_simple.onnx"
+)
+
 WHISPER_MODELS: Dict[str, Dict[str, str]] = {
     "small": {
-        "label": "Whisper Small INT8 (~250 MB • Melhor PT-BR)",
+        "label": "Whisper Small INT8 (~250 MB • Equilibrado PT-BR)",
         "dir_name": "sherpa-onnx-whisper-small",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2",
         "prefix": "small",
+    },
+    "turbo": {
+        "label": "Whisper Large-v3 Turbo INT8 (~538 MB • Máxima Precisão PT-BR)",
+        "dir_name": "sherpa-onnx-whisper-turbo",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2",
+        "prefix": "turbo",
     },
     "base": {
         "label": "Whisper Base INT8 (~110 MB • Mais leve/rápido)",
@@ -53,7 +67,8 @@ WHISPER_MODELS: Dict[str, Dict[str, str]] = {
 }
 
 _WHISPER_NOISE_RE = re.compile(
-    r"^(?:\[.*\]|\(.*\)|legendas?\b.*|obrigad[oa] por assistir[!.]*|\.{2,}|\s*)$",
+    r"^(?:\[.*\]|\(.*\)|legendas?\b.*|obrigad[oa] por assistir[!.]*|\.{2,}|\s*|"
+    r"([a-zA-ZÀ-ÿ])\1{4,}[.!?]*)$",
     flags=re.IGNORECASE,
 )
 _TURN_RE = re.compile(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s+\*\*(.+?)\*\*:\s*(.*)$")
@@ -61,6 +76,21 @@ _DECISION_CUES = (
     "decid", "definid", "combinad", "fechad", "aprovad", "acordad", "vamos ",
     "ficou ", "precisa", "prazo", "entregar", "amanhã", "segunda", "terça",
     "quarta", "quinta", "sexta", "deploy", "corrigir", "criar", "subir",
+)
+_BUILTIN_VOCABULARY = (
+    "Escutaí",
+    "OmniScribe",
+    "Vozito",
+    "ClickUp",
+    "Bizagi",
+    "BPMN",
+    "WASAPI",
+    "Voiceprint",
+    "Whisper",
+    "Gemini",
+    "Ollama",
+    "Power BI",
+    "Controlsul",
 )
 
 
@@ -84,9 +114,143 @@ def _clean_whisper_text(raw_text: str) -> str:
     text = re.sub(r"\s+", " ", (raw_text or "")).strip()
     if not text or _WHISPER_NOISE_RE.match(text):
         return ""
+    # Remove marcadores fechados ou truncados (ex.: "[MÚSICA", "[Som de", "(risos)", "[aplausos]")
+    text = re.sub(
+        r"\s*[\(\[](?:risos?|m[úu]sica|aplausos?|sil[êe]ncio|som|barulho|ru[íi]do|music|laughter|applause|noise|sound)(?:\s+[^\]\)]{1,30})?(?:[\)\]]|$)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Colapsa alongamentos absurdos (ex.: "Eeeeeeeeeeeeeeeee" -> vazio se isolado)
+    text = re.sub(r"\b([a-zA-ZÀ-ÿ])\1{4,}[.!?,;]*\b", "", text, flags=re.IGNORECASE)
     # Colapsa alucinações curtas repetidas do Whisper (ex.: "Obrigado. Obrigado. Obrigado.")
     text = re.sub(r"(\b[\wÀ-ÿ]{2,20}[.!?]?)(?:\s+\1){3,}", r"\1", text, flags=re.IGNORECASE)
-    return text.strip()
+    text = re.sub(r"\s+", " ", text).strip(" ,;-")
+    if not text or (len(text) <= 2 and not text.isalnum()) or _WHISPER_NOISE_RE.match(text):
+        return ""
+    return text
+
+
+def _phonetic_norm(value: str) -> str:
+    """Normaliza uma palavra/expressão para esqueleto fonético PT-BR."""
+    raw = unicodedata.normalize("NFD", value or "")
+    stripped = "".join(c for c in raw if unicodedata.category(c) != "Mn").lower()
+    stripped = re.sub(r"[^a-z0-9]", "", stripped)
+    if not stripped:
+        return ""
+    stripped = re.sub(r"^h", "", stripped)
+    stripped = stripped.replace("ph", "f").replace("ch", "x").replace("sh", "x")
+    stripped = stripped.replace("qu", "k").replace("ck", "k").replace("y", "i").replace("w", "u")
+    stripped = stripped.replace("c", "k").replace("ss", "s").replace("sc", "s").replace("z", "s")
+    stripped = re.sub(r"(.)\1+", r"\1", stripped)
+    return stripped
+
+
+def _extract_glossary_terms(context_notes: str = "", enrolled_names: Optional[List[str]] = None) -> List[str]:
+    """Constrói lista ordenada de termos prioritários para ancoragem pós-ASR."""
+    ignored = {"participantes", "participante", "termos", "termo", "glossario", "glossário", "reuniao", "reunião"}
+    terms: List[str] = []
+    seen_low = set()
+
+    def _add(item: str) -> None:
+        cleaned = re.sub(r"\s+", " ", (item or "")).strip(" .,:;-•")
+        if len(cleaned) < 4 or cleaned.lower() in ignored or cleaned.lower() in seen_low:
+            return
+        seen_low.add(cleaned.lower())
+        terms.append(cleaned)
+
+    for nm in (enrolled_names or []):
+        _add(nm)
+        for part in nm.split():
+            if len(part) >= 4:
+                _add(part)
+
+    if context_notes:
+        for seg in re.split(r"[,;\n/|]+", context_notes):
+            clean_seg = re.sub(r"^(?:participantes?|termos?|gloss[áa]rio|nomes?)\s*:\s*", "", seg.strip(), flags=re.IGNORECASE)
+            _add(clean_seg)
+            for tok in re.findall(r"[A-Za-zÀ-ÿ0-9_\-]{4,}", clean_seg):
+                _add(tok)
+
+    for builtin in _BUILTIN_VOCABULARY:
+        _add(builtin)
+
+    terms.sort(key=lambda t: (-len(t.split()), -len(t)))
+    return terms
+
+
+def _apply_glossary_and_phonetic_fixes(
+    text: str,
+    context_notes: str = "",
+    enrolled_names: Optional[List[str]] = None,
+) -> str:
+    """Corrige termos foneticamente próximos ao glossário do usuário e nomes cadastrados."""
+    if not text:
+        return text
+
+    terms = _extract_glossary_terms(context_notes, enrolled_names)
+    ctx_low = (context_notes or "").lower()
+
+    # Correções diretas comuns em falas PT-BR corporativas quando o glossário inclui termos relacionados
+    out = re.sub(r"\bHomens\s+Square\b", "OmniScribe", text, flags=re.IGNORECASE)
+    out = re.sub(r"\bOmnis?\s+Square\b", "OmniScribe", out, flags=re.IGNORECASE)
+    if "clickup" in ctx_low or "click up" in ctx_low:
+        out = re.sub(r"\b(?:pick-up|pickup|clique\s+up|click\s+app)\b", "ClickUp", out, flags=re.IGNORECASE)
+    if "bizagi" in ctx_low:
+        out = re.sub(r"\b(?:bisagi|biza\s*gi|biza)\b", "Bizagi", out, flags=re.IGNORECASE)
+    if "bpmn" in ctx_low:
+        out = re.sub(r"\b(?:bpm\s+n|bpn)\b", "BPMN", out, flags=re.IGNORECASE)
+
+    # Matching fonético geral em janelas de 1 a 2 palavras contra os termos cadastrados
+    term_entries = [(t, _phonetic_norm(t), len(t.split())) for t in terms]
+    term_entries = [(t, ph, wc) for t, ph, wc in term_entries if len(ph) >= 4]
+    if not term_entries:
+        return out
+
+    words = out.split()
+    if not words:
+        return out
+
+    result: List[str] = []
+    i = 0
+    while i < len(words):
+        replaced = False
+        for span_len in (2, 1):
+            if i + span_len > len(words):
+                continue
+            raw_span = " ".join(words[i : i + span_len])
+            lead_match = re.match(r"^([^\wÀ-ÿ]*)(.*?)([^\wÀ-ÿ]*)$", raw_span)
+            if not lead_match:
+                continue
+            pre_p, core, post_p = lead_match.group(1), lead_match.group(2), lead_match.group(3)
+            if len(core) < 4:
+                continue
+            ph_core = _phonetic_norm(core)
+            if len(ph_core) < 4:
+                continue
+
+            best_term = None
+            best_ratio = 0.0
+            for term, ph_term, wc in term_entries:
+                if wc != span_len:
+                    continue
+                if core.lower() == term.lower():
+                    best_term = None
+                    break
+                thresh = 0.80 if len(ph_term) >= 7 else 0.88
+                r = SequenceMatcher(None, ph_core, ph_term).ratio()
+                if r >= thresh and r > best_ratio:
+                    best_ratio = r
+                    best_term = term
+            if best_term:
+                result.append(f"{pre_p}{best_term}{post_p}")
+                i += span_len
+                replaced = True
+                break
+        if not replaced:
+            result.append(words[i])
+            i += 1
+    return " ".join(result)
 
 
 def _safe_extract_tar_bz2(archive_path: Path, dest_root: Path) -> None:
@@ -118,7 +282,7 @@ def list_ollama_models(base_url: str = "http://127.0.0.1:11434", timeout: float 
 
 
 class OfflineAsrService:
-    """Serviço de reconhecimento de fala, diarização local e geração de atas sem API em nuvem."""
+    """Serviço de reconhecimento de fala, isolamento neural de voz, diarização e atas locais."""
 
     def __init__(
         self,
@@ -127,19 +291,28 @@ class OfflineAsrService:
         default_variant: str = "small",
     ):
         base_dir = _get_base_dir()
+        meipass = getattr(sys, "_MEIPASS", None)
         if models_dir:
             self.models_dir = Path(models_dir)
         else:
             cand = base_dir / "models" / "asr"
-            meipass = getattr(sys, "_MEIPASS", None)
             if not cand.exists() and meipass and (Path(meipass) / "models" / "asr").exists():
                 cand = Path(meipass) / "models" / "asr"
             self.models_dir = cand
+
+        den_cand = base_dir / "models" / "denoiser"
+        if not den_cand.exists() and meipass and (Path(meipass) / "models" / "denoiser").exists():
+            den_cand = Path(meipass) / "models" / "denoiser"
+        self.denoiser_dir = den_cand
+        self.denoiser_model_path = self.denoiser_dir / DENOISER_MODEL_NAME
+
         self.voiceprint_service = voiceprint_service or VoiceprintService()
         self.default_variant = default_variant if default_variant in WHISPER_MODELS else "small"
 
         self._lock = threading.Lock()
+        self._denoiser_lock = threading.Lock()
         self._recognizer = None
+        self._denoiser = None
         self._loaded_variant: Optional[str] = None
         self._sherpa_onnx = None
 
@@ -252,17 +425,15 @@ class OfflineAsrService:
             shutil.move(str(sub_dir), str(target_dir))
 
             # Remove pesos FP32 redundantes se os equivalentes INT8 existirem (reduz ~500 MB)
-            int8_enc = target_dir / f"{spec['prefix']}-encoder.int8.onnx"
-            int8_dec = target_dir / f"{spec['prefix']}-decoder.int8.onnx"
-            fp32_enc = target_dir / f"{spec['prefix']}-encoder.onnx"
-            fp32_dec = target_dir / f"{spec['prefix']}-decoder.onnx"
-            if int8_enc.exists() and fp32_enc.exists():
-                fp32_enc.unlink(missing_ok=True)
-            if int8_dec.exists() and fp32_dec.exists():
-                fp32_dec.unlink(missing_ok=True)
+            for int8_file in target_dir.rglob("*.int8.onnx"):
+                fp32_sibling = int8_file.with_name(int8_file.name.replace(".int8.onnx", ".onnx"))
+                if fp32_sibling.exists():
+                    fp32_sibling.unlink(missing_ok=True)
 
             if self._resolve_model_files(var) is None:
                 return False, f"Arquivos Whisper inválidos após extração em {target_dir}."
+
+            self.ensure_denoiser_ready(progress_cb=progress_cb)
 
             if progress_cb:
                 progress_cb(f"Whisper {var} pronto para uso offline!", 1.0)
@@ -276,6 +447,82 @@ class OfflineAsrService:
             if extract_tmp.exists():
                 shutil.rmtree(extract_tmp, ignore_errors=True)
 
+    def ensure_denoiser_ready(
+        self,
+        progress_cb: Optional[Callable[[str, float], None]] = None,
+    ) -> Tuple[bool, str]:
+        """Garante o modelo neural GTCRN (~520 KB) para redução de ruído e isolamento vocal."""
+        if self.denoiser_model_path.exists() and self.denoiser_model_path.stat().st_size > 50_000:
+            return True, "Modelo neural de isolamento de voz (GTCRN) pronto."
+        try:
+            self._ensure_sherpa()
+            self.denoiser_dir.mkdir(parents=True, exist_ok=True)
+            tmp_file = self.denoiser_model_path.with_suffix(".onnx.tmp")
+            if progress_cb:
+                progress_cb("Baixando isolador neural de voz (GTCRN ~520 KB)...", 0.92)
+            req = urllib.request.Request(DENOISER_MODEL_URL, headers={"User-Agent": "Escutai/2.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                with open(tmp_file, "wb") as f:
+                    f.write(resp.read())
+            if tmp_file.stat().st_size < 50_000:
+                tmp_file.unlink(missing_ok=True)
+                return False, "Download incompleto do modelo GTCRN."
+            tmp_file.replace(self.denoiser_model_path)
+            return True, "Modelo neural GTCRN pronto."
+        except Exception as e:
+            logger.warning(f"Falha ao baixar modelo GTCRN: {e}")
+            return False, f"GTCRN indisponível: {e}"
+
+    def _ensure_denoiser(self):
+        with self._denoiser_lock:
+            if self._denoiser is not None:
+                return self._denoiser
+            ok, msg = self.ensure_denoiser_ready()
+            if not ok:
+                raise RuntimeError(msg)
+            so = self._ensure_sherpa()
+            threads = min(4, max(2, (os.cpu_count() or 4) // 2))
+            cfg = so.OfflineSpeechDenoiserConfig(
+                model=so.OfflineSpeechDenoiserModelConfig(
+                    gtcrn=so.OfflineSpeechDenoiserGtcrnModelConfig(model=str(self.denoiser_model_path)),
+                    num_threads=threads,
+                    debug=False,
+                    provider="cpu",
+                )
+            )
+            self._denoiser = so.OfflineSpeechDenoiser(cfg)
+            return self._denoiser
+
+    def denoise_and_isolate_voice(
+        self,
+        samples_f32: np.ndarray,
+        sample_rate: int = TARGET_SAMPLE_RATE,
+    ) -> np.ndarray:
+        """Executa isolamento neural GTCRN para separar voz humana de ruído/eco de fundo."""
+        if len(samples_f32) == 0:
+            return samples_f32
+        arr = samples_f32.astype(np.float32)
+        if sample_rate != TARGET_SAMPLE_RATE:
+            pcm_i16 = np.clip(np.round(arr * 32768.0), -32768, 32767).astype(np.int16)
+            arr = _to_float32_mono(resample_to_16k(pcm_i16, sample_rate, TARGET_SAMPLE_RATE))
+
+        try:
+            denoiser = self._ensure_denoiser()
+            max_chunk = 30 * TARGET_SAMPLE_RATE
+            parts: List[np.ndarray] = []
+            with self._denoiser_lock:
+                for pos in range(0, len(arr), max_chunk):
+                    sub = arr[pos : pos + max_chunk]
+                    if len(sub) < 160:
+                        parts.append(sub)
+                        continue
+                    res = denoiser.run(sub, TARGET_SAMPLE_RATE)
+                    parts.append(np.asarray(res.samples, dtype=np.float32))
+            return np.concatenate(parts) if len(parts) > 1 else (parts[0] if parts else arr)
+        except Exception as e:
+            logger.warning(f"Fallback sem denoiser neural GTCRN: {e}")
+            return arr
+
     def _ensure_recognizer(self, variant: Optional[str] = None):
         var = variant if variant in WHISPER_MODELS else self.default_variant
         with self._lock:
@@ -288,7 +535,7 @@ class OfflineAsrService:
 
             so = self._ensure_sherpa()
             enc, dec, tok = files
-            threads = min(4, max(2, os.cpu_count() or 2))
+            threads = min(8, max(4, (os.cpu_count() or 4) - 2))
             self._recognizer = so.OfflineRecognizer.from_whisper(
                 encoder=str(enc),
                 decoder=str(dec),
@@ -302,15 +549,49 @@ class OfflineAsrService:
             return self._recognizer
 
     def _transcribe_samples(self, samples_f32: np.ndarray, variant: Optional[str] = None) -> str:
-        if len(samples_f32) < int(0.25 * TARGET_SAMPLE_RATE):
-            return ""
+        results = self._transcribe_batch_samples([samples_f32], variant=variant)
+        return results[0] if results else ""
+
+    def _transcribe_batch_samples(
+        self,
+        chunks: List[np.ndarray],
+        variant: Optional[str] = None,
+    ) -> List[str]:
+        """Decodifica turnos em lote (`decode_streams`) limitados a <=29,5s cada."""
+        if not chunks:
+            return []
         rec = self._ensure_recognizer(variant)
+        min_len = int(0.25 * TARGET_SAMPLE_RATE)
+        max_len = int(29.5 * TARGET_SAMPLE_RATE)
+        outputs = [""] * len(chunks)
+
+        valid_entries: List[Tuple[int, np.ndarray]] = []
+        for idx, ch in enumerate(chunks):
+            if len(ch) >= min_len:
+                valid_entries.append((idx, ch[:max_len].astype(np.float32)))
+
+        if not valid_entries:
+            return outputs
+
+        batch_size = 6
         with self._lock:
-            stream = rec.create_stream()
-            stream.accept_waveform(TARGET_SAMPLE_RATE, samples_f32.astype(np.float32))
-            rec.decode_stream(stream)
-            raw_txt = getattr(stream.result, "text", "") or ""
-        return _clean_whisper_text(raw_txt)
+            for b_start in range(0, len(valid_entries), batch_size):
+                batch = valid_entries[b_start : b_start + batch_size]
+                streams = []
+                for _orig_idx, wav_arr in batch:
+                    s = rec.create_stream()
+                    s.accept_waveform(TARGET_SAMPLE_RATE, wav_arr)
+                    streams.append(s)
+                if len(streams) > 1 and hasattr(rec, "decode_streams"):
+                    rec.decode_streams(streams)
+                else:
+                    for s in streams:
+                        rec.decode_stream(s)
+                for (orig_idx, _), s in zip(batch, streams):
+                    raw_txt = getattr(s.result, "text", "") or ""
+                    outputs[orig_idx] = _clean_whisper_text(raw_txt)
+
+        return outputs
 
     def _segment_channel(self, mono_f32: np.ndarray, sample_rate: int) -> List[Tuple[float, float, np.ndarray]]:
         """Extrai segmentos de fala (~<=15s) via Silero VAD ou janelas fixas de fallback se VAD indisponível."""
@@ -347,20 +628,114 @@ class OfflineAsrService:
         seg_f32: np.ndarray,
         unknown_clusters: List[Tuple[str, np.ndarray, int]],
     ) -> str:
-        if not self.voiceprint_service or not self.voiceprint_service.vad_model_path.exists():
+        if not self.voiceprint_service:
             return "Participante 1"
         try:
-            if not self.voiceprint_service.embedding_model_path.exists():
-                return "Participante 1"
-            emb = self.voiceprint_service.compute_embedding(seg_f32, TARGET_SAMPLE_RATE)
-            if emb is None:
-                return "Participante 1"
-            raw_lbl = self.voiceprint_service._match_embedding(
-                emb, unknown_clusters, DEFAULT_MATCH_THRESHOLD, DEFAULT_OVERLAP_MARGIN
+            return self.voiceprint_service.identify_speaker_segment(
+                seg_f32, TARGET_SAMPLE_RATE, unknown_clusters=unknown_clusters
             )
-            return raw_lbl.split(" (score ")[0].strip()
         except Exception:
             return "Participante 1"
+
+    @staticmethod
+    def _merge_same_speaker_turns(
+        diarized_segs: List[Tuple[float, float, str, np.ndarray]],
+        max_gap_sec: float = 2.5,
+        max_turn_sec: float = 24.0,
+    ) -> List[Tuple[float, float, str, np.ndarray]]:
+        """Mescla trechos consecutivos do mesmo locutor para decodificação rápida e maior contexto."""
+        if not diarized_segs:
+            return []
+        pad = np.zeros(int(0.14 * TARGET_SAMPLE_RATE), dtype=np.float32)
+        merged: List[Tuple[float, float, str, np.ndarray]] = []
+        for s_t, e_t, spk, seg in diarized_segs:
+            if (
+                merged
+                and merged[-1][2] == spk
+                and (s_t - merged[-1][1]) <= max_gap_sec
+                and (e_t - merged[-1][0]) <= max_turn_sec
+            ):
+                p_s, _p_e, p_spk, p_seg = merged[-1]
+                merged[-1] = (p_s, max(_p_e, e_t), p_spk, np.concatenate([p_seg, pad, seg]))
+            else:
+                merged.append((s_t, e_t, spk, seg))
+        return merged
+
+    def _process_channel_turns(
+        self,
+        chan_f32: np.ndarray,
+        sr: int,
+        block_offset_seconds: float,
+        variant: Optional[str],
+        clusters: List[Tuple[str, np.ndarray, int]],
+        fixed_speaker: Optional[str] = None,
+        context_notes: str = "",
+        enrolled_names: Optional[List[str]] = None,
+        isolate_voice: bool = False,
+        clarify_audio: bool = True,
+        enhancement_mode: str = "clarify_room",
+        strip_voce_suffix: bool = False,
+    ) -> List[Tuple[float, float, str, str]]:
+        """Pipeline dual-branch: VAD+Voiceprint no timbre natural -> restauração/isolamento no ASR."""
+        if len(chan_f32) == 0:
+            return []
+
+        raw_f32 = chan_f32
+        if sr != TARGET_SAMPLE_RATE:
+            pcm_i16 = np.clip(np.round(raw_f32 * 32768.0), -32768, 32767).astype(np.int16)
+            raw_f32 = _to_float32_mono(resample_to_16k(pcm_i16, sr, TARGET_SAMPLE_RATE))
+
+        # Ramo A (timbre natural 16 kHz): VAD + Voiceprint preservam formantes originais dos perfis
+        vad_segs = self._segment_channel(raw_f32, TARGET_SAMPLE_RATE)
+        if not vad_segs:
+            return []
+
+        if fixed_speaker is not None:
+            diarized = [(s_t, e_t, fixed_speaker, seg) for s_t, e_t, seg in vad_segs]
+        elif self.voiceprint_service:
+            diarized = self.voiceprint_service.diarize_speech_segments(
+                vad_segs, TARGET_SAMPLE_RATE, unknown_clusters=clusters
+            )
+        else:
+            diarized = [(s_t, e_t, "Participante 1", seg) for s_t, e_t, seg in vad_segs]
+
+        # Ramo B (ASR restaurado): isolamento neural GTCRN e/ou EQ vocal apenas para decodificação Whisper
+        eff_mode = (
+            enhancement_mode
+            if enhancement_mode in ("none", "light", "clarify_room", "denoise_and_clarify", "neural_voice_isolation")
+            else ("clarify_room" if clarify_audio else "none")
+        )
+        asr_f32 = raw_f32
+        if isolate_voice or eff_mode == "neural_voice_isolation":
+            asr_f32 = self.denoise_and_isolate_voice(asr_f32, TARGET_SAMPLE_RATE)
+        if eff_mode != "none":
+            pcm_i16 = np.clip(np.round(asr_f32 * 32768.0), -32768, 32767).astype(np.int16)
+            asr_f32 = _to_float32_mono(enhance_speech_audio(pcm_i16, TARGET_SAMPLE_RATE, mode=eff_mode))
+
+        diarized_asr: List[Tuple[float, float, str, np.ndarray]] = []
+        for s_t, e_t, spk, raw_seg in diarized:
+            i0 = max(0, int(round(s_t * TARGET_SAMPLE_RATE)))
+            i1 = min(len(asr_f32), int(round(e_t * TARGET_SAMPLE_RATE)))
+            asr_seg = asr_f32[i0:i1] if i1 > i0 else raw_seg
+            diarized_asr.append((s_t, e_t, spk, asr_seg))
+
+        merged = self._merge_same_speaker_turns(diarized_asr)
+        texts = self._transcribe_batch_samples([m[3] for m in merged], variant=variant)
+
+        events: List[Tuple[float, float, str, str]] = []
+        for (s_t, e_t, spk, _seg), raw_txt in zip(merged, texts):
+            if not raw_txt:
+                continue
+            fixed_txt = _apply_glossary_and_phonetic_fixes(
+                raw_txt, context_notes=context_notes, enrolled_names=enrolled_names
+            )
+            if not fixed_txt:
+                continue
+            final_spk = spk
+            if strip_voce_suffix and final_spk.endswith("(Você)"):
+                final_spk = "Willian"
+            events.append((block_offset_seconds + s_t, block_offset_seconds + e_t, final_spk, fixed_txt))
+        return events
 
     def transcribe_wav_block(
         self,
@@ -368,6 +743,11 @@ class OfflineAsrService:
         block_offset_seconds: float = 0.0,
         variant: Optional[str] = None,
         session_unknown_clusters: Optional[List[Tuple[str, np.ndarray, int]]] = None,
+        context_notes: str = "",
+        enrolled_names: Optional[List[str]] = None,
+        isolate_voice: bool = False,
+        clarify_audio: bool = True,
+        enhancement_mode: str = "clarify_room",
     ) -> str:
         """Transcreve um bloco WAV (1ch Mono ou 2ch Estéreo L/R) 100% offline com diarização."""
         wav_path = Path(wav_path)
@@ -382,32 +762,40 @@ class OfflineAsrService:
 
         arr = np.frombuffer(raw, dtype=np.int16)
         clusters = session_unknown_clusters if session_unknown_clusters is not None else []
-        events: List[Tuple[float, float, str, str]] = []  # (start_abs, end_abs, speaker, text)
+        events: List[Tuple[float, float, str, str]] = []
 
         if nchannels >= 2:
             stereo = arr.reshape(-1, nchannels)
             left_f = _to_float32_mono(stereo[:, 0])
             right_f = _to_float32_mono(stereo[:, 1])
 
-            for s_t, e_t, seg in self._segment_channel(right_f, sr):
-                txt = self._transcribe_samples(seg, variant=variant)
-                if txt:
-                    events.append((block_offset_seconds + s_t, block_offset_seconds + e_t, "Willian (Você)", txt))
-
-            for s_t, e_t, seg in self._segment_channel(left_f, sr):
-                txt = self._transcribe_samples(seg, variant=variant)
-                if txt:
-                    spk = self._identify_speaker(seg, clusters)
-                    events.append((block_offset_seconds + s_t, block_offset_seconds + e_t, spk, txt))
+            events.extend(
+                self._process_channel_turns(
+                    right_f, sr, block_offset_seconds, variant, clusters,
+                    fixed_speaker="Willian (Você)", context_notes=context_notes,
+                    enrolled_names=enrolled_names, isolate_voice=isolate_voice,
+                    clarify_audio=clarify_audio, enhancement_mode=enhancement_mode,
+                )
+            )
+            events.extend(
+                self._process_channel_turns(
+                    left_f, sr, block_offset_seconds, variant, clusters,
+                    fixed_speaker=None, context_notes=context_notes,
+                    enrolled_names=enrolled_names, isolate_voice=isolate_voice,
+                    clarify_audio=clarify_audio, enhancement_mode=enhancement_mode,
+                )
+            )
         else:
             mono_f = _to_float32_mono(arr)
-            for s_t, e_t, seg in self._segment_channel(mono_f, sr):
-                txt = self._transcribe_samples(seg, variant=variant)
-                if txt:
-                    spk = self._identify_speaker(seg, clusters)
-                    if spk.endswith("(Você)"):
-                        spk = "Willian"
-                    events.append((block_offset_seconds + s_t, block_offset_seconds + e_t, spk, txt))
+            events.extend(
+                self._process_channel_turns(
+                    mono_f, sr, block_offset_seconds, variant, clusters,
+                    fixed_speaker=None, context_notes=context_notes,
+                    enrolled_names=enrolled_names, isolate_voice=isolate_voice,
+                    clarify_audio=clarify_audio, enhancement_mode=enhancement_mode,
+                    strip_voce_suffix=True,
+                )
+            )
 
         if not events:
             return "*[Silêncio / Sem fala identificada no período]*"
