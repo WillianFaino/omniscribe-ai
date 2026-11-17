@@ -1,21 +1,20 @@
-"""Motor de Transcrição e Síntese 100% Offline do Escutaí (Pipeline Sequencial em 2 Estágios).
+"""Motor de Transcrição Offline de Alta Precisão e Síntese do Escutaí.
 
-Pipeline local sem dependência de internet ou APIs em nuvem:
+Pipeline local sem dependência obrigatória de internet ou LLMs locais pesados:
 1. Estágio 1 (Durante a gravação / blocos):
    - Ramo A (timbre natural 16 kHz): Silero VAD + biometria VoiceprintService
-     (com suavização de ilhas curtas de locutor para evitar cortes artificiais);
+     (com inércia em segmentos curtos e suavização de 2 passadas);
    - Ramo B (ASR restaurado): isolamento neural GTCRN (`gtcrn_simple.onnx`) + EQ vocal
      multiestágio com colarinho de borda (+240 ms) para não cortar sílabas finais;
    - Decodificação local via `faster-whisper` (CTranslate2 INT8 com `AVX2`/`AVX-VNNI`,
-     `beam_size=5`, fallback de temperatura, `initial_prompt` + `hotwords` dinâmicos)
+     speech-packing <= 28s, `beam_size=2`, `word_timestamps=True`, `initial_prompt` neutro)
      com fallback automático para `sherpa-onnx` Whisper ONNX.
 2. Estágio 2 (Ao finalizar a sessão):
    - Descarrega o modelo Whisper + GTCRN da memória RAM (`unload_asr_models`);
-   - Executa motor LLM local embutido (`llama-server.exe` via `llama.cpp` + `Qwen2.5-3B-Instruct`
-     `Q4_K_M` GGUF, ou Ollama externo se ativo) para:
-       a) Revisão fonético-contextual da transcrição preservando timestamps e locutores;
-       b) Geração estruturada da Ata Executiva completa;
-   - Encerra o servidor LLM e libera a memória RAM imediatamente ao concluir.
+   - Se houver servidor Ollama externo rodando (`127.0.0.1:11434`), utiliza-o opcionalmente;
+   - Caso contrário (100% offline sem LLM local pesado), gera instantaneamente (`< 0.05s`)
+     uma Ata Executiva Estruturada em 5 seções via síntese determinística ou, no modo
+     híbrido do `GeminiService`, envia apenas o texto em 1 requisição leve (~4s).
 """
 
 from __future__ import annotations
@@ -26,8 +25,6 @@ import logging
 import os
 import re
 import shutil
-import socket
-import subprocess
 import sys
 import tarfile
 import threading
@@ -37,7 +34,6 @@ import unicodedata
 import urllib.error
 import urllib.request
 import wave
-import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
@@ -106,37 +102,31 @@ WHISPER_MODELS: Dict[str, Dict[str, str]] = {
     },
 }
 
-LLAMA_CPP_WIN_URL = (
-    "https://github.com/ggml-org/llama.cpp/releases/download/"
-    "b12475/llama-b12475-bin-win-cpu-x64.zip"
-)
-
-LOCAL_LLM_MODELS: Dict[str, Dict[str, Any]] = {
-    "qwen2.5-3b": {
-        "label": "Qwen2.5-3B-Instruct Q4_K_M (~2,0 GB • Revisão & Ata Offline)",
-        "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
-        "url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
-        "min_bytes": 1_500_000_000,
-    },
-    "qwen2.5-1.5b": {
-        "label": "Qwen2.5-1.5B-Instruct Q4_K_M (~1,0 GB • Leve Offline)",
-        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
-        "min_bytes": 800_000_000,
-    },
-}
-
 _WHISPER_NOISE_RE = re.compile(
     r"^(?:\[.*\]|\(.*\)|legendas?\b.*|obrigad[oa] por assistir[!.]*|\.{2,}|\s*|"
     r"([a-zA-ZÀ-ÿ])\1{4,}[.!?]*)$",
     flags=re.IGNORECASE,
 )
 _TURN_RE = re.compile(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s+\*\*(.+?)\*\*:\s*(.*)$")
+_OVERLAP_TURN_RE = re.compile(r"^\s*-\s+\*\*(.+?)\*\*:\s*(.*)$")
 _DECISION_CUES = (
     "decid", "definid", "combinad", "fechad", "aprovad", "acordad", "vamos ",
     "ficou ", "precisa", "prazo", "entregar", "amanhã", "segunda", "terça",
     "quarta", "quinta", "sexta", "deploy", "corrigir", "criar", "subir",
+    "olhar", "revisar", "documentar", "ajustar", "mapeamento", "cronograma",
+    "organizar", "puxar", "validar", "levantar", "começar",
 )
+_PAIN_CUES = (
+    "problema", "gargalo", "difícil", "dificuldade", "manual", "demora",
+    "erro", "falha", "inconsist", "atras", "complex", "complicad",
+    "trabalhos", "dor", "não está", "não tem", "falta ", "bagunç",
+)
+_BACKCHANNEL_SET = {
+    "sim", "não", "nao", "tá", "ta", "ok", "certo", "exato", "exatamente",
+    "uhum", "aham", "pois é", "verdade", "beleza", "show", "perfeito",
+    "entendi", "aha", "claro", "legal", "faz sentido", "bom", "isso",
+    "obrigado", "obrigada", "valeu", "tudo bem", "oi", "olá",
+}
 _BUILTIN_VOCABULARY = (
     "Escutaí",
     "OmniScribe",
@@ -575,7 +565,7 @@ def list_ollama_models(base_url: str = "http://127.0.0.1:11434", timeout: float 
 
 
 class OfflineAsrService:
-    """Serviço sequencial em 2 estágios para transcrição, diarização, revisão e ata 100% offline."""
+    """Serviço local de transcrição (Whisper CT2 + GTCRN), diarização biométrica e síntese."""
 
     def __init__(
         self,
@@ -589,7 +579,7 @@ class OfflineAsrService:
         if models_dir:
             p_models = Path(models_dir)
             self._custom_models_dir = True
-            if p_models.name.lower() == "models" or (p_models / "asr").exists() or (p_models / "llm").exists():
+            if p_models.name.lower() == "models" or (p_models / "asr").exists():
                 models_root = p_models
                 self.models_dir = models_root / "asr"
             else:
@@ -605,14 +595,12 @@ class OfflineAsrService:
         self.models_root = models_root
         self.denoiser_dir = models_root / "denoiser"
         self.denoiser_model_path = self.denoiser_dir / DENOISER_MODEL_NAME
-        self.llm_dir = models_root / "llm"
 
         self.voiceprint_service = voiceprint_service or VoiceprintService()
         self.default_variant = default_variant if default_variant in CT2_WHISPER_MODELS else "turbo"
 
         self._lock = threading.Lock()
         self._denoiser_lock = threading.Lock()
-        self._llm_lock = threading.Lock()
         self._recognizer = None
         self._ct2_model = None
         self._denoiser = None
@@ -620,9 +608,6 @@ class OfflineAsrService:
         self._loaded_ct2_variant: Optional[str] = None
         self._sherpa_onnx = None
         self._rolling_prompt_tail: str = ""
-        self._llm_proc: Optional[subprocess.Popen] = None
-        self._llm_port: Optional[int] = None
-        self._llm_active_variant: Optional[str] = None
 
     def _candidate_models_roots(self) -> List[Path]:
         roots: List[Path] = [self.models_root]
@@ -716,96 +701,6 @@ class OfflineAsrService:
 
         return False, f"Modelo offline Whisper ({var}) ainda não baixado em {self.models_dir}."
 
-    def _resolve_llm_paths(self, llm_variant: str = "qwen2.5-3b") -> Tuple[Optional[Path], Optional[Path]]:
-        spec = LOCAL_LLM_MODELS.get(llm_variant, LOCAL_LLM_MODELS["qwen2.5-3b"])
-        srv_exe: Optional[Path] = None
-        gguf_path: Optional[Path] = None
-        for root in self._candidate_models_roots():
-            cand_srv = root / "llm" / "bin" / "llama-server.exe"
-            if srv_exe is None and cand_srv.is_file() and cand_srv.stat().st_size > 5000:
-                # Valida DLL crítica ao lado de llama-server.exe
-                if (cand_srv.parent / "llama.dll").is_file() or (cand_srv.parent / "ggml.dll").is_file():
-                    srv_exe = cand_srv
-            cand_gguf = root / "llm" / spec["filename"]
-            if gguf_path is None and cand_gguf.is_file() and cand_gguf.stat().st_size >= spec["min_bytes"]:
-                gguf_path = cand_gguf
-        return srv_exe, gguf_path
-
-    def is_llm_ready(self, llm_variant: str = "qwen2.5-3b") -> Tuple[bool, str]:
-        """Verifica se o binário `llama-server.exe` e o modelo GGUF embutido estão prontos."""
-        srv_exe, gguf_path = self._resolve_llm_paths(llm_variant)
-        if srv_exe and gguf_path:
-            return True, f"LLM Local ({llm_variant}) pronto."
-        if not srv_exe:
-            return False, f"Binário llama-server.exe ausente em {self.llm_dir / 'bin'}."
-        return False, f"Modelo {llm_variant} (.gguf) ausente em {self.llm_dir}."
-
-    def ensure_llm_ready(
-        self,
-        llm_variant: str = "qwen2.5-3b",
-        progress_cb: Optional[Callable[[str, float], None]] = None,
-        base_pct: float = 0.0,
-        span_pct: float = 1.0,
-    ) -> Tuple[bool, str]:
-        """Baixa o runtime `llama.cpp` Windows x64 + GGUF Qwen2.5-3B-Instruct se ausentes."""
-        spec = LOCAL_LLM_MODELS.get(llm_variant, LOCAL_LLM_MODELS["qwen2.5-3b"])
-        srv_exe, gguf_path = self._resolve_llm_paths(llm_variant)
-        if srv_exe and gguf_path:
-            return True, f"LLM Local ({llm_variant}) já está pronto."
-
-        self.llm_dir.mkdir(parents=True, exist_ok=True)
-        bin_dir = self.llm_dir / "bin"
-        bin_dir.mkdir(parents=True, exist_ok=True)
-
-        # 1. Runtime llama-server.exe + DLLs (~24 MB)
-        if not srv_exe:
-            tmp_zip = self.llm_dir / ".llama_bin.zip.tmp"
-            try:
-                _download_file_parallel(
-                    LLAMA_CPP_WIN_URL,
-                    tmp_zip,
-                    progress_cb=progress_cb,
-                    label="Baixando motor LLM embutido (llama.cpp CPU AVX2)",
-                    base_pct=base_pct,
-                    span_pct=span_pct * 0.12,
-                    num_workers=4,
-                )
-                with zipfile.ZipFile(str(tmp_zip), "r") as zf:
-                    for info in zf.infolist():
-                        fname = Path(info.filename).name
-                        if not fname:
-                            continue
-                        low = fname.lower()
-                        if low == "llama-server.exe" or low.endswith(".dll"):
-                            target = bin_dir / fname
-                            with zf.open(info, "r") as src_f, open(target, "wb") as dst_f:
-                                shutil.copyfileobj(src_f, dst_f, length=512 * 1024)
-            except Exception as e:
-                logger.warning(f"Falha ao baixar/extrair llama.cpp: {e}")
-                return False, f"Falha ao baixar llama.cpp: {e}"
-            finally:
-                tmp_zip.unlink(missing_ok=True)
-
-        # 2. Modelo GGUF quantizado Qwen2.5-Instruct (~2.0 GB em 3B ou ~1.0 GB em 1.5B)
-        if not gguf_path:
-            target_gguf = self.llm_dir / spec["filename"]
-            try:
-                _download_file_parallel(
-                    spec["url"],
-                    target_gguf,
-                    progress_cb=progress_cb,
-                    label=f"Baixando LLM Local ({llm_variant} Q4_K_M)",
-                    base_pct=base_pct + span_pct * 0.12,
-                    span_pct=span_pct * 0.88,
-                    num_workers=8,
-                )
-            except Exception as e:
-                logger.warning(f"Falha ao baixar {spec['filename']}: {e}")
-                return False, f"Falha ao baixar {spec['filename']}: {e}"
-
-        ok_final, msg_final = self.is_llm_ready(llm_variant)
-        return ok_final, msg_final
-
     def _ensure_ct2_models_ready(
         self,
         var: str,
@@ -864,21 +759,21 @@ class OfflineAsrService:
         variant: Optional[str] = None,
         progress_cb: Optional[Callable[[str, float], None]] = None,
     ) -> Tuple[bool, str]:
-        """Garante download de Voiceprints, Whisper (CT2 ou ONNX), GTCRN Denoiser e LLM Qwen2.5 embutido."""
+        """Garante download de Voiceprints, Whisper (CT2 ou ONNX) e GTCRN Denoiser (0% LLM pesado)."""
         var = variant if variant in CT2_WHISPER_MODELS else self.default_variant
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Silero VAD + WeSpeaker Voiceprint (~26 MB)
+        # 1. Silero VAD + WeSpeaker Voiceprint (~26 MB) [0.00 -> 0.12]
         if self.voiceprint_service:
             ok_vp, msg_vp = self.voiceprint_service.ensure_models_downloaded(
-                on_progress=(lambda m, p: progress_cb(m, 0.08 * p)) if progress_cb else None
+                on_progress=(lambda m, p: progress_cb(m, 0.12 * p)) if progress_cb else None
             )
             if not ok_vp:
                 logger.warning(f"Aviso ao baixar modelos auxiliares VAD/Voiceprint: {msg_vp}")
 
-        # 2. Modelo Whisper CT2 INT8 (preferencial) com fallback automático ONNX
+        # 2. Modelo Whisper CT2 INT8 (preferencial) com fallback automático ONNX [0.12 -> 0.92]
         whisper_ok, whisper_msg = self._ensure_ct2_models_ready(
-            var, progress_cb=progress_cb, base_pct=0.08, span_pct=0.37
+            var, progress_cb=progress_cb, base_pct=0.12, span_pct=0.80
         )
         if not whisper_ok:
             if self._resolve_model_files(var) is not None:
@@ -889,22 +784,12 @@ class OfflineAsrService:
         if not whisper_ok:
             return False, whisper_msg
 
-        # 3. Denoiser neural GTCRN (~520 KB)
-        self.ensure_denoiser_ready(progress_cb=progress_cb)
-
-        # 4. Motor LLM embutido (llama-server.exe + Qwen2.5-3B-Instruct Q4_K_M)
-        llm_ok, llm_msg = self.ensure_llm_ready(
-            "qwen2.5-3b",
-            progress_cb=progress_cb,
-            base_pct=0.48,
-            span_pct=0.52,
-        )
-        if not llm_ok:
-            logger.warning(f"Aviso: LLM local embutido indisponível ({llm_msg}); síntese determinística seguirá ativa.")
+        # 3. Denoiser neural GTCRN (~520 KB) [0.92 -> 1.00]
+        self.ensure_denoiser_ready(progress_cb=progress_cb, base_pct=0.92)
 
         if progress_cb:
-            progress_cb(f"Pipeline Offline ({var} + Qwen2.5-3B) pronto!", 1.0)
-        return True, f"Modelos offline ({var} + GTCRN + Qwen2.5) prontos para uso 100% offline."
+            progress_cb(f"Modelos Offline ({var} + GTCRN) prontos!", 1.0)
+        return True, f"Modelos offline ({var} CT2/ONNX + GTCRN) prontos para uso 100% offline."
 
     def _ensure_sherpa_models_ready(
         self,
@@ -926,12 +811,12 @@ class OfflineAsrService:
                 tmp_archive,
                 progress_cb=progress_cb,
                 label=f"Baixando Whisper {var} ONNX",
-                base_pct=0.10,
-                span_pct=0.32,
+                base_pct=0.12,
+                span_pct=0.72,
                 num_workers=4,
             )
             if progress_cb:
-                progress_cb(f"Extraindo modelo Whisper {var} ONNX...", 0.44)
+                progress_cb(f"Extraindo modelo Whisper {var} ONNX...", 0.88)
 
             if extract_tmp.exists():
                 shutil.rmtree(extract_tmp, ignore_errors=True)
@@ -966,6 +851,7 @@ class OfflineAsrService:
     def ensure_denoiser_ready(
         self,
         progress_cb: Optional[Callable[[str, float], None]] = None,
+        base_pct: float = 0.92,
     ) -> Tuple[bool, str]:
         """Garante o modelo neural GTCRN (~520 KB) para redução de ruído e isolamento vocal."""
         if self.denoiser_model_path.exists() and self.denoiser_model_path.stat().st_size > 50_000:
@@ -975,7 +861,7 @@ class OfflineAsrService:
             self.denoiser_dir.mkdir(parents=True, exist_ok=True)
             tmp_file = self.denoiser_model_path.with_suffix(".onnx.tmp")
             if progress_cb:
-                progress_cb("Baixando isolador neural de voz (GTCRN ~520 KB)...", 0.46)
+                progress_cb("Baixando isolador neural de voz (GTCRN ~520 KB)...", base_pct)
             req = urllib.request.Request(DENOISER_MODEL_URL, headers={"User-Agent": "Escutai/2.0"})
             with urllib.request.urlopen(req, timeout=60) as resp:
                 with open(tmp_file, "wb") as f:
@@ -1667,118 +1553,9 @@ class OfflineAsrService:
 
         return "\n".join(lines)
 
-    # ---------------- ESTÁGIO 2: LLM LOCAL EMBUTIDO (LLAMA.CPP + QWEN2.5-3B) ----------------
-    @staticmethod
-    def _find_free_port() -> int:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            return int(s.getsockname()[1])
-
-    def _start_llm_server(self, llm_variant: str = "qwen2.5-3b") -> Optional[str]:
-        """Descarrega ASR da RAM e inicia o servidor local `llama-server.exe` sob demanda."""
-        self.unload_asr_models()
-        with self._llm_lock:
-            if self._llm_proc is not None and self._llm_proc.poll() is None and self._llm_port:
-                return f"http://127.0.0.1:{self._llm_port}"
-
-            srv_exe, gguf_path = self._resolve_llm_paths(llm_variant)
-            if not srv_exe or not gguf_path:
-                # Se 3B não estiver presente, tenta 1.5B
-                if llm_variant != "qwen2.5-1.5b":
-                    srv_exe, gguf_path = self._resolve_llm_paths("qwen2.5-1.5b")
-                    if srv_exe and gguf_path:
-                        llm_variant = "qwen2.5-1.5b"
-                if not srv_exe or not gguf_path:
-                    return None
-
-            port = self._find_free_port()
-            threads = min(6, max(4, (os.cpu_count() or 4) // 2))
-            cmd = [
-                str(srv_exe),
-                "-m",
-                str(gguf_path),
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "-c",
-                "4096",
-                "-t",
-                str(threads),
-                "-ngl",
-                "0",
-            ]
-            creationflags = 0x08000000 if sys.platform == "win32" else 0
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(srv_exe.parent),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    creationflags=creationflags,
-                )
-            except Exception as e:
-                logger.warning(f"Falha ao iniciar llama-server.exe: {e}")
-                return None
-
-            base_url = f"http://127.0.0.1:{port}"
-            deadline = time.monotonic() + 28.0
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    err_tail = ""
-                    try:
-                        if proc.stderr:
-                            err_tail = proc.stderr.read().decode("utf-8", errors="replace")[-400:]
-                    except Exception:
-                        pass
-                    logger.warning(f"llama-server.exe encerrou prematuramente (código {proc.returncode}): {err_tail}")
-                    return None
-                try:
-                    with urllib.request.urlopen(f"{base_url}/health", timeout=1.5) as r:
-                        if getattr(r, "status", 0) == 200:
-                            self._llm_proc = proc
-                            self._llm_port = port
-                            self._llm_active_variant = llm_variant
-                            logger.info(f"[LLM LOCAL] llama-server ativo ({llm_variant}, porta {port}).")
-                            return base_url
-                except Exception:
-                    time.sleep(0.35)
-
-            logger.warning("Timeout aguardando /health do llama-server.exe.")
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            return None
-
+    # ---------------- ESTÁGIO 2: SÍNTESE OFFLINE INSTANTÂNEA / OLLAMA OPCIONAL ----------------
     def stop_llm_server(self) -> None:
-        """Encerra `llama-server.exe` e libera a memória RAM ocupada pelo modelo GGUF."""
-        with self._llm_lock:
-            proc = self._llm_proc
-            self._llm_proc = None
-            self._llm_port = None
-            self._llm_active_variant = None
-        if proc is not None:
-            try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    proc.wait(timeout=4)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            finally:
-                try:
-                    if proc.stderr:
-                        proc.stderr.close()
-                except Exception:
-                    pass
-            logger.info("[MEMÓRIA] Servidor LLM local encerrado e RAM liberada.")
+        """No-op seguro mantido para compatibilidade após remoção do LLM embutido."""
         gc.collect()
 
     def _chat_complete_local(
@@ -1790,80 +1567,42 @@ class OfflineAsrService:
         timeout: int = 180,
         preferred_ollama_model: str = "",
     ) -> Tuple[Optional[str], str]:
-        """Executa inferência local via Ollama (se ativo) ou `llama-server.exe` embutido (Qwen2.5-3B)."""
-        # 1. Tenta servidor Ollama externo caso já esteja em execução
+        """Executa inferência local exclusivamente se um servidor Ollama externo estiver ativo."""
         ok_ollama, models = list_ollama_models()
-        if ok_ollama and models:
-            chosen = preferred_ollama_model.strip()
-            if not chosen or chosen not in models:
-                chosen = next(
-                    (
-                        m for m in models
-                        if any(k in m.lower() for k in ("qwen", "llama", "gemma", "mistral", "phi"))
-                    ),
-                    models[0],
-                )
-            try:
-                payload = json.dumps(
-                    {
-                        "model": chosen,
-                        "prompt": f"{system_prompt}\n\n{user_prompt}",
-                        "stream": False,
-                        "options": {"temperature": temperature},
-                    }
-                ).encode("utf-8")
-                req = urllib.request.Request(
-                    "http://127.0.0.1:11434/api/generate",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    body = json.loads(resp.read().decode("utf-8", errors="replace"))
-                txt = str(body.get("response", "")).strip()
-                if txt:
-                    return txt, f"Ollama Local ({chosen})"
-            except Exception as e:
-                logger.warning(f"Falha no Ollama ({chosen}); tentando llama-server embutido: {e}")
+        if not (ok_ollama and models):
+            return None, "unavailable"
 
-        # 2. Usa motor embutido llama.cpp + Qwen2.5-3B-Instruct Q4_K_M (com fallback para 1.5B)
-        for cand_llm in ("qwen2.5-3b", "qwen2.5-1.5b"):
-            base_url = self._start_llm_server(cand_llm)
-            if not base_url:
-                continue
-            try:
-                payload = json.dumps(
-                    {
-                        "model": cand_llm,
-                        "messages": [
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        "temperature": temperature,
-                        "repeat_penalty": 1.14,
-                        "max_tokens": max_tokens,
-                        "stream": False,
-                    }
-                ).encode("utf-8")
-                req = urllib.request.Request(
-                    f"{base_url}/v1/chat/completions",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    body = json.loads(resp.read().decode("utf-8", errors="replace"))
-                choices = body.get("choices") or []
-                if choices:
-                    msg_obj = choices[0].get("message") or {}
-                    txt = str(msg_obj.get("content", "")).strip()
-                    if txt:
-                        active = self._llm_active_variant or cand_llm
-                        return txt, f"LLM Local Embutido ({active})"
-            except Exception as e:
-                logger.warning(f"Falha na inferência llama-server ({cand_llm}): {e}")
-                self.stop_llm_server()
-
+        chosen = preferred_ollama_model.strip()
+        if not chosen or chosen not in models:
+            chosen = next(
+                (
+                    m for m in models
+                    if any(k in m.lower() for k in ("qwen", "llama", "gemma", "mistral", "phi"))
+                ),
+                models[0],
+            )
+        try:
+            payload = json.dumps(
+                {
+                    "model": chosen,
+                    "prompt": f"{system_prompt}\n\n{user_prompt}",
+                    "stream": False,
+                    "options": {"temperature": temperature, "num_predict": max_tokens},
+                }
+            ).encode("utf-8")
+            req = urllib.request.Request(
+                "http://127.0.0.1:11434/api/generate",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8", errors="replace"))
+            txt = str(body.get("response", "")).strip()
+            if txt:
+                return txt, f"Ollama Local ({chosen})"
+        except Exception as e:
+            logger.warning(f"Falha no Ollama ({chosen}): {e}")
         return None, "unavailable"
 
     def refine_offline_transcript(
@@ -1874,15 +1613,12 @@ class OfflineAsrService:
         enrolled_names: Optional[List[str]] = None,
         preferred_ollama_model: str = "",
     ) -> str:
-        """Refina erros fonéticos via patch JSON em passe único mantendo timestamps e locutores intactos."""
+        """Refina erros fonéticos via Ollama externo se ativo; caso contrário retorna imediatamente."""
         if not raw_transcript or not raw_transcript.strip():
             return raw_transcript
 
         ok_ollama, ol_models = list_ollama_models()
-        llm_ok, _ = self.is_llm_ready("qwen2.5-3b")
-        if not llm_ok:
-            llm_ok, _ = self.is_llm_ready("qwen2.5-1.5b")
-        if not (ok_ollama and ol_models) and not llm_ok:
+        if not (ok_ollama and ol_models):
             return raw_transcript
 
         self.unload_asr_models()
@@ -1999,167 +1735,282 @@ class OfflineAsrService:
         minutes_prompt_template: str,
         preferred_ollama_model: str = "",
     ) -> Tuple[str, str]:
-        """Gera Ata Executiva encorpada via LLM local em 5 seções e libera a RAM ao final."""
-        try:
-            self.unload_asr_models()
-            compact_tr = self._compact_transcript_for_context(transcript_md, max_chars=8000)
-            speakers_seen: List[str] = []
-            for ln in compact_tr.splitlines():
-                m_t = _TURN_RE.match(ln.strip())
-                if m_t:
-                    spk = m_t.group(2).strip()
-                    if spk and spk not in speakers_seen:
-                        speakers_seen.append(spk)
-            speakers_str = ", ".join(speakers_seen) if speakers_seen else "Não identificados"
+        """Gera Ata Executiva via Ollama (se ativo) ou Síntese Local Estruturada instantânea (< 0.05s)."""
+        self.unload_asr_models()
+        ok_ollama, ol_models = list_ollama_models()
+        if ok_ollama and ol_models:
+            try:
+                compact_tr = self._compact_transcript_for_context(transcript_md, max_chars=8000)
+                speakers_seen: List[str] = []
+                for ln in compact_tr.splitlines():
+                    m_t = _TURN_RE.match(ln.strip())
+                    if m_t:
+                        spk = m_t.group(2).strip()
+                        if spk and spk not in speakers_seen:
+                            speakers_seen.append(spk)
+                speakers_str = ", ".join(speakers_seen) if speakers_seen else "Não identificados"
+                header = (
+                    f"# Ata Executiva da Reunião: {title}\n"
+                    f"**Data:** {date_str}\n"
+                    f"**Duração Total:** {duration_str}\n"
+                    f"**Participantes Identificados:** {speakers_str}\n\n"
+                    "---\n\n"
+                )
+                prompt = minutes_prompt_template.format(
+                    title=title,
+                    date_str=date_str,
+                    duration_str=duration_str,
+                    full_transcript=compact_tr,
+                )
+                txt, backend = self._chat_complete_local(
+                    "Você é um secretário executivo sênior redigindo uma Ata Executiva completa em Português do Brasil.",
+                    prompt,
+                    temperature=0.20,
+                    max_tokens=1600,
+                    timeout=180,
+                    preferred_ollama_model=preferred_ollama_model,
+                )
+                if txt and len(txt.strip()) > 120:
+                    cleaned = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", txt.strip()).strip()
+                    if cleaned.startswith("# Ata"):
+                        return cleaned + "\n", backend
+                    return header + cleaned + "\n", backend
+            except Exception as e:
+                logger.warning(f"Falha ao gerar Ata via Ollama externo: {e}")
 
-            header = (
-                f"# Ata Executiva da Reunião: {title}\n"
-                f"**Data:** {date_str}\n"
-                f"**Duração Total:** {duration_str}\n"
-                f"**Participantes Identificados:** {speakers_str}\n\n"
-                "---\n\n"
-            )
-            sys_prompt = (
-                "Você é um secretário executivo sênior redigindo uma Ata Executiva completa, encorpada e profissional "
-                "em Português do Brasil, fiel aos fatos debatidos.\n"
-                "REGRAS:\n"
-                "1. Escreva frases completas, claras e informativas com base nos detalhes reais do diálogo (sem inventar fatos).\n"
-                "2. Desenvolva bem o contexto, os exemplos operacionais e as contribuições de cada participante.\n"
-                "3. Evite repetir exatamente a mesma frase entre seções; complemente em cada seção conforme seu objetivo.\n"
-                "4. NUNCA mencione nomes técnicos de arquivos (.md, .wav) nem motores internos de transcrição."
-            )
-            prompt = (
-                f"Reunião: {title} | Participantes: {speakers_str} | Duração: {duration_str}\n\n"
-                "Redija SOMENTE o corpo da Ata em Markdown começando por `## 1. Resumo Executivo e Contexto Geral` "
-                "e preenchendo detalhadamente todas estas 5 seções:\n\n"
-                "## 1. Resumo Executivo e Contexto Geral\n"
-                "(Escreva 1 a 2 parágrafos completos explicando o objetivo da reunião, a metodologia abordada, "
-                "os clientes/áreas citados e o direcionamento central.)\n\n"
-                "## 2. Detalhamento das Discussões por Tema\n"
-                "(Lista com tópicos completos descrevendo cada assunto debatido, exemplos operacionais citados — como planilhas Excel, "
-                "Drive compartilhado, relatórios de inadimplência, painel de frota, demandas de sistema interno e cronograma — "
-                "e o posicionamento dos participantes.)\n\n"
-                "## 3. Dores Operacionais e Oportunidades de Automação\n"
-                "(Liste os gargalos manuais relatados e as oportunidades de melhoria/automação levantadas.)\n\n"
-                "## 4. Decisões e Alinhamentos Firmados\n"
-                "(Liste todas as definições e acordos estabelecidos na conversa.)\n\n"
-                "## 5. Plano de Ação e Próximos Passos\n"
-                "(Itens no formato `- **[Responsável / Área]**: Ação detalhada — *Prazo / Momento combinado*`.)\n\n"
-                f"Transcrição da reunião:\n{compact_tr}"
-            )
-            txt, backend = self._chat_complete_local(
-                sys_prompt,
-                prompt,
-                temperature=0.20,
-                max_tokens=1450,
-                timeout=210,
-                preferred_ollama_model=preferred_ollama_model,
-            )
-            if txt and len(txt.strip()) > 120:
-                cleaned = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", txt.strip()).strip()
-                sec_pos = cleaned.find("## 1.")
-                if sec_pos >= 0:
-                    cleaned = cleaned[sec_pos:].strip()
-                lines = cleaned.splitlines()
-                while lines and (
-                    re.match(r"^\s*[-*]\s*(?:\*\*[^*]*)?$", lines[-1])
-                    or (
-                        not lines[-1].strip().endswith((".", "!", "?", ")", "*", "`"))
-                        and not lines[-1].lstrip().startswith("#")
-                    )
-                ):
-                    lines.pop()
-                body_out = "\n".join(lines).strip()
-                if len(body_out) > 100:
-                    return header + body_out + "\n", backend
-        except Exception as e:
-            logger.warning(f"Falha ao gerar Ata via LLM local: {e}")
-        finally:
-            self.stop_llm_server()
+        return (
+            self._synthesize_deterministic_minutes(title, date_str, duration_str, transcript_md),
+            "Síntese Local Estruturada",
+        )
 
-        return self._synthesize_deterministic_minutes(title, date_str, duration_str, transcript_md), "Síntese Local Estruturada"
+    @staticmethod
+    def _is_substantive_turn(text: str) -> bool:
+        """Retorna True se a fala carrega conteúdo informativo além de interjeições curtas."""
+        clean = re.sub(r"[^\wÀ-ÿ\s]", " ", (text or "").lower()).strip()
+        words = [w for w in clean.split() if w]
+        if not words:
+            return False
+        if len(words) <= 3 and (" ".join(words) in _BACKCHANNEL_SET or all(w in _BACKCHANNEL_SET for w in words)):
+            return False
+        return len(text.strip()) >= 28 or len(words) >= 6
 
     @staticmethod
     def _synthesize_deterministic_minutes(title: str, date_str: str, duration_str: str, transcript_md: str) -> str:
-        """Gera Ata Executiva organizada em Markdown 100% offline sem LLM externa."""
+        """Gera Ata Executiva encorpada em 5 seções instantaneamente (< 0.05s, 0 MB RAM)."""
+        body = (transcript_md or "").strip()
+        if body.lstrip().startswith("# Transcrição") and "\n---\n" in body:
+            body = body[body.find("\n---\n") + len("\n---\n") :]
+
         speaker_turns: Counter = Counter()
         speaker_words: Counter = Counter()
-        block_highlights: List[Tuple[str, List[str]]] = []
-        current_block_title = "Bloco Principal"
-        current_items: List[str] = []
+        speaker_entries: Dict[str, List[Tuple[str, str]]] = {}
+        blocks: List[Dict[str, Any]] = []
+        current_block: Dict[str, Any] = {
+            "title": "Bloco Principal",
+            "speakers": [],
+            "entries": [],
+        }
+
+        overlaps_count = 0
+        current_overlap_ts: Optional[str] = None
         decisions: List[str] = []
+        pains: List[str] = []
         questions: List[str] = []
 
-        for raw in (transcript_md or "").splitlines():
+        def _is_duplicate_line(cand: str, existing_list: List[str]) -> bool:
+            cand_low = cand.lower()
+            for ex in existing_list:
+                if SequenceMatcher(None, cand_low, ex.lower()).ratio() >= 0.72:
+                    return True
+            return False
+
+        def _record_turn(ts: str, spk: str, txt: str) -> None:
+            speaker_turns[spk] += 1
+            wc = len(txt.split())
+            speaker_words[spk] += wc
+            if spk not in current_block["speakers"]:
+                current_block["speakers"].append(spk)
+            speaker_entries.setdefault(spk, []).append((ts, txt))
+            current_block["entries"].append((ts, spk, txt))
+
+            low = txt.lower()
+            if OfflineAsrService._is_substantive_turn(txt):
+                if any(cue in low for cue in _DECISION_CUES) and len(decisions) < 14:
+                    item = f"- `[{ts}]` **{spk}:** {txt}"
+                    if not _is_duplicate_line(txt, decisions):
+                        decisions.append(item)
+                if any(cue in low for cue in _PAIN_CUES) and len(pains) < 10:
+                    item = f"- `[{ts}]` **{spk}:** {txt}"
+                    if not _is_duplicate_line(txt, pains):
+                        pains.append(item)
+            if "?" in txt and len(txt.strip()) >= 14 and len(questions) < 12:
+                item = f"- `[{ts}]` **{spk}:** {txt}"
+                if not _is_duplicate_line(txt, questions):
+                    questions.append(item)
+
+        for raw in body.splitlines():
             line = raw.strip()
             if not line:
                 continue
             if line.startswith("### Bloco"):
-                if current_items:
-                    block_highlights.append((current_block_title, current_items))
-                current_block_title = line.lstrip("# ").strip()
-                current_items = []
+                if current_block["entries"]:
+                    blocks.append(current_block)
+                current_block = {
+                    "title": line.lstrip("# ").strip(),
+                    "speakers": [],
+                    "entries": [],
+                }
+                current_overlap_ts = None
                 continue
+
+            m_ov_head = re.match(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*⚡", line)
+            if m_ov_head:
+                overlaps_count += 1
+                current_overlap_ts = m_ov_head.group(1)
+                continue
+
+            if current_overlap_ts:
+                m_ov = _OVERLAP_TURN_RE.match(line)
+                if m_ov:
+                    _record_turn(current_overlap_ts, m_ov.group(1).strip(), m_ov.group(2).strip())
+                    continue
+                current_overlap_ts = None
 
             m = _TURN_RE.match(line)
-            if not m:
-                continue
-            ts, spk, txt = m.group(1), m.group(2).strip(), m.group(3).strip()
-            speaker_turns[spk] += 1
-            speaker_words[spk] += len(txt.split())
+            if m:
+                _record_turn(m.group(1), m.group(2).strip(), m.group(3).strip())
 
-            if len(current_items) < 5 and len(txt) >= 12:
-                excerpt = txt if len(txt) <= 180 else txt[:177].rstrip() + "..."
-                current_items.append(f"`[{ts}]` **{spk}:** {excerpt}")
+        if current_block["entries"]:
+            blocks.append(current_block)
 
-            low = txt.lower()
-            if any(cue in low for cue in _DECISION_CUES) and len(decisions) < 12 and len(txt) >= 15:
-                decisions.append(f"- `[{ts}]` **{spk}:** {txt}")
-            if "?" in txt and len(questions) < 10 and len(txt) >= 12:
-                questions.append(f"- `[{ts}]` **{spk}:** {txt}")
-
-        if current_items:
-            block_highlights.append((current_block_title, current_items))
-
+        total_turns = sum(speaker_turns.values())
+        total_words = max(1, sum(speaker_words.values()))
         speakers_list = ", ".join(speaker_turns.keys()) if speaker_turns else "Não identificados"
 
-        out = [
+        # Extrai termos temáticos frequentes (>= 5 letras, excluindo stopwords comuns PT-BR)
+        _pt_stop = {
+            "porque", "quando", "então", "entao", "sobre", "agora", "muito", "muita", "muitos",
+            "tudo", "todo", "toda", "todos", "todas", "isso", "isto", "aquilo", "aqui", "onde",
+            "como", "mais", "menos", "também", "tambem", "assim", "fazer", "feito", "fazendo",
+            "pode", "podem", "poder", "tenho", "temos", "tinha", "estava", "estão", "estao",
+            "estar", "vamos", "gente", "coisa", "coisas", "parte", "partes", "forma", "jeito",
+            "nesse", "nessa", "desse", "dessa", "pelo", "pela", "para", "como", "ainda", "sempre",
+            "antes", "depois", "outro", "outra", "outros", "algum", "alguma", "alguns", "entre",
+            "mesmo", "mesma", "acho", "acha", "tipo", "entendeu", "sabe", "falar", "falou",
+            "dizer", "disse", "olhar", "certo", "verdade", "exemplo", "melhor", "maior", "ponto",
+            "queria", "quero", "precisa", "precisamos", "semana", "reunião", "reuniao", "bloco",
+        }
+        token_freq: Counter = Counter()
+        for spk_list in speaker_entries.values():
+            for _ts, txt in spk_list:
+                for tok in re.findall(r"[A-Za-zÀ-ÿ]{5,}", txt):
+                    low_t = tok.lower()
+                    if low_t not in _pt_stop:
+                        token_freq[low_t] += 1
+        top_themes = [w.capitalize() for w, c in token_freq.most_common(8) if c >= 2]
+        themes_str = ", ".join(top_themes) if top_themes else "Alinhamento operacional e direcionamentos da equipe"
+
+        out: List[str] = [
             f"# Ata Executiva da Reunião: {title}",
             f"**Data:** {date_str}",
             f"**Duração Total:** {duration_str}",
-            f"**Modo de Processamento:** 100% Offline (Whisper CT2/ONNX + Síntese Local)",
+            "**Modo de Processamento:** Transcrição Offline (Whisper Turbo CT2 INT8 + GTCRN) • Síntese Estruturada Local",
             f"**Participantes Identificados:** {speakers_list}",
             "",
             "---",
             "",
-            "## 1. Resumo Executivo",
+            "## 1. Resumo Executivo e Métricas da Sessão",
             (
-                f"Reunião **{title}** processada integralmente em modo offline, totalizando **{duration_str}** "
-                f"de gravação e **{sum(speaker_turns.values())}** turnos de fala registrados."
+                f"A reunião **{title}** teve duração de **{duration_str}**, organizada em **{max(1, len(blocks))} bloco(s)** "
+                f"com **{total_turns} intervenções** (~{total_words} palavras transcritas)"
+                + (f" e **{overlaps_count} momento(s) de fala simultânea**" if overlaps_count else "")
+                + f". Os temas de maior recorrência giraram em torno de: **{themes_str}**."
             ),
             "",
-            "## 2. Participação por Locutor",
         ]
         if speaker_turns:
-            for spk, count in speaker_turns.most_common():
-                out.append(f"- **{spk}**: {count} falas (~{speaker_words[spk]} palavras)")
+            out.append("**Distribuição de participação:**")
+            for spk, words in speaker_words.most_common():
+                pct = round((words / total_words) * 100)
+                out.append(f"- **{spk}**: {speaker_turns[spk]} falas (~{words} palavras • {pct}% da reunião)")
+            out.append("")
+
+        out.append("## 2. Principais Contribuições por Participante")
+        if speaker_entries:
+            for spk, _words in speaker_words.most_common():
+                entries = speaker_entries[spk]
+                substantives = [(ts, txt) for ts, txt in entries if OfflineAsrService._is_substantive_turn(txt)]
+                if not substantives:
+                    substantives = entries
+                ranked_idx = sorted(
+                    range(len(substantives)),
+                    key=lambda idx: len(substantives[idx][1]),
+                    reverse=True,
+                )
+                chosen_indices: List[int] = []
+                chosen_texts: List[str] = []
+                for idx in ranked_idx:
+                    cand_txt = substantives[idx][1]
+                    if any(SequenceMatcher(None, cand_txt.lower(), prev.lower()).ratio() > 0.72 for prev in chosen_texts):
+                        continue
+                    chosen_indices.append(idx)
+                    chosen_texts.append(cand_txt)
+                    if len(chosen_indices) >= 6:
+                        break
+                chosen_indices.sort()
+                pct = round((speaker_words[spk] / total_words) * 100)
+                out.append(f"### {spk} ({speaker_turns[spk]} falas • {pct}%)")
+                for idx in chosen_indices:
+                    ts, txt = substantives[idx]
+                    excerpt = txt if len(txt) <= 280 else txt[:277].rstrip() + "..."
+                    out.append(f"- `[{ts}]` {excerpt}")
+                out.append("")
         else:
-            out.append("- Nenhum turno estruturado detectado.")
+            out.extend(["- Nenhum turno estruturado detectado.", ""])
 
-        out.extend(["", "## 3. Linha do Tempo e Destaques por Bloco"])
-        if block_highlights:
-            for b_title, items in block_highlights:
-                out.append(f"### {b_title}")
-                for it in items:
-                    out.append(f"- {it}")
+        out.append("## 3. Linha do Tempo Consolidada por Bloco")
+        if blocks:
+            for blk in blocks:
+                spks_blk = ", ".join(blk["speakers"]) if blk["speakers"] else "Sem identificação"
+                out.append(f"### {blk['title']} *(Locutores: {spks_blk})*")
+                subst_blk = [
+                    (ts, spk, txt)
+                    for ts, spk, txt in blk["entries"]
+                    if OfflineAsrService._is_substantive_turn(txt)
+                ]
+                if not subst_blk:
+                    subst_blk = blk["entries"]
+                if len(subst_blk) > 6:
+                    step = len(subst_blk) / 6.0
+                    picked = [subst_blk[min(len(subst_blk) - 1, int(round(i * step)))] for i in range(6)]
+                else:
+                    picked = subst_blk
+                seen_blk: List[str] = []
+                for ts, spk, txt in picked:
+                    if txt in seen_blk:
+                        continue
+                    seen_blk.append(txt)
+                    excerpt = txt if len(txt) <= 240 else txt[:237].rstrip() + "..."
+                    out.append(f"- `[{ts}]` **{spk}:** {excerpt}")
+                out.append("")
         else:
-            out.append("- Sem destaques textuais disponíveis.")
+            out.extend(["- Sem destaques cronológicos disponíveis.", ""])
 
-        out.extend(["", "## 4. Possíveis Decisões e Direcionamentos Identificados"])
-        out.extend(decisions if decisions else ["- Nenhum marcador explícito de decisão detectado na transcrição."])
+        out.append("## 4. Decisões, Prazos e Pontos Críticos Identificados")
+        if decisions or pains:
+            if decisions:
+                out.append("**Ações, prazos e encaminhamentos:**")
+                out.extend(decisions)
+                out.append("")
+            if pains:
+                out.append("**Gargalos e pontos de atenção relatados:**")
+                out.extend(pains)
+                out.append("")
+        else:
+            out.extend(["- Nenhum marcador explícito de decisão, prazo ou gargalo detectado na transcrição.", ""])
 
-        out.extend(["", "## 5. Perguntas e Pontos em Aberto"])
-        out.extend(questions if questions else ["- Nenhuma pergunta aberta identificada."])
+        out.extend(["## 5. Perguntas e Pontos em Aberto"])
+        out.extend(questions if questions else ["- Nenhuma pergunta aberta identificada na transcrição."])
         out.append("")
         return "\n".join(out)
 

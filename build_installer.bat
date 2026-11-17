@@ -43,7 +43,7 @@ if exist ".env" copy /Y ".env" "dist\Escutai\.env" >nul
 
 :build_setup
 echo.
-echo [2/3] Preparando modelos locais (Voiceprints + Whisper Turbo CT2 + Qwen2.5)...
+echo [2/3] Preparando modelos locais (Voiceprints + Whisper Turbo CT2 + GTCRN)...
 python src/offline_asr_service.py --prepare turbo
 if %errorlevel% neq 0 (
     echo [AVISO] Falha ao baixar modelos offline agora; o app fara o download sob demanda no primeiro uso.
@@ -59,10 +59,6 @@ if exist "models\denoiser" (
 if exist "models\asr\faster-whisper-large-v3-turbo-int8" (
     if not exist "dist\Escutai\models\asr\faster-whisper-large-v3-turbo-int8" mkdir "dist\Escutai\models\asr\faster-whisper-large-v3-turbo-int8"
     xcopy /E /I /Y "models\asr\faster-whisper-large-v3-turbo-int8" "dist\Escutai\models\asr\faster-whisper-large-v3-turbo-int8" >nul
-)
-if exist "models\llm\bin" (
-    if not exist "dist\Escutai\models\llm\bin" mkdir "dist\Escutai\models\llm\bin"
-    xcopy /E /I /Y "models\llm\bin" "dist\Escutai\models\llm\bin" >nul
 )
 
 echo.

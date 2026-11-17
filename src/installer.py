@@ -257,8 +257,8 @@ class InstallerApp(ctk.CTk):
             text=(
                 "O Escutaí realiza transcrição incremental e gera Atas Executivas automáticas\n"
                 "para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n"
-                "Motor Híbrido: Nuvem (Gemini 2.5) ou 100% Offline (Whisper Turbo CT2 + Qwen2.5-3B),\n"
-                "Voiceprints, Isolamento Neural GTCRN, Diagnóstico Acústico e mascote 3D Vozito."
+                "Motor Híbrido: Nuvem (Gemini 2.5) ou Offline (Whisper Turbo CT2 INT8 + GTCRN),\n"
+                "Voiceprints, Ata Híbrida/Local instantânea, Diagnóstico Acústico e mascote 3D Vozito."
             ),
             font=ctk.CTkFont(size=13),
             text_color="#9ca3af",

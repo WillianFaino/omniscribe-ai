@@ -332,8 +332,8 @@ namespace EscutaiSetup
                 "O Escutaí realiza transcrição incremental e gera Atas Executivas automáticas\n" +
                 "para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n" +
                 "Recursos incluídos nesta versão:\n" +
-                "  - Motor Híbrido: Nuvem (Gemini 2.5) ou 100% Offline (Whisper Turbo CT2 + Qwen2.5-3B)\n" +
-                "  - Biometria multi-voz (Voiceprints) + Isolamento Neural de Voz (GTCRN)\n" +
+                "  - Motor Híbrido: Nuvem (Gemini 2.5) ou Offline (Whisper Turbo CT2 INT8 + GTCRN)\n" +
+                "  - Biometria multi-voz (Voiceprints) + Ata Híbrida (1 req texto) / Síntese Local\n" +
                 "  - Diagnóstico acústico, pacotes portáteis (.escutai) e assistente 3D Vozito";
             desc.Font = new Font("Segoe UI", 9.2f);
             desc.ForeColor = TextMuted;
