@@ -1,4 +1,4 @@
-"""Motor de renderizacao 3D Ultra Low-Poly estilo Windows 95 para o mascote OmniMic.
+"""Motor de renderizacao 3D Ultra Low-Poly estilo Windows 95 para o mascote Vozito (ex-OmniMic).
 
 Modela e rasteriza em tempo real a malha 3D do microfone radialista #03-A Ultra Low-Poly
 usando apenas NumPy e Pillow (sem dependencias externas pesadas), preservando o visual
@@ -242,7 +242,7 @@ class Mesh3D:
 
 
 class OmniMic3DRenderer:
-    """Renderiza o OmniMic #03-A atualizado (sprites Blender PS1 Bayer 4x4 + fallback procedural)."""
+    """Renderiza o Vozito #03-A atualizado (sprites Blender PS1 Bayer 4x4 + fallback procedural)."""
 
     def __init__(self) -> None:
         self._sprite_frames: Dict[str, List[Image.Image]] = {}
@@ -681,3 +681,6 @@ class OmniMic3DRenderer:
 
         # Amplia 2x com NEAREST para preservar bordas serrilhadas de sprite Win95
         return img.resize((DISPLAY_W, DISPLAY_H), Image.Resampling.NEAREST)
+
+
+Vozito3DRenderer = OmniMic3DRenderer

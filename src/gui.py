@@ -130,7 +130,7 @@ class RetranscribeModal(ctk.CTkToplevel):
         self.wav_path = Path(wav_path).resolve()
         self.wav_info = get_wav_info(self.wav_path)
 
-        self.title("Re-transcrever Áudio Salvo - OmniScribe AI")
+        self.title("Re-transcrever Áudio Salvo - Escutaí")
         self.geometry("580x475")
         self.minsize(560, 460)
         self.resizable(True, False)
@@ -274,7 +274,7 @@ class VoiceProfilesModal(ctk.CTkToplevel):
     """Modal para gerenciar modelos ONNX locais e cadastrar voiceprints (Microfone ou WAV salvo)."""
 
     CALIBRATION_PHRASES = [
-        "Olá, aqui é {name} cadastrando minha voz no OmniScribe AI para reuniões.",
+        "Olá, aqui é {name} cadastrando minha voz no Escutaí para reuniões.",
         "Hoje vamos alinhar os indicadores de BI, entregas do sprint e próximos passos.",
         "Mesmo quando várias pessoas falam na sala, o sistema diferencia cada timbre vocal.",
     ]
@@ -287,7 +287,7 @@ class VoiceProfilesModal(ctk.CTkToplevel):
         self.is_busy = False
         self.selected_wav_path: Optional[Path] = None
 
-        self.title("Perfis Biométricos de Voz (Voiceprints) - OmniScribe AI")
+        self.title("Perfis Biométricos de Voz (Voiceprints) - Escutaí")
         self.geometry("760x660")
         self.minsize(680, 580)
         self.configure(fg_color=THEME_BG)
@@ -998,7 +998,7 @@ class UsageModal(ctk.CTkToplevel):
         super().__init__(parent)
         self.parent = parent
 
-        self.title("Consumo & Cotas da API - OmniScribe AI")
+        self.title("Consumo & Cotas da API - Escutaí")
         self.geometry("580x500")
         self.resizable(False, False)
         self.configure(fg_color=THEME_BG)
@@ -1121,7 +1121,7 @@ def render_history_cards_into(
     search_query: str = "",
     on_empty_action=None,
 ) -> None:
-    """Popula um container rolável com cartões de pacotes .omniscribe, .wav, atas e transcrições."""
+    """Popula um container rolável com cartões de pacotes .escutai/.omniscribe, .wav, atas e transcrições."""
     for child in scroll_container.winfo_children():
         child.destroy()
 
@@ -1131,7 +1131,7 @@ def render_history_cards_into(
         empty_box.pack(pady=44)
         ctk.CTkLabel(
             empty_box,
-            text="Nenhuma ata ou gravação salva ainda.\nInicie uma gravação ou importe um pacote .omniscribe.",
+            text="Nenhuma ata ou gravação salva ainda.\nInicie uma gravação ou importe um pacote .escutai.",
             font=ctk.CTkFont(size=13),
             text_color=THEME_TEXT_MUTED,
             justify="center",
@@ -1148,9 +1148,9 @@ def render_history_cards_into(
             ).pack()
         return
 
-    patterns = ("**/*.omniscribe", "**/*.md", "**/*.wav")
-    if ".omniscribe" in filter_mode or "Pacote" in filter_mode:
-        patterns = ("**/*.omniscribe",)
+    patterns = ("**/*.escutai", "**/*.omniscribe", "**/*.md", "**/*.wav")
+    if ".escutai" in filter_mode or ".omniscribe" in filter_mode or "Pacote" in filter_mode:
+        patterns = ("**/*.escutai", "**/*.omniscribe")
     elif "Áudios" in filter_mode:
         patterns = ("**/*.wav",)
     elif "Atas" in filter_mode or "Transcrições" in filter_mode:
@@ -1185,7 +1185,7 @@ def render_history_cards_into(
     for file_path in files:
         filename = file_path.name
         ext = file_path.suffix.lower()
-        is_archive = ext == ".omniscribe"
+        is_archive = ext in (".escutai", ".omniscribe")
         is_wav = ext == ".wav"
         is_ata = "ata_executiva" in filename
         is_transc = "transcricao" in filename
@@ -1362,7 +1362,7 @@ class HistoryModal(ctk.CTkToplevel):
         super().__init__(parent)
         self.parent = parent
 
-        self.title("Histórico de Reuniões & Atas - OmniScribe AI")
+        self.title("Histórico de Reuniões & Atas - Escutaí")
         self.geometry("740x540")
         self.minsize(620, 420)
         self.configure(fg_color=THEME_BG)
@@ -1447,11 +1447,11 @@ class HistoryModal(ctk.CTkToplevel):
         atas_root = get_base_dir() / "atas_reunioes"
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="Selecione um Pacote (.omniscribe), Ata (.md) ou Gravação (.wav)",
+            title="Selecione um Pacote (.escutai / .omniscribe), Ata (.md) ou Gravação (.wav)",
             initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
             filetypes=[
-                ("Reuniões OmniScribe", "*.omniscribe *.md *.wav"),
-                ("Pacotes SQLite", "*.omniscribe"),
+                ("Reuniões Escutaí", "*.escutai *.omniscribe *.md *.wav"),
+                ("Pacotes SQLite", "*.escutai *.omniscribe"),
                 ("Gravações WAV", "*.wav"),
                 ("Documentos Markdown", "*.md"),
                 ("Todos os Arquivos", "*.*"),
@@ -1459,7 +1459,7 @@ class HistoryModal(ctk.CTkToplevel):
         )
         if chosen:
             chosen_path = Path(chosen)
-            if chosen_path.suffix.lower() == ".omniscribe":
+            if chosen_path.suffix.lower() in (".escutai", ".omniscribe"):
                 self.parent.import_archive_file(chosen_path)
                 self.destroy()
             elif chosen_path.suffix.lower() == ".wav":
@@ -1469,7 +1469,7 @@ class HistoryModal(ctk.CTkToplevel):
 
 
 class ZoomTranscriberApp(ctk.CTk):
-    """Aplicação Principal v2.0 com abas limpas, tema Escuro/Claro e mascote OmniMic atualizado."""
+    """Aplicação Principal v2.0 (Escutaí) com abas limpas, tema Escuro/Claro e mascote Vozito."""
 
     TAB_REC = "🎙️ Gravação"
     TAB_ATA = "📋 Ata"
@@ -1492,7 +1492,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.auto_export_sqlite = bool(ui_cfg.get("auto_export_sqlite", True))
         ctk.set_appearance_mode(self.theme_mode)
 
-        self.title("OmniScribe AI - Universal Meeting Transcriber & Minute Generator")
+        self.title("Escutaí - Transcrição e Atas Inteligentes de Reuniões")
         self.geometry("1040x760")
         self.minsize(960, 680)
         self.configure(fg_color=THEME_BG)
@@ -1617,7 +1617,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         ctk.CTkLabel(
             brand_box,
-            text="🎙️ OmniScribe AI",
+            text="🎙️ Escutaí",
             font=ctk.CTkFont(size=18, weight="bold"),
             text_color=THEME_TEXT_PRIMARY,
         ).pack(side="left")
@@ -1668,7 +1668,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self.btn_toggle_mascot = ctk.CTkButton(
             top_utils,
-            text="🤖 OmniMic",
+            text="🤖 Vozito",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=BTN_NEUTRAL,
             hover_color=BTN_NEUTRAL_HOVER,
@@ -1992,7 +1992,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self.btn_export_sqlite = ctk.CTkButton(
             btn_row,
-            text="📦 Exportar .omniscribe",
+            text="📦 Exportar .escutai",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#7c3aed",
             hover_color="#6d28d9",
@@ -2074,7 +2074,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         ctk.CTkButton(
             hist_btns,
-            text="📥 Importar .omniscribe",
+            text="📥 Importar Pacote",
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#7c3aed",
             hover_color="#6d28d9",
@@ -2095,7 +2095,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         self.seg_hist_filter = ctk.CTkSegmentedButton(
             top,
-            values=["Tudo", "📦 .omniscribe", "🔊 Áudios (.wav)", "📋 Atas", "🎙️ Transcrições"],
+            values=["Tudo", "📦 Pacotes", "🔊 Áudios (.wav)", "📋 Atas", "🎙️ Transcrições"],
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=THEME_CARD,
             selected_color=COLOR_PRIMARY,
@@ -2322,7 +2322,7 @@ class ZoomTranscriberApp(ctk.CTk):
         off_left.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
         ctk.CTkLabel(
             off_left,
-            text="💻 Transcrição Offline (Whisper ONNX + Ollama) & SQLite .omniscribe",
+            text="💻 Transcrição Offline (Whisper ONNX + Ollama) & Pacote .escutai",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=THEME_TEXT_PRIMARY,
         ).pack(anchor="w")
@@ -2367,7 +2367,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.bar_offline_progress.set(0.0)
         self.chk_auto_sqlite = ctk.CTkCheckBox(
             off_bottom,
-            text="Gerar pacote portátil SQLite (.omniscribe com áudio compactado) automaticamente ao encerrar",
+            text="Gerar pacote portátil SQLite (.escutai com áudio compactado) automaticamente ao encerrar",
             font=ctk.CTkFont(size=12),
             text_color=THEME_TEXT_PRIMARY,
             command=self._on_toggle_auto_sqlite,
@@ -2615,11 +2615,11 @@ class ZoomTranscriberApp(ctk.CTk):
         atas_root = get_base_dir() / "atas_reunioes"
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="Selecione um Pacote (.omniscribe), Ata (.md) ou Gravação (.wav)",
+            title="Selecione um Pacote (.escutai / .omniscribe), Ata (.md) ou Gravação (.wav)",
             initialdir=str(atas_root) if atas_root.exists() else str(get_base_dir()),
             filetypes=[
-                ("Reuniões OmniScribe", "*.omniscribe *.md *.wav"),
-                ("Pacotes SQLite", "*.omniscribe"),
+                ("Reuniões Escutaí", "*.escutai *.omniscribe *.md *.wav"),
+                ("Pacotes SQLite", "*.escutai *.omniscribe"),
                 ("Gravações WAV", "*.wav"),
                 ("Documentos Markdown", "*.md"),
                 ("Todos os Arquivos", "*.*"),
@@ -2628,7 +2628,7 @@ class ZoomTranscriberApp(ctk.CTk):
         if chosen:
             chosen_path = Path(chosen)
             ext = chosen_path.suffix.lower()
-            if ext == ".omniscribe":
+            if ext in (".escutai", ".omniscribe"):
                 self.import_archive_file(chosen_path)
             elif ext == ".wav":
                 RetranscribeModal(self, chosen_path)
@@ -2638,8 +2638,8 @@ class ZoomTranscriberApp(ctk.CTk):
     def _import_external_archive_dialog(self) -> None:
         chosen = filedialog.askopenfilename(
             parent=self,
-            title="Importar pacote portátil .omniscribe",
-            filetypes=[("Pacotes OmniScribe SQLite", "*.omniscribe"), ("Todos os Arquivos", "*.*")],
+            title="Importar pacote portátil .escutai / .omniscribe",
+            filetypes=[("Pacotes Escutaí SQLite", "*.escutai *.omniscribe"), ("Todos os Arquivos", "*.*")],
         )
         if chosen:
             self.import_archive_file(Path(chosen))
@@ -2654,7 +2654,7 @@ class ZoomTranscriberApp(ctk.CTk):
             self._refresh_history_tab()
             self._log_gui(f"[SQLITE] Pacote importado para o histórico: {imported.name}")
         except Exception as e:
-            self._log_gui(f"[ERRO] Falha ao importar pacote .omniscribe: {e}")
+            self._log_gui(f"[ERRO] Falha ao importar pacote .escutai: {e}")
 
     def load_archive(self, archive_path: Path) -> None:
         try:
@@ -2670,7 +2670,7 @@ class ZoomTranscriberApp(ctk.CTk):
             self._switch_tab(self.TAB_ATA if data.get("minutes_md") else self.TAB_REC)
             self._log_gui(f"[SQLITE] Pacote carregado: {Path(archive_path).name}")
         except Exception as e:
-            self._log_gui(f"[ERRO] Falha ao abrir pacote .omniscribe: {e}")
+            self._log_gui(f"[ERRO] Falha ao abrir pacote .escutai: {e}")
 
     def play_archive_audio(self, archive_path: Path) -> None:
         try:
@@ -2698,16 +2698,16 @@ class ZoomTranscriberApp(ctk.CTk):
         trans_txt = self.txt_transcription.get("1.0", "end-1c").strip()
         min_txt = self.txt_minutes.get("1.0", "end-1c").strip()
         if not trans_txt and not min_txt:
-            self._log_gui("[AVISO] Nenhuma transcrição ou ata carregada para exportar em .omniscribe.")
+            self._log_gui("[AVISO] Nenhuma transcrição ou ata carregada para exportar em .escutai.")
             return
         title = self.entry_meeting_title.get().strip() or self.gemini_service.meeting_title or "Reuniao"
-        default_name = f"reuniao_{datetime.now().strftime('%Y%m%d_%H%M')}.omniscribe"
+        default_name = f"reuniao_{datetime.now().strftime('%Y%m%d_%H%M')}.escutai"
         dest = filedialog.asksaveasfilename(
             parent=self,
-            title="Exportar Pacote Portátil .omniscribe",
-            defaultextension=".omniscribe",
+            title="Exportar Pacote Portátil .escutai",
+            defaultextension=".escutai",
             initialfile=default_name,
-            filetypes=[("Pacote OmniScribe SQLite", "*.omniscribe")],
+            filetypes=[("Pacote Escutaí SQLite", "*.escutai")],
         )
         if not dest:
             return
@@ -2725,7 +2725,7 @@ class ZoomTranscriberApp(ctk.CTk):
             mb = summary["size_bytes"] / (1024 * 1024)
             self._log_gui(f"[SQLITE] Pacote exportado com sucesso: {Path(dest).name} ({mb:.2f} MB)")
         except Exception as e:
-            self._log_gui(f"[ERRO] Falha ao exportar .omniscribe: {e}")
+            self._log_gui(f"[ERRO] Falha ao exportar .escutai: {e}")
 
     def _handle_archive_generated(self, archive_path: Path, summary: Dict) -> None:
         def _notify():
@@ -2814,7 +2814,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self._log_gui(f"Dispositivos detectados: {len(loop_devices)} loopback(s), {len(mic_devices)} microfone(s).")
 
     def _init_mascot(self) -> None:
-        """Inicializa o mascote 3D OmniMic atualizado após a abertura da janela principal."""
+        """Inicializa o mascote 3D Vozito atualizado após a abertura da janela principal."""
         if self.mascot is not None:
             return
         self.mascot = OmniMicWidget(self, theme_mode=self.theme_mode)

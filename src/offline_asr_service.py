@@ -1,4 +1,4 @@
-"""Motor de Transcrição e Síntese 100% Offline do OmniScribe AI.
+"""Motor de Transcrição e Síntese 100% Offline do Escutaí.
 
 Pipeline local sem dependência de LLM em nuvem:
 1. ASR local via `sherpa-onnx` OfflineRecognizer (Whisper `small` ou `base` INT8 ONNX);
@@ -216,7 +216,7 @@ class OfflineAsrService:
             if progress_cb:
                 progress_cb(f"Baixando Whisper {var} ONNX ({spec['label']})...", 0.05)
 
-            req = urllib.request.Request(spec["url"], headers={"User-Agent": "OmniScribeAI/2.0"})
+            req = urllib.request.Request(spec["url"], headers={"User-Agent": "Escutai/2.0"})
             with urllib.request.urlopen(req, timeout=180) as resp:
                 total = int(resp.headers.get("Content-Length") or 0)
                 downloaded = 0
@@ -574,7 +574,7 @@ class OfflineAsrService:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Gerenciador de modelos offline OmniScribe AI")
+    parser = argparse.ArgumentParser(description="Gerenciador de modelos offline do Escutaí")
     parser.add_argument("--prepare", choices=list(WHISPER_MODELS.keys()), default="small")
     args = parser.parse_args()
 

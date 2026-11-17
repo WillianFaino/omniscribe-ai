@@ -27,6 +27,8 @@ temp_blocks/
 atas_reunioes/
 models/
 *.onnx
+*.escutai
+*.escutai.tmp
 *.omniscribe
 *.omniscribe.tmp
 .vscode/

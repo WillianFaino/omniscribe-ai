@@ -1,4 +1,4 @@
-"""Serviço de Biometria Vocal (Voiceprint / Speaker Identification) do OmniScribe AI.
+"""Serviço de Biometria Vocal (Voiceprint / Speaker Identification) do Escutaí.
 
 Utiliza `sherpa-onnx` (WeSpeaker CAM++ LM + Silero VAD) em CPU para:
 1. Cadastrar perfis biométricos de voz (via frases curtas no microfone ou trechos de WAV salvo);
@@ -217,7 +217,7 @@ class VoiceprintService:
         sample_dim = next(iter(selected.values()))["embedding"].size
         payload = {
             "schema_version": 1,
-            "format": "omniscribe-voiceprints",
+            "format": "escutai-voiceprints",
             "model": EMBEDDING_MODEL_NAME,
             "dim": int(sample_dim),
             "exported_at": datetime.now().isoformat(timespec="seconds"),
@@ -381,7 +381,7 @@ class VoiceprintService:
                 if on_progress:
                     on_progress(f"Baixando {label}...", idx / float(len(targets)))
 
-                req = urllib.request.Request(url, headers={"User-Agent": "OmniScribe-AI/1.3"})
+                req = urllib.request.Request(url, headers={"User-Agent": "Escutai/2.0"})
                 with urllib.request.urlopen(req, timeout=90) as resp:
                     total_size = int(resp.headers.get("Content-Length", "0") or 0)
                     downloaded = 0

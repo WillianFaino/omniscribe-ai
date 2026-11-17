@@ -1,6 +1,6 @@
-"""Serviço de Armazenamento Portátil em SQLite (`.omniscribe`) do OmniScribe AI.
+"""Serviço de Armazenamento Portátil em SQLite (`.escutai` / legado `.omniscribe`) do Escutaí.
 
-Empacota uma reunião completa em um único arquivo SQLite autocontido (`.omniscribe`):
+Empacota uma reunião completa em um único arquivo SQLite autocontido (`.escutai`):
 - Metadados estruturados (título, data, duração, modo de captura, engine, glossário);
 - Transcrição integral + segmentos indexados (timestamp, locutor, fala, sobreposição);
 - Ata Executiva em Markdown;
@@ -25,6 +25,8 @@ import numpy as np
 
 logger = logging.getLogger("omniscribe.archive")
 
+PRIMARY_ARCHIVE_EXT = ".escutai"
+SUPPORTED_ARCHIVE_EXTS = (".escutai", ".omniscribe")
 ARCHIVE_SCHEMA_VERSION = "1"
 AUDIO_CODEC_B4P_ZLIB = "b4p_zlib"
 BLOCK_SAMPLES = 32
@@ -167,7 +169,7 @@ def parse_transcript_segments(transcript_md: str) -> List[Dict]:
 
 
 class MeetingArchiveService:
-    """Cria, lê, importa e extrai pacotes portáteis `.omniscribe` em SQLite."""
+    """Cria, lê, importa e extrai pacotes portáteis `.escutai` (e `.omniscribe` legado) em SQLite."""
 
     @staticmethod
     def _open_conn(db_path: Path) -> sqlite3.Connection:
@@ -222,10 +224,10 @@ class MeetingArchiveService:
         minutes_md: str = "",
         wav_path: Optional[Path] = None,
     ) -> Dict:
-        """Empacota metadados, transcrição, ata e áudio compactado em um `.omniscribe` único."""
+        """Empacota metadados, transcrição, ata e áudio compactado em um pacote `.escutai` único."""
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = output_path.with_suffix(".omniscribe.tmp")
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 

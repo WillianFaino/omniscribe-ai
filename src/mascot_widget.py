@@ -1,4 +1,4 @@
-"""Widget interativo do mascote 3D OmniMic no estilo assistente Windows 95/XP."""
+"""Widget interativo do mascote 3D Vozito no estilo assistente Windows 95/XP."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ MASCOT_THEMES = {
 
 
 class OmniMicWidget(ctk.CTkFrame):
-    """Overlay flutuante e arrastavel com o mascote 3D OmniMic + balao estilo Win95/XP."""
+    """Overlay flutuante e arrastavel com o mascote 3D Vozito + balao estilo Win95/XP."""
 
     def __init__(
         self,
@@ -84,7 +84,7 @@ class OmniMicWidget(ctk.CTkFrame):
         self._bind_events()
 
         self.say(
-            "Olá! Eu sou o OmniMic.\nPronto para anotar sua próxima reunião?",
+            "Olá! Eu sou o Vozito.\nPronto para anotar sua próxima reunião?",
             duration=6.5,
         )
         self._tick()
@@ -104,7 +104,7 @@ class OmniMicWidget(ctk.CTkFrame):
 
         self._lbl_balloon_title = tk.Label(
             self._balloon_top,
-            text="OmniMic",
+            text="Vozito",
             font=("Segoe UI", 8, "bold"),
             fg=pal["balloon_title"],
             bg=pal["balloon_bg"],
@@ -189,7 +189,7 @@ class OmniMicWidget(ctk.CTkFrame):
         self._menu.add_command(label="🏆 Comemorar (Troféu)", command=lambda: self.trigger_celebrating())
         self._menu.add_command(label="🎲 Giro 360°", command=lambda: self.trigger_spin())
         self._menu.add_separator()
-        self._menu.add_command(label="🙈 Ocultar OmniMic", command=self.hide_mascot)
+        self._menu.add_command(label="🙈 Ocultar Vozito", command=self.hide_mascot)
 
     def _bind_events(self) -> None:
         for widget in (self._stage, self._lbl_sprite):
@@ -397,4 +397,7 @@ class OmniMicWidget(ctk.CTkFrame):
     def destroy(self) -> None:
         self._running = False
         super().destroy()
+
+
+VozitoWidget = OmniMicWidget
 
