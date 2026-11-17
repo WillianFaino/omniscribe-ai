@@ -310,8 +310,8 @@ Transcrição completa da reunião:
         self.offline_asr_service = OfflineAsrService(voiceprint_service=self.voiceprint_service)
         self.archive_service = MeetingArchiveService()
 
-        # Preferências de execução híbrida (online/offline) e empacotamento portátil
-        self.engine_mode = "online"
+        # Transcrição 100% offline; Gemini permanece opcional apenas para Ata Executiva em texto
+        self.engine_mode = "offline"
         self.offline_whisper_variant = "turbo"
         self.offline_ollama_model = ""
         self.offline_isolate_voice = False
@@ -389,8 +389,7 @@ Transcrição completa da reunião:
         engine_mode: Optional[str] = None,
     ) -> Tuple[Path, Path]:
         """Prepara os arquivos e pastas da sessão de reunião e inicia o worker."""
-        if engine_mode in ("online", "offline"):
-            self.engine_mode = engine_mode
+        self.engine_mode = "offline"
 
         self.meeting_title = title.strip() or "Reuniao"
         self.context_notes = (context_notes or "").strip()
@@ -903,16 +902,14 @@ Transcrição completa da reunião:
             self._append_to_transcription(task, err_md, success=False)
 
     def _process_single_block(self, task: AudioBlockTask) -> None:
-        """Transcreve um bloco de áudio (Online Gemini ou Offline Whisper), anexa no Markdown e limpa o WAV."""
+        """Transcreve um bloco de áudio 100% offline (Whisper CT2 + Voiceprints), anexa no Markdown e limpa o WAV."""
         time_range = f"{format_seconds(task.start_seconds)} - {format_seconds(task.end_seconds)}"
         num_channels = self._detect_wav_channels(task.wav_path)
         mode_label = "Mono / Presencial" if num_channels == 1 else "Estéreo / Online"
-        self._log(f"[IA] Processando Bloco #{task.block_index} ({time_range} • {self.engine_mode})...")
+        self._log(f"[IA] Processando Bloco #{task.block_index} ({time_range} • Offline Whisper)...")
         self._log(f"[ÁUDIO] Bloco #{task.block_index} detectado: {num_channels} canal(is) ({mode_label}).")
-
-        if self.engine_mode == "offline":
-            self._process_single_block_offline(task, time_range, mode_label)
-            return
+        self._process_single_block_offline(task, time_range, mode_label)
+        return
 
         if not self._client:
             msg = f"\n### Bloco {task.block_index:02d} [{time_range}]\n*[Erro: Chave Gemini não configurada]*\n\n"
