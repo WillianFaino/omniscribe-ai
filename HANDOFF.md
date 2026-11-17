@@ -201,6 +201,10 @@ python src/main.py
 2. **Autenticação Flexível (API Key ou Login):** permitir que o usuário escolha entre informar uma chave de API ou autenticar via **login na conta do provedor**, reduzindo a dependência de créditos pré-pagos de API.
 3. **Plano de Fallback Automático:** permitir o cadastro de um segundo provedor (login ou chave API secundária) como contingência automática caso o provedor primário falhe, atinja limite de cota ou fique indisponível.
 
+### H. E-mail nos Voiceprints e Disparo Automático Pós-Reunião
+1. **Vínculo de E-mail no Perfil Vocal:** permitir cadastrar e editar o endereço de e-mail do participante junto ao seu registro de *voiceprint* (com opção de preservar ou omitir em exportações compartilhadas).
+2. **Envio Seletivo ao Finalizar a Ata:** após encerrar gravação, transcrição e geração da ata, exibir checklist interativo com os participantes detectados/cadastrados para selecionar ou desselecionar destinatários e disparar o resumo/ata (e anexos opcionais) por e-mail.
+
 ---
 
 ## 6. Estado Atual do Git e Pontos de Atenção
