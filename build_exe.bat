@@ -109,7 +109,7 @@ goto build_onedir
 :build_onedir
 echo.
 echo [3/4] Empacotando aplicacao em Modo Turbo Instantaneo (--onedir --windowed)...
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --collect-all "ctranslate2" --collect-all "tokenizers" --collect-all "faster_whisper" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -147,7 +147,7 @@ goto end
 :build_onefile
 echo.
 echo [3/4] Empacotando aplicacao via PyInstaller (--onefile --windowed)...
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --collect-all "ctranslate2" --collect-all "tokenizers" --collect-all "faster_whisper" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -182,7 +182,7 @@ goto end
 :build_installer_flow
 echo.
 echo [3/5] Compilando versao base Turbo em 'dist\Escutai\'...
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --collect-all "ctranslate2" --collect-all "tokenizers" --collect-all "faster_whisper" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.

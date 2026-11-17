@@ -310,7 +310,7 @@ Transcrição completa da reunião:
 
         # Preferências de execução híbrida (online/offline) e empacotamento portátil
         self.engine_mode = "online"
-        self.offline_whisper_variant = "small"
+        self.offline_whisper_variant = "turbo"
         self.offline_ollama_model = ""
         self.offline_isolate_voice = False
         self.offline_enhancement_mode = "clarify_room"
@@ -421,7 +421,7 @@ Transcrição completa da reunião:
         context_line = f"**Contexto / Glossário:** {self.context_notes}\n" if self.context_notes else ""
         audio_line = f"**Áudio Oficial:** `{self.audio_file_path.name}`\n" if self.audio_file_path else ""
         engine_desc = (
-            f"Offline Local (Whisper {self.offline_whisper_variant} ONNX + Voiceprints)"
+            f"Offline Local (Whisper {self.offline_whisper_variant} CT2/ONNX + Voiceprints)"
             if self.engine_mode == "offline"
             else "Online (Gemini 2.5 Flash + Voiceprints Locais)"
         )
@@ -1138,16 +1138,41 @@ Transcrição completa da reunião:
                 raw_transcript = f.read()
 
             if self.engine_mode == "offline":
-                refined_transcript, _, _ = self._detect_and_sanitize_repetition(raw_transcript)
-                self._set_status("Gerando Ata Executiva offline...")
-                minute_text, backend_used = self.offline_asr_service.generate_offline_minutes(
-                    title=self.meeting_title,
-                    date_str=date_str,
-                    duration_str=duration_str,
-                    transcript_md=refined_transcript,
-                    minutes_prompt_template=self.MINUTES_SYSTEM_PROMPT,
-                    preferred_ollama_model=self.offline_ollama_model,
-                )
+                try:
+                    self.offline_asr_service.unload_asr_models()
+                    sanitized_raw, _, _ = self._detect_and_sanitize_repetition(raw_transcript)
+                    enrolled_names = (
+                        [p["name"] for p in self.voiceprint_service.list_profiles()]
+                        if self.voiceprint_service
+                        else []
+                    )
+                    self._set_status("Refinando transcrição com IA local (Qwen2.5)...")
+                    refined_transcript = self.offline_asr_service.refine_offline_transcript(
+                        sanitized_raw,
+                        title=self.meeting_title,
+                        context_notes=self.context_notes,
+                        enrolled_names=enrolled_names,
+                        preferred_ollama_model=self.offline_ollama_model,
+                    )
+                    if refined_transcript != raw_transcript and refined_transcript.strip():
+                        with open(self.transcription_file_path, "w", encoding="utf-8") as f:
+                            f.write(refined_transcript)
+                        self.accumulated_transcript = refined_transcript
+                        self._log(f"[REVISÃO OFFLINE] Transcrição refinada salva em: {self.transcription_file_path.name}")
+                        if self.on_transcription_update:
+                            self.on_transcription_update(0, "", refined_transcript, True)
+                    self._set_status("Gerando Ata Executiva offline (LLM Local)...")
+                    minute_text, backend_used = self.offline_asr_service.generate_offline_minutes(
+                        title=self.meeting_title,
+                        date_str=date_str,
+                        duration_str=duration_str,
+                        transcript_md=refined_transcript,
+                        minutes_prompt_template=self.MINUTES_SYSTEM_PROMPT,
+                        preferred_ollama_model=self.offline_ollama_model,
+                    )
+                finally:
+                    self.offline_asr_service.stop_llm_server()
+
                 self.tracker.register_request(audio_seconds=0.0, input_tokens=0, output_tokens=0, is_new_meeting=True)
                 with open(self.minute_file_path, "w", encoding="utf-8") as f:
                     f.write(minute_text)
