@@ -2416,7 +2416,7 @@ class ZoomTranscriberApp(ctk.CTk):
             owner_row,
             text="Perfil da minha voz:",
             font=ctk.CTkFont(size=12),
-            text_color=THEME_TEXT_SECONDARY,
+            text_color=THEME_TEXT_MUTED,
         ).pack(side="left")
         self.opt_mic_owner_profile = ctk.CTkOptionMenu(
             owner_row,
