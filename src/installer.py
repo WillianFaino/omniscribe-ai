@@ -255,16 +255,57 @@ class InstallerApp(ctk.CTk):
         lbl_desc = ctk.CTkLabel(
             frame,
             text=(
-                "O Escutaí é o assistente universal para transcrição em tempo real e\n"
-                "geração automática de Atas Executivas para reuniões (Google Meet, Teams, Zoom e voz).\n\n"
-                "Este assistente irá instalar o software em seu computador de forma rápida e segura,\n"
-                "sem necessitar de privilégios de administrador ou comandos de terminal."
+                "O Escutaí realiza transcrição incremental e gera Atas Executivas automáticas\n"
+                "para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n"
+                "Motor Híbrido: Nuvem (Gemini 2.5) ou 100% Offline (Whisper Turbo CT2 + Qwen2.5-3B),\n"
+                "Voiceprints, Isolamento Neural GTCRN, Diagnóstico Acústico e mascote 3D Vozito."
             ),
             font=ctk.CTkFont(size=13),
             text_color="#9ca3af",
             justify="center",
         )
         lbl_desc.pack(pady=15)
+
+    @staticmethod
+    def _format_bytes(num_bytes: int) -> str:
+        mb = num_bytes / (1024.0 * 1024.0)
+        if mb >= 1024.0:
+            return f"{mb / 1024.0:.2f} GB"
+        return f"{mb:.0f} MB"
+
+    def _get_disk_space_summary(self, target_dir: Path) -> str:
+        unpacked_bytes = 0
+        pkg_zip = get_app_package_zip()
+        if pkg_zip and pkg_zip.exists():
+            try:
+                with zipfile.ZipFile(pkg_zip, "r") as zf:
+                    unpacked_bytes = sum(info.file_size for info in zf.infolist())
+            except Exception:
+                unpacked_bytes = 0
+        if unpacked_bytes <= 0:
+            src_dir = get_source_app_dir()
+            if src_dir and src_dir.exists():
+                try:
+                    unpacked_bytes = sum(p.stat().st_size for p in src_dir.rglob("*") if p.is_file())
+                except Exception:
+                    unpacked_bytes = 0
+        if unpacked_bytes <= 0:
+            unpacked_bytes = 950 * 1024 * 1024
+
+        free_txt = "Suficiente"
+        try:
+            probe = target_dir
+            while not probe.exists() and probe != probe.parent:
+                probe = probe.parent
+            usage = shutil.disk_usage(probe)
+            free_txt = self._format_bytes(usage.free)
+        except Exception:
+            pass
+
+        return (
+            f"Espaço em disco necessário: ~{self._format_bytes(unpacked_bytes)}\n"
+            f"Espaço livre disponível na unidade: {free_txt}"
+        )
 
     # ---------------- PÁGINA 2: PASTA DE DESTINO ----------------
     def _render_page_directory(self):
@@ -305,14 +346,14 @@ class InstallerApp(ctk.CTk):
         )
         btn_browse.grid(row=0, column=1)
 
-        lbl_space = ctk.CTkLabel(
+        self.lbl_space = ctk.CTkLabel(
             frame,
-            text="Espaço em disco necessário: ~120 MB\nEspaço livre disponível: Suficiente",
+            text=self._get_disk_space_summary(self.target_dir),
             font=ctk.CTkFont(size=11),
-            text_color="#71717a",
+            text_color="#9ca3af",
             justify="left",
         )
-        lbl_space.pack(anchor="w", pady=20)
+        self.lbl_space.pack(anchor="w", pady=20)
 
     def _browse_dir(self):
         chosen = filedialog.askdirectory(initialdir=str(self.target_dir), parent=self)
@@ -323,6 +364,8 @@ class InstallerApp(ctk.CTk):
             self.target_dir = chosen_path
             self.entry_dir.delete(0, "end")
             self.entry_dir.insert(0, str(self.target_dir))
+            if hasattr(self, "lbl_space") and self.lbl_space.winfo_exists():
+                self.lbl_space.configure(text=self._get_disk_space_summary(self.target_dir))
 
     # ---------------- PÁGINA 3: OPÇÕES ADICIONAIS ----------------
     def _render_page_options(self):

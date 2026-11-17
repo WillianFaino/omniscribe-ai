@@ -239,6 +239,15 @@ def _clean_whisper_text(raw_text: str) -> str:
     text = re.sub(r"\b([a-zA-ZÀ-ÿ])\1{4,}[.!?,;]*\b", "", text, flags=re.IGNORECASE)
     # Colapsa alucinações curtas repetidas do Whisper (ex.: "Obrigado. Obrigado. Obrigado.")
     text = re.sub(r"(\b[\wÀ-ÿ]{2,20}[.!?]?)(?:\s+\1){3,}", r"\1", text, flags=re.IGNORECASE)
+    # Remove cadeias alucinadas de valores monetários (vazamento de decoder sem âncora)
+    text = re.sub(r"(?:\bR\$\s*[\d.,]+\s*[,;.]?\s*){2,}", " ", text, flags=re.IGNORECASE)
+    # Remove ecos em lista de nomes de participantes/glossário separados por vírgula
+    text = re.sub(
+        r"(?:Dr\.\s+|L[óo]grafo,?\s*|Fiqueir[ao],?\s*)?(?:(?:Jonathan Angeli|Raiana Deparis|Willian Faino|Irio Moesch|Giorgio Reuni[ãa]o|Raiano Departamento)\s*[,;.]\s*){2,}.*$",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
     text, stuttered = _collapse_phonetic_stutters(text)
     if stuttered or len(text) <= 28:
         text = re.sub(r"(?:^|\s+)(?:\bObrigado[.!?]?\s*)+$", "", text, flags=re.IGNORECASE)
@@ -1104,17 +1113,9 @@ class OfflineAsrService:
             return []
 
         ct2_model = self._ensure_ct2_recognizer(variant)
-        vocab = _extract_glossary_terms(context_notes, enrolled_names)
-        names_str = ", ".join(enrolled_names or [])
-        vocab_prompt = ", ".join(vocab[:24])
-        hotwords_str = ", ".join(vocab[:30]) if vocab else None
-
-        prompt_parts = ["Reunião corporativa em português do Brasil."]
-        if names_str:
-            prompt_parts.append(f"Participantes: {names_str}.")
-        if vocab_prompt:
-            prompt_parts.append(f"Glossário: {vocab_prompt}.")
-        initial_prompt = " ".join(prompt_parts).strip()
+        # Mantém prompt neutro e sem hotwords para impedir eco de nomes ou alucinações de glossário
+        initial_prompt = "Transcrição fiel de reunião de trabalho em português do Brasil, com pontuação clara."
+        hotwords_str = None
 
         sep = np.zeros(int(0.25 * TARGET_SAMPLE_RATE), dtype=np.float32)
         max_buf_samples = int(28.0 * TARGET_SAMPLE_RATE)
@@ -1247,54 +1248,39 @@ class OfflineAsrService:
         if not chunks:
             return []
         ct2_model = self._ensure_ct2_recognizer(variant)
-        vocab = _extract_glossary_terms(context_notes, enrolled_names)
-        names_str = ", ".join(enrolled_names or [])
-        vocab_prompt = ", ".join(vocab[:24])
-        hotwords_str = ", ".join(vocab[:30]) if vocab else None
+        initial_prompt = "Transcrição fiel de reunião de trabalho em português do Brasil, com pontuação clara."
+        hotwords_str = None
 
         min_len = int(0.25 * TARGET_SAMPLE_RATE)
         max_len = int(29.5 * TARGET_SAMPLE_RATE)
         outputs = [""] * len(chunks)
 
         with self._lock:
-            rolling_tail = self._rolling_prompt_tail
             for idx, wav_arr in enumerate(chunks):
                 if len(wav_arr) < min_len:
                     continue
                 audio_f32 = wav_arr[:max_len].astype(np.float32)
-                prompt_parts = ["Reunião corporativa em português do Brasil."]
-                if names_str:
-                    prompt_parts.append(f"Participantes: {names_str}.")
-                if vocab_prompt:
-                    prompt_parts.append(f"Glossário: {vocab_prompt}.")
-                if rolling_tail:
-                    prompt_parts.append(rolling_tail)
-                initial_prompt = " ".join(prompt_parts).strip()
 
                 segments, _info = ct2_model.transcribe(
                     audio_f32,
                     language="pt",
                     task="transcribe",
-                    beam_size=5,
-                    best_of=5,
+                    beam_size=2,
+                    best_of=2,
                     patience=1.0,
-                    temperature=[0.0, 0.2, 0.4],
-                    compression_ratio_threshold=2.2,
+                    temperature=[0.0, 0.2],
+                    compression_ratio_threshold=2.1,
                     log_prob_threshold=-1.0,
                     no_speech_threshold=0.6,
                     condition_on_previous_text=False,
                     initial_prompt=initial_prompt,
                     hotwords=hotwords_str,
-                    repetition_penalty=1.12,
+                    repetition_penalty=1.20,
                     no_repeat_ngram_size=3,
                     vad_filter=False,
                 )
                 seg_texts = [getattr(s, "text", "").strip() for s in segments if getattr(s, "text", "").strip()]
-                cleaned = _clean_whisper_text(" ".join(seg_texts))
-                outputs[idx] = cleaned
-                if len(cleaned) >= 12:
-                    rolling_tail = cleaned[-200:].strip()
-            self._rolling_prompt_tail = rolling_tail
+                outputs[idx] = _clean_whisper_text(" ".join(seg_texts))
 
         return outputs
 
@@ -1403,27 +1389,68 @@ class OfflineAsrService:
     @staticmethod
     def _smooth_short_speaker_islands(
         diarized_segs: List[Tuple[float, float, str, np.ndarray]],
-        max_island_sec: float = 1.8,
-        max_gap_sec: float = 1.8,
+        max_island_sec: float = 2.5,
+        max_gap_sec: float = 2.0,
     ) -> List[Tuple[float, float, str, np.ndarray]]:
-        """Corrige oscilações breves de diarização (A -> B_curto -> A passa a A -> A -> A)."""
-        if len(diarized_segs) < 3:
+        """Suaviza pontes curtas de 1-2 segmentos (A -> [B, C] -> A) e absorve micro-fragmentos <=1,1s."""
+        if len(diarized_segs) < 2:
             return diarized_segs
         smoothed = list(diarized_segs)
-        for idx in range(1, len(smoothed) - 1):
-            p_s, p_e, p_spk, _p_arr = smoothed[idx - 1]
-            c_s, c_e, c_spk, c_arr = smoothed[idx]
-            n_s, _n_e, n_spk, _n_arr = smoothed[idx + 1]
-            if (
-                p_spk == n_spk
-                and c_spk != p_spk
-                and not c_spk.startswith("Possível sobreposição")
-                and (c_e - c_s) <= max_island_sec
-                and (c_s - p_e) <= max_gap_sec
-                and (n_s - c_e) <= max_gap_sec
-            ):
-                smoothed[idx] = (c_s, c_e, p_spk, c_arr)
-        return smoothed
+
+        # Passo 1: Pontes curtas de 1 ou 2 turnos entre retornos do mesmo locutor (A -> [B] -> A / A -> [B, C] -> A)
+        if len(smoothed) >= 3:
+            for width in (1, 2):
+                i = 1
+                while i + width < len(smoothed):
+                    left_s, left_e, left_spk, _ = smoothed[i - 1]
+                    right_s, _re, right_spk, _ = smoothed[i + width]
+                    if left_spk == right_spk and not left_spk.startswith("Possível sobreposição"):
+                        mid = smoothed[i : i + width]
+                        span_dur = mid[-1][1] - mid[0][0]
+                        all_ok = (
+                            span_dur <= 3.4
+                            and all(
+                                (m[1] - m[0]) <= max_island_sec
+                                and m[2] != left_spk
+                                and not m[2].startswith("Possível sobreposição")
+                                for m in mid
+                            )
+                            and (mid[0][0] - left_e) <= max_gap_sec
+                            and (right_s - mid[-1][1]) <= max_gap_sec
+                            and (width == 1 or (mid[1][0] - mid[0][1]) <= max_gap_sec)
+                        )
+                        if all_ok:
+                            for offset in range(width):
+                                ms, me, _mspk, marr = smoothed[i + offset]
+                                smoothed[i + offset] = (ms, me, left_spk, marr)
+                    i += 1
+
+        # Passo 2: Absorve fragmentos ultra-curtos (<= 1,1s) adjacentes a turnos longos (>= 2,8s)
+        final_segs = list(smoothed)
+        for idx, (c_s, c_e, c_spk, c_arr) in enumerate(final_segs):
+            if (c_e - c_s) > 1.1 or c_spk.startswith("Possível sobreposição"):
+                continue
+            cand_left = None
+            cand_right = None
+            if idx > 0:
+                p_s, p_e, p_spk, _ = final_segs[idx - 1]
+                if not p_spk.startswith("Possível sobreposição") and (c_s - p_e) <= 0.6 and (p_e - p_s) >= 2.8:
+                    cand_left = (c_s - p_e, p_e - p_s, p_spk)
+            if idx + 1 < len(final_segs):
+                n_s, n_e, n_spk, _ = final_segs[idx + 1]
+                if not n_spk.startswith("Possível sobreposição") and (n_s - c_e) <= 0.6 and (n_e - n_s) >= 2.8:
+                    cand_right = (n_s - c_e, n_e - n_s, n_spk)
+            chosen_spk = None
+            if cand_left and cand_right:
+                chosen_spk = cand_left[2] if cand_left[0] <= cand_right[0] else cand_right[2]
+            elif cand_left:
+                chosen_spk = cand_left[2]
+            elif cand_right:
+                chosen_spk = cand_right[2]
+            if chosen_spk and chosen_spk != c_spk:
+                final_segs[idx] = (c_s, c_e, chosen_spk, c_arr)
+
+        return final_segs
 
     @staticmethod
     def _merge_same_speaker_turns(
@@ -1675,7 +1702,7 @@ class OfflineAsrService:
                 "--port",
                 str(port),
                 "-c",
-                "3072",
+                "4096",
                 "-t",
                 str(threads),
                 "-ngl",
@@ -1813,7 +1840,7 @@ class OfflineAsrService:
                             {"role": "user", "content": user_prompt},
                         ],
                         "temperature": temperature,
-                        "repeat_penalty": 1.18,
+                        "repeat_penalty": 1.14,
                         "max_tokens": max_tokens,
                         "stream": False,
                     }
@@ -1972,10 +1999,10 @@ class OfflineAsrService:
         minutes_prompt_template: str,
         preferred_ollama_model: str = "",
     ) -> Tuple[str, str]:
-        """Gera Ata Executiva estruturada via LLM local com cabeçalho determinístico e libera a RAM ao final."""
+        """Gera Ata Executiva encorpada via LLM local em 5 seções e libera a RAM ao final."""
         try:
             self.unload_asr_models()
-            compact_tr = self._compact_transcript_for_context(transcript_md, max_chars=6000)
+            compact_tr = self._compact_transcript_for_context(transcript_md, max_chars=8000)
             speakers_seen: List[str] = []
             for ln in compact_tr.splitlines():
                 m_t = _TURN_RE.match(ln.strip())
@@ -1993,40 +2020,53 @@ class OfflineAsrService:
                 "---\n\n"
             )
             sys_prompt = (
-                "Você é um assistente executivo sênior especialista em atas de reunião em Português do Brasil.\n"
+                "Você é um secretário executivo sênior redigindo uma Ata Executiva completa, encorpada e profissional "
+                "em Português do Brasil, fiel aos fatos debatidos.\n"
                 "REGRAS:\n"
-                "1. Seja objetivo, fiel ao diálogo e claro.\n"
-                "2. Máximo de 4 itens concisos por seção.\n"
-                "3. NUNCA repita a mesma informação ou frase em mais de uma seção.\n"
-                "4. NUNCA mencione nomes de arquivos (.md, .wav) nem motores técnicos de transcrição."
+                "1. Escreva frases completas, claras e informativas com base nos detalhes reais do diálogo (sem inventar fatos).\n"
+                "2. Desenvolva bem o contexto, os exemplos operacionais e as contribuições de cada participante.\n"
+                "3. Evite repetir exatamente a mesma frase entre seções; complemente em cada seção conforme seu objetivo.\n"
+                "4. NUNCA mencione nomes técnicos de arquivos (.md, .wav) nem motores internos de transcrição."
             )
             prompt = (
-                f"Reunião: {title} | Participantes: {speakers_str}\n\n"
-                "Gere SOMENTE o corpo em Markdown iniciando por `## 1. Resumo Executivo` e seguindo exatamente estas 4 seções:\n"
-                "## 1. Resumo Executivo\n"
-                "## 2. Principais Discussões e Contexto\n"
-                "## 3. Decisões e Alinhamentos\n"
-                "## 4. Plano de Ação e Próximos Passos\n\n"
-                f"Diálogo:\n{compact_tr}"
+                f"Reunião: {title} | Participantes: {speakers_str} | Duração: {duration_str}\n\n"
+                "Redija SOMENTE o corpo da Ata em Markdown começando por `## 1. Resumo Executivo e Contexto Geral` "
+                "e preenchendo detalhadamente todas estas 5 seções:\n\n"
+                "## 1. Resumo Executivo e Contexto Geral\n"
+                "(Escreva 1 a 2 parágrafos completos explicando o objetivo da reunião, a metodologia abordada, "
+                "os clientes/áreas citados e o direcionamento central.)\n\n"
+                "## 2. Detalhamento das Discussões por Tema\n"
+                "(Lista com tópicos completos descrevendo cada assunto debatido, exemplos operacionais citados — como planilhas Excel, "
+                "Drive compartilhado, relatórios de inadimplência, painel de frota, demandas de sistema interno e cronograma — "
+                "e o posicionamento dos participantes.)\n\n"
+                "## 3. Dores Operacionais e Oportunidades de Automação\n"
+                "(Liste os gargalos manuais relatados e as oportunidades de melhoria/automação levantadas.)\n\n"
+                "## 4. Decisões e Alinhamentos Firmados\n"
+                "(Liste todas as definições e acordos estabelecidos na conversa.)\n\n"
+                "## 5. Plano de Ação e Próximos Passos\n"
+                "(Itens no formato `- **[Responsável / Área]**: Ação detalhada — *Prazo / Momento combinado*`.)\n\n"
+                f"Transcrição da reunião:\n{compact_tr}"
             )
             txt, backend = self._chat_complete_local(
                 sys_prompt,
                 prompt,
-                temperature=0.15,
-                max_tokens=900,
-                timeout=180,
+                temperature=0.20,
+                max_tokens=1450,
+                timeout=210,
                 preferred_ollama_model=preferred_ollama_model,
             )
             if txt and len(txt.strip()) > 120:
                 cleaned = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", txt.strip()).strip()
-                # Remove cabeçalho duplicado caso o modelo ainda emita `# Ata...`
                 sec_pos = cleaned.find("## 1.")
                 if sec_pos >= 0:
                     cleaned = cleaned[sec_pos:].strip()
                 lines = cleaned.splitlines()
                 while lines and (
                     re.match(r"^\s*[-*]\s*(?:\*\*[^*]*)?$", lines[-1])
-                    or (not lines[-1].strip().endswith((".", "!", "?", ")")) and not lines[-1].lstrip().startswith("#"))
+                    or (
+                        not lines[-1].strip().endswith((".", "!", "?", ")", "*", "`"))
+                        and not lines[-1].lstrip().startswith("#")
+                    )
                 ):
                     lines.pop()
                 body_out = "\n".join(lines).strip()
