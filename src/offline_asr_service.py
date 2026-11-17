@@ -1480,6 +1480,8 @@ class OfflineAsrService:
         isolate_voice: bool = False,
         clarify_audio: bool = True,
         enhancement_mode: str = "clarify_room",
+        mic_owner_filter_enabled: bool = False,
+        mic_owner_profile_name: str = "",
     ) -> str:
         """Transcreve um bloco WAV (1ch Mono ou 2ch Estéreo L/R) 100% offline com diarização."""
         wav_path = Path(wav_path)
@@ -1500,6 +1502,13 @@ class OfflineAsrService:
             stereo = arr.reshape(-1, nchannels)
             left_f = _to_float32_mono(stereo[:, 0])
             right_f = _to_float32_mono(stereo[:, 1])
+
+            if mic_owner_filter_enabled and self.voiceprint_service and self.voiceprint_service.is_ready_for_matching():
+                owner_name = self.voiceprint_service.resolve_owner_profile_name(mic_owner_profile_name)
+                if owner_name:
+                    right_f, _ = self.voiceprint_service.filter_channel_to_speaker_samples(
+                        right_f, sr, owner_name=owner_name
+                    )
 
             events.extend(
                 self._process_channel_turns(
