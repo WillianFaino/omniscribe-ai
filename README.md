@@ -1,7 +1,7 @@
-# 🎙️ OmniScribe AI
+# 🎙️ Escutaí
 
-> **Universal Meeting Transcriber & Executive Minute Generator**  
-> Captura dual sincronizada de áudio (Sistema/Reunião + Microfone), transcrição incremental em tempo real e consolidação de Atas Executivas estruturadas via **Google Gemini 2.5 Flash**.
+> **Transcritor Universal de Reuniões & Gerador de Atas Executivas**  
+> Captura dual sincronizada de áudio (Sistema/Reunião + Microfone), transcrição incremental em tempo real (**Online via Google Gemini 2.5 Flash** ou **100% Offline via Whisper ONNX + Ollama**), biometria vocal (*voiceprints*), arquivo portátil `.escutai` (com retrocompatibilidade `.omniscribe`) e o mascote 3D **Vozito**.
 
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
 [![Google Gemini](https://img.shields.io/badge/Google%20Gemini-2.5%20Flash-4285F4?style=for-the-badge&logo=google&logoColor=white)](https://aistudio.google.com/)
@@ -12,11 +12,14 @@
 
 ## 🌟 Principais Recursos
 
-- **Plataforma-Agnóstica:** Funciona perfeitamente com **Google Meet, Microsoft Teams, Zoom, Discord, Slack Huddles, WhatsApp Desktop** ou em **modo ditado exclusivo de microfone**.
+- **Plataforma-Agnóstica:** Funciona perfeitamente com **Google Meet, Microsoft Teams, Zoom, Discord, Slack Huddles, WhatsApp Desktop**, **modo presencial (sala única)** ou **ditado exclusivo de microfone**.
 - **Captura Dual WASAPI Loopback (`pyaudiowpatch`):** 
   - **Canal Esquerdo (L):** Captura o som de saída do Windows (participantes remotos, mesmo usando fones de ouvido).
   - **Canal Direito (R):** Captura seu microfone local.
-- **Diferenciação Inteligente de Interlocutores:** O Gemini rotula automaticamente sua fala como `**Willian (Você)**` e os demais participantes como `**Participante A/B**` ou pelo nome real citado na conversa.
+- **Modo Híbrido (Online & 100% Offline):** Alterne entre **Google Gemini 2.5 Flash** (nuvem) e transcrição local **Whisper INT8 (`sherpa-onnx`) + Ollama** sem precisar de chave API nem conexão com a internet.
+- **Biometria Vocal (*Voiceprints*) & Diarização:** Identificação automática de participantes por voz (`ResNet34-LM` local em CPU) + separação L/R no modo Online.
+- **Pacotes Portáteis `.escutai`:** Salva áudio comprimido, transcrição, ata e segmentos indexados em um único arquivo SQLite portátil (mantendo compatibilidade total para abrir e importar arquivos legados `.omniscribe`).
+- **Mascote 3D Vozito:** Companheiro interativo retrô PS1 em janela flutuante com estados em tempo real e tema Claro/Escuro sincronizado.
 - **Atas Executivas Estruturadas em Markdown:** Ao encerrar, sintetiza:
   1. *Resumo Executivo*
   2. *Principais Tópicos com Horários*
@@ -26,36 +29,43 @@
 - **Noise Gate & Modo Ausente:** Limiar de corte de ruído ajustável e botão de mudo rápido em tempo real.
 - **Medidores VU em Tempo Real:** Barras visuais dinâmicas com resposta logarítmica para monitorar os níveis de volume de ambos os canais antes e durante a reunião.
 - **Rastreador de Cotas e Custos da API:** Monitor em tempo real das 1.500 requisições diárias gratuitas do Free Tier do Gemini, total de áudio/tokens processados e estimativa em USD e R$ (BRL).
-- **Histórico Visual de Gravações:** Navegue e visualize atas e transcrições passadas diretamente pela interface com um clique.
-- **Assistente de Instalação Gráfico (Setup Wizard):** Instalador moderno executável para que qualquer usuário instale o aplicativo com dois cliques, escolha a pasta de destino e crie atalhos no Desktop e Menu Iniciar.
-- **Inicialização Turbo (< 1s):** Empacotamento otimizado via PyInstaller em modo pré-extraído (`--onedir`), executável único (`--onefile`) ou instalador completo (`OmniScribe_Setup.exe`).
+- **Histórico Visual de Gravações:** Navegue, filtre, ouça áudio original, importe `.escutai`/`.omniscribe` e re-transcreva reuniões diretamente pela interface.
+- **Assistente de Instalação Gráfico (Setup Wizard):** Instalador nativo autocontido (`Escutai_Setup.exe`) com modelos offline já embutidos, seleção de pasta e criação de atalhos no Desktop e Menu Iniciar.
 
 ---
 
 ## 📁 Arquitetura do Projeto
 
 ```text
-omniscribe-ai/
+escutai/
 ├── .env                          # Chave de API do Gemini (GEMINI_API_KEY=...)
 ├── .env.example                  # Modelo de configuração
 ├── .gitignore                    # Regras de exclusão de arquivos sensíveis e temporários
 ├── requirements.txt              # Dependências do projeto
 ├── build_exe.bat                 # Script automatizado de compilação e instalador
-├── build_installer.bat           # Gerador dedicado do executável OmniScribe_Setup.exe
+├── build_installer.bat           # Gerador dedicado do executável Escutai_Setup.exe
+├── make_package.py               # Empacotador ZIP + stub C# WinForms (Escutai_Setup.exe)
 ├── README.md                     # Documentação completa
 ├── src/
 │   ├── main.py                   # Ponto de entrada, logging e boot da aplicação
 │   ├── audio_engine.py           # Descoberta WASAPI, captura dual, resampling 16kHz e VU meters
-│   ├── gemini_service.py         # Fila assíncrona, Gemini 2.5 Flash, limpeza de WAV e Ata
+│   ├── gemini_service.py         # Pipeline híbrido (Gemini 2.5 Flash + anti-loop + roteamento Offline) e Ata
+│   ├── offline_asr_service.py    # Transcrição 100% offline (sherpa-onnx Whisper INT8 + VAD + Ollama)
+│   ├── archive_service.py        # Empacotador SQLite portátil (.escutai / legado .omniscribe)
+│   ├── voiceprint_service.py     # Biometria vocal ONNX local (ResNet34-LM + Silero VAD)
 │   ├── usage_tracker.py          # Monitor de requisições, limites Free Tier e cálculo de custos
-│   ├── installer.py              # Assistente visual de instalação (Setup Wizard CustomTkinter)
-│   └── gui.py                    # Interface CustomTkinter (Dark Theme, abas, histórico e cotas)
+│   ├── mascot_3d.py              # Renderizador 3D do mascote Vozito (sprites RGBA PS1 + fallback)
+│   ├── mascot_widget.py          # Widget flutuante arrastável VozitoWidget com balão estilo XP
+│   ├── installer_native.cs       # Stub instalador nativo WinForms/C# com EOF Overlay
+│   ├── installer.py              # Assistente visual de instalação alternativo (CustomTkinter)
+│   └── gui.py                    # Interface CustomTkinter (abas, temas, histórico, voiceprints e cotas)
 └── atas_reunioes/                # Gerada automaticamente em runtime
     ├── usage_stats.json          # Persistência das métricas e limites da API
     └── AAAA/
         └── MM/
             ├── transcricao_YYYYMMDD_HHMM[_titulo].md
-            └── ata_executiva_YYYYMMDD_HHMM[_titulo].md
+            ├── ata_executiva_YYYYMMDD_HHMM[_titulo].md
+            └── reuniao_YYYYMMDD_HHMM[_titulo].escutai
 ```
 
 ---
@@ -70,8 +80,8 @@ omniscribe-ai/
 ### 1. Clonar e Instalar Dependências
 ```bash
 # Clone o repositório
-git clone https://github.com/SEU_USUARIO/omniscribe-ai.git
-cd omniscribe-ai
+git clone https://github.com/WillianFaino/omniscribe-ai.git
+cd zoom-transcriber
 
 # Crie um ambiente virtual (opcional, recomendado)
 python -m venv venv
@@ -103,9 +113,9 @@ build_exe.bat
 ```
 
 Você pode escolher entre:
-1. **[1] Modo Turbo Instantâneo (`--onedir` - Recomendado):** Abre em menos de 1 segundo! Gera a pasta `dist\OmniScribe\OmniScribe.exe`.
-2. **[2] Executável Único (`--onefile`):** Gera um único arquivo portável em `dist\OmniScribe.exe`.
-3. **[3] Assistente de Instalação Gráfico:** Gera o instalador autônomo profissional `dist\OmniScribe_Setup.exe`.
+1. **[1] Modo Turbo Instantâneo (`--onedir` - Recomendado):** Abre em menos de 1 segundo! Gera a pasta `dist\Escutai\Escutai.exe`.
+2. **[2] Executável Único (`--onefile`):** Gera um único arquivo portável em `dist\Escutai.exe`.
+3. **[3] Assistente de Instalação Gráfico:** Gera o instalador autônomo profissional `dist\Escutai_Setup.exe`.
 
 > 💡 **Dica:** Você também pode gerar o instalador diretamente executando `build_installer.bat`!
 

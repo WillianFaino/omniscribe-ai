@@ -1,32 +1,32 @@
-# Handoff Técnico — OmniScribe AI
+# Handoff Técnico — Escutaí
 
-> Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **OmniScribe AI**.
-> Última atualização: 16/11/2026 (baseado no commit `5bdc492` na branch `main`, após PR #18).
+> Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **Escutaí** (anteriormente *OmniScribe AI*).
+> Última atualização: 17/11/2026 (baseado no commit `5bdc492` na branch `main` + rebranding 5.F na branch `feat/rebrand-escutai-vozito`).
 
 ---
 
 ## 1. Visão Geral do Projeto
 
-O **OmniScribe AI** é uma aplicação desktop para **Windows 10/11** em Python (`3.11+`) que realiza:
+O **Escutaí** é uma aplicação desktop para **Windows 10/11** em Python (`3.11+`) que realiza:
 1. **Captura dual sincronizada de áudio** via WASAPI (saída do sistema em loopback + microfone local).
-2. **Transcrição incremental em blocos** usando a API do **Google Gemini (`gemini-2.5-flash`)** com diarização entre o usuário local (**Canal Direito / R**) e participantes remotos (**Canal Esquerdo / L**).
-3. **Geração consolidada de Ata Executiva** estruturada em Markdown ao encerrar a sessão.
-4. **Acompanhamento visual e interativo** por medidores VU, histórico de atas, monitor de cota/custo da API e o mascote 3D **OmniMic** estilo Windows 95/XP.
+2. **Transcrição incremental em blocos** usando a API do **Google Gemini (`gemini-2.5-flash`)** com diarização entre o usuário local (**Canal Direito / R**) e participantes remotos (**Canal Esquerdo / L**), ou **modo 100% Offline** (`sherpa-onnx` Whisper INT8).
+3. **Geração consolidada de Ata Executiva** estruturada em Markdown ao encerrar a sessão e empacotamento portátil **`.escutai`** (com retrocompatibilidade para `.omniscribe`).
+4. **Acompanhamento visual e interativo** por medidores VU, histórico de atas, monitor de cota/custo da API e o mascote 3D **Vozito** (anteriormente *OmniMic*) estilo Windows 95/XP.
 
 ---
 
 ## 2. Estrutura do Repositório
 
 ```text
-omniscribe-ai/
+zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
 ├── .env.example              # Template de configuração (GEMINI_API_KEY)
-├── .gitignore                # Ignora build/, dist/, *.exe, *.zip, .env, atas_reunioes/, temp_blocks/, *.wav, *.blend1/2
+├── .gitignore                # Ignora build/, dist/, *.exe, *.zip, *.escutai, *.omniscribe, .env, atas_reunioes/, temp_blocks/, *.wav
 ├── AGENTS.md                 # Diretrizes de fluxo Git/PR e manutenção do HANDOFF.md
 ├── README.md                 # Documentação de uso e recursos
 ├── HANDOFF.md                # Este documento de handoff
 ├── requirements.txt          # Dependências Python
 ├── build_exe.bat             # Script interativo de build (--onedir, --onefile ou Setup)
-├── build_installer.bat       # Script dedicado para gerar OmniScribe_Setup.exe
+├── build_installer.bat       # Script dedicado para gerar Escutai_Setup.exe
 ├── make_package.py           # Empacotador ZIP + compilador do instalador nativo Win32/.NET
 ├── assets/
 │   ├── blender/
@@ -48,12 +48,12 @@ omniscribe-ai/
     ├── audio_engine.py       # Descoberta WASAPI, captura dual, resampling 16 kHz, noise gate e VU meters
     ├── gemini_service.py     # Orquestrador híbrido (Gemini 2.5 + anti-loop + roteamento Offline) e Ata Executiva
     ├── offline_asr_service.py# Transcrição 100% offline (sherpa-onnx Whisper INT8 + VAD + Ollama/síntese local)
-    ├── archive_service.py    # Pacote portátil SQLite (.omniscribe) com áudio comprimido (b4p_zlib) e segmentos
+    ├── archive_service.py    # Pacote portátil SQLite (.escutai / legado .omniscribe) com áudio comprimido (b4p_zlib)
     ├── voiceprint_service.py # Biometria vocal ONNX (sherpa-onnx + ResNet34-LM + Silero VAD) e identificação automática
     ├── usage_tracker.py      # Persistência de uso diário (Free Tier 1.500 req/dia) e cálculo estimado USD/BRL
     ├── gui.py                # Interface CustomTkinter (ZoomTranscriberApp + modais VoiceProfiles, ApiKey, Usage, History e Retranscribe)
-    ├── mascot_3d.py          # Renderizador 3D software Ultra Low-Poly (NumPy + Pillow) do OmniMic
-    ├── mascot_widget.py      # Widget flutuante/arrastável OmniMicWidget com balão XP e máquina de estados
+    ├── mascot_3d.py          # Renderizador 3D software Ultra Low-Poly (NumPy + Pillow) do Vozito (`Vozito3DRenderer` / `OmniMic3DRenderer`)
+    ├── mascot_widget.py      # Widget flutuante/arrastável (`VozitoWidget` / `OmniMicWidget`) com balão XP e máquina de estados
     ├── installer.py          # Setup Wizard em CustomTkinter (alternativa Python ao instalador nativo)
     └── installer_native.cs   # Stub WinForms/C# (~30 KB) que lê app_data.zip acoplado via EOF Overlay ('OMNISCRB')
 ```
@@ -95,7 +95,7 @@ omniscribe-ai/
 - No modo **Offline** (`engine_mode="offline"`), `_process_single_block_offline` transcreve localmente via `OfflineAsrService` (Whisper INT8 ONNX + Silero VAD + `VoiceprintService`) sem chamadas à nuvem.
 - Ao receber a sentinela `None` via `finish_session()`, `_generate_executive_minutes()`:
   1. Em modo Online, executa **segunda passada fono-semântica** (`_refine_transcript_phonetics`, `temperature=0.15`, validada sobre o texto já limpo de loops) e gera a Ata via `MINUTES_SYSTEM_PROMPT`; em modo Offline, gera via **Ollama local** ou sintetizador determinístico estruturado.
-  2. Quando `auto_export_sqlite` está ativo (padrão), empacota texto, metadados, segmentos e áudio compactado (`b4p_zlib`) em `atas_reunioes/AAAA/MM/reuniao_YYYYMMDD_HHMM[_titulo].omniscribe`.
+  2. Quando `auto_export_sqlite` está ativo (padrão), empacota texto, metadados, segmentos e áudio compactado (`b4p_zlib`) em `atas_reunioes/AAAA/MM/reuniao_YYYYMMDD_HHMM[_titulo].escutai`.
 
 ### 3.4 Monitoramento de Cotas e Custos (`src/usage_tracker.py`)
 - Persiste métricas em `atas_reunioes/usage_stats.json`.
@@ -111,17 +111,17 @@ omniscribe-ai/
 ### 3.5 Interface Gráfica v2.0 (`src/gui.py`)
 - Classe principal `ZoomTranscriberApp(ctk.CTk)` com paleta dupla `(Light, Dark)` de alto contraste (WCAG AA >= 4.5:1 no Dark/Light, **Modo Escuro** como padrão + alternador instantâneo `☀️ Claro / 🌙 Escuro` persistido em `atas_reunioes/ui_settings.json`) e navegação limpa em **4 abas principais** no topo (`🎙️ Gravação`, `📋 Ata`, `🗂️ Histórico`, `⚙️ Config & Voz`):
   - **Aba `🎙️ Gravação`**: título + glossário (50%/50%), sublinha limpa com `Captação` (`Online`/`Presencial`) e `Motor de IA` (`☁️ Gemini` / `💻 Offline`), botão único principal, cronômetro, medidores VU, barra de progresso assíncrona (`bar_async_progress`) e transcrição ao vivo.
-  - **Aba `📋 Ata`**: leitura da Ata Executiva com `📂 Abrir Pasta`, `📦 Exportar .omniscribe` e `📋 Copiar Ata Markdown`.
-  - **Aba `🗂️ Histórico`**: listagem nativa unificada de `.omniscribe`, `.wav` e `.md` via `render_history_cards_into()`, com **busca instantânea**, filtros por tipo, `📥 Importar .omniscribe`, player (`▶ Ouvir`), abertura direta e `🔄 Re-transcrever`.
-  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + bloco (1/3/5 min) + Noise Gate, `GEMINI_API_KEY` + medidor Free Tier, Voiceprints, card Offline (`Whisper small/base` + download com barra de progresso + detector Ollama + checkbox `.omniscribe`) e gaveta de logs técnicos recolhível.
+  - **Aba `📋 Ata`**: leitura da Ata Executiva com `📂 Abrir Pasta`, `📦 Exportar .escutai` e `📋 Copiar Ata Markdown`.
+  - **Aba `🗂️ Histórico`**: listagem nativa unificada de `.escutai`/`.omniscribe`, `.wav` e `.md` via `render_history_cards_into()`, com **busca instantânea**, filtros por tipo (`📦 Pacotes`), `📥 Importar Pacote`, player (`▶ Ouvir`), abertura direta e `🔄 Re-transcrever`.
+  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + bloco (1/3/5 min) + Noise Gate, `GEMINI_API_KEY` + medidor Free Tier, Voiceprints, card Offline (`Whisper small/base` + download com barra de progresso + detector Ollama + checkbox `.escutai`) e gaveta de logs técnicos recolhível.
 - Modais auxiliares (`VoiceProfilesModal`, `RetranscribeModal` com seletor Online/Offline, `ApiKeyModal`, `UsageModal`, `HistoryModal`) estilizados uniformemente com `_style_option_menu`.
 
-### 3.6 Mascote 3D OmniMic (`src/mascot_3d.py` e `src/mascot_widget.py`)
-- **Renderização (`OmniMic3DRenderer`)**: carrega diretamente as **sprite sheets RGBA transparentes** de `assets/mascot/` (`idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning`, `sleeping`, `spin`) renderizadas em Blender EEVEE com o shader `NG_PS1_Bayer4x4` e os 4 props oficiais, fazendo composição limpa sobre o fundo do tema ativo (com fallback automático para a malha procedural caso `assets/mascot/` não exista).
-- **Interatividade (`OmniMicWidget`)**:
+### 3.6 Mascote 3D Vozito (`src/mascot_3d.py` e `src/mascot_widget.py`)
+- **Renderização (`Vozito3DRenderer` / `OmniMic3DRenderer`)**: carrega diretamente as **sprite sheets RGBA transparentes** de `assets/mascot/` (`idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning`, `sleeping`, `spin`) renderizadas em Blender EEVEE com o shader `NG_PS1_Bayer4x4` e os 4 props oficiais, fazendo composição limpa sobre o fundo do tema ativo (com fallback automático para a malha procedural caso `assets/mascot/` não exista).
+- **Interatividade (`VozitoWidget` / `OmniMicWidget`)**:
   - Overlay flutuante/arrastável no canto da janela com método `set_theme("Dark" | "Light")` sincronizando card, fundo do sprite e balão XP ao alternador de tema da GUI.
   - Reação a eventos da aplicação: `greeting`, `idle`, `sleeping` (após 45s sem interação), `listening` (com mini-mic LED ciano e velocidade sensível ao RMS), `transcribing` (bloquinho amarelo + lápis), `celebrating` (troféu dourado ao finalizar ata), `warning` e `spin` (rotação 360° em câmera orbital).
-  - Visibilidade alternável pelo botão `🤖 OmniMic` na barra superior.
+  - Visibilidade alternável pelo botão `🤖 Vozito` na barra superior.
 - **Assets 3D em Blender (`assets/blender/omnimic_tpose.blend` e `assets/references/`)**:
   - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
   - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
@@ -159,10 +159,10 @@ python src/main.py
 
 ### Build e Distribuição (Windows)
 - **`build_exe.bat`**: oferece backup automático de `atas_reunioes/` e `.env` de builds anteriores e gera:
-  - `[1]` `--onedir` (`dist/OmniScribe/OmniScribe.exe`) — inicialização rápida (`~3,25s` / `APP_STARTUP_MS=3252`) e build enxuto reduzido para **1.155 arquivos** via `--hidden-import "google.genai"` e exclusões no PyInstaller.
-  - `[2]` `--onefile` (`dist/OmniScribe.exe`).
-  - `[3]` Instalador nativo (`dist/OmniScribe_Setup.exe` + cópia na raiz).
-- **`build_installer.bat`**: prepara/baixa os modelos ONNX locais (`python src/offline_asr_service.py --prepare small`, removendo pesos FP32 redundantes), copia `models\voiceprint` + `models\asr\sherpa-onnx-whisper-small` para `dist\OmniScribe\models\` e gera `dist/OmniScribe_Setup.exe` (**~417 MB** autocontido com modelos offline embutidos, abertura instantânea via stub C# `src/installer_native.cs` + payload EOF `OMNISCRB` em `make_package.py`).
+  - `[1]` `--onedir` (`dist/Escutai/Escutai.exe`) — inicialização rápida (`~3,25s` / `APP_STARTUP_MS=3252`) e build enxuto reduzido para **1.155 arquivos** via `--hidden-import "google.genai"` e exclusões no PyInstaller.
+  - `[2]` `--onefile` (`dist/Escutai.exe`).
+  - `[3]` Instalador nativo (`dist/Escutai_Setup.exe` + cópia na raiz).
+- **`build_installer.bat`**: prepara/baixa os modelos ONNX locais (`python src/offline_asr_service.py --prepare small`, removendo pesos FP32 redundantes), copia `models\voiceprint` + `models\asr\sherpa-onnx-whisper-small` para `dist\Escutai\models\` e gera `dist/Escutai_Setup.exe` (**~417 MB** autocontido com modelos offline embutidos, abertura instantânea via stub C# `src/installer_native.cs` + payload EOF `OMNISCRB` em `make_package.py`).
 
 ---
 
@@ -186,15 +186,15 @@ python src/main.py
 2. **Pipeline Local Offline (`src/offline_asr_service.py`):** ASR local via `sherpa-onnx` **Whisper `small` / `base` INT8 ONNX** com download sob demanda, segmentação Silero VAD + diarização biométrica via `VoiceprintService` (`Estéreo L/R` e `Mono Presencial`) e geração da Ata via **Ollama local** (`localhost:11434`, quando ativo) ou sintetizador estruturado determinístico.
 
 ### D. Armazenamento Portátil em SQLite por Gravação — **[IMPLEMENTADO]**
-1. **Arquivo Único Autocontido (`.omniscribe`):** empacotamento em SQLite (`src/archive_service.py`) contendo metadados, documentos Markdown (`transcrição` e `ata`), segmentos indexados (`transcript_segments`) e áudio oficial compactado em chunks via codec `b4p_zlib` (Block-4bit PCM + `zlib`, ~5x–9x menor sem depender de FFmpeg).
-2. **Compartilhamento Direto & Modo Híbrido:** exportação automática ao finalizar sessão, botão **📦 Exportar .omniscribe** na aba Ata, e importação/leitura/playback/re-transcrição direta de `.omniscribe` na aba Histórico.
+1. **Arquivo Único Autocontido (`.escutai`, com retrocompatibilidade `.omniscribe`):** empacotamento em SQLite (`src/archive_service.py`) contendo metadados, documentos Markdown (`transcrição` e `ata`), segmentos indexados (`transcript_segments`) e áudio oficial compactado em chunks via codec `b4p_zlib` (Block-4bit PCM + `zlib`, ~5x–9x menor sem depender de FFmpeg).
+2. **Compartilhamento Direto & Modo Híbrido:** exportação automática ao finalizar sessão, botão **📦 Exportar .escutai** na aba Ata, e importação/leitura/playback/re-transcrição direta de `.escutai` e `.omniscribe` na aba Histórico.
 
 ### E. Upload e Transcrição de Arquivos de Áudio e Vídeo
 1. **Importação Direta (Drag-and-Drop / Seletor):** aceitar `.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`, `.mp3`, `.wav`, `.m4a`, `.ogg` e `.flac` pela tela inicial.
 2. **Extração & Segmentação Automática:** converter a faixa de áudio (via `ffmpeg` ou `av`/`pydub`) para chunks de `16 kHz` com barra de progresso e aplicar o mesmo pipeline de diarização e geração de Ata Executiva.
 
-### F. Rebranding e Nome Mais Acessível
-1. **Novo Nome da Ferramenta:** substituir *OmniScribe AI* (comprido e de leitura difícil para usuários com pouco contato com a língua inglesa) por um nome mais curto, simples e intuitivo.
+### F. Rebranding e Nome Mais Acessível — **[IMPLEMENTADO]**
+1. **Identidade Visual & Nomes Acessíveis (`Escutaí` & `Vozito`):** aplicativo renomeado de *OmniScribe AI* para **Escutaí** e mascote 3D renomeado de *OmniMic* para **Vozito** (com aliases `VozitoWidget` / `Vozito3DRenderer` preservando retrocompatibilidade interna), executáveis `Escutai.exe` / `Escutai_Setup.exe`, pasta de instalação `%LOCALAPPDATA%\Programs\Escutai` e extensão padrão **`.escutai`** mantendo suporte total de leitura/importação para pacotes legados `.omniscribe`.
 
 ### G. Arquitetura Multi-LLM Agnóstica, Autenticação por Login e Fallback Automático
 1. **Independência de Provedor/Modelo:** tornar a aplicação agnóstica ao modelo de LLM, permitindo ao usuário escolher entre **Claude, ChatGPT (OpenAI), Gemini, Grok** e outros provedores compatíveis.
@@ -209,11 +209,11 @@ python src/main.py
 
 ## 6. Estado Atual do Git e Pontos de Atenção
 
-- **Branch base**: `main` (sincronizada com `origin/main` no commit `5bdc492`, após os PRs #14 anti-loop, #15 modos Offline 5.C e SQLite 5.D, #16 auditoria UI/UX Pro Max e #17/#18 empacotador com modelos ONNX embutidos).
-- **Instalador Windows (`OmniScribe_Setup.exe`)**: compilado com `417.00 MB` (`1.205` arquivos, incluindo `models/voiceprint` e `models/asr/sherpa-onnx-whisper-small` INT8) para uso imediato offline desde a instalação.
+- **Branch base**: `main` (sincronizada com `origin/main` no commit `5bdc492` após PRs #14–#18; rebranding Escutaí / Vozito implementado na branch `feat/rebrand-escutai-vozito`).
+- **Instalador Windows (`Escutai_Setup.exe`, ex-`OmniScribe_Setup.exe`)**: ~417 MB (~1.205 arquivos com `models/voiceprint` e `models/asr/sherpa-onnx-whisper-small` INT8 embutidos) — **nota pós-merge:** recompilar o binário no Windows para refletir `Escutai.exe` e `Escutai_Setup.exe` após o merge do rebranding.
 - **Dependência externa principal (apenas modo Online)**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal). No modo **Offline**, o app opera integralmente sem API Key.
 - **Observações técnicas conhecidas no código atual**:
   - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` e `src/offline_asr_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).
-  - O nome da classe principal em `src/gui.py` ainda é `ZoomTranscriberApp` (herança da fase inicial de MVP).
+  - O nome da classe principal em `src/gui.py` ainda é `ZoomTranscriberApp` e os arquivos/rigs Blender originais mantêm o prefixo `omnimic_*` + assinatura EOF `'OMNISCRB'` em `make_package.py` / `src/installer_native.cs` para estabilidade binária.
   - Os arquivos `src/installer.py` (CustomTkinter) e `src/installer_native.cs` (WinForms nativo) coexistem no repositório; o fluxo oficial dos `.bat` e `make_package.py` utiliza `src/installer_native.cs`.
   - Os testes de regressão/smoke são executados sob demanda via Python e ainda não estão organizados em uma suíte `pytest` versionada em `tests/`.

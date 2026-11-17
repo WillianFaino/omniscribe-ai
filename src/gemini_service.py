@@ -1,4 +1,4 @@
-"""Serviço OmniScribe AI de integração com a API do Google Gemini (gemini-2.5-flash).
+"""Serviço do Escutaí de integração com a API do Google Gemini (gemini-2.5-flash).
 
 Gerencia fila assíncrona de blocos de áudio, upload via Files API,
 transcrição incremental estéreo (Online L/R) ou mono (Presencial em sala),
@@ -153,7 +153,7 @@ class AudioBlockTask:
 class GeminiService:
     """Gerenciador do pipeline de transcrição incremental e consolidação da Ata."""
 
-    TRANSCRIPTION_SYSTEM_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do OmniScribe AI.
+    TRANSCRIPTION_SYSTEM_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do Escutaí.
 O áudio fornecido em WAV estéreo possui exatamente 2 canais sincronizados:
 - CANAL DIREITO (Right / R): Microfone local do usuário -> SEMPRE identificado como **Willian (Você)**.
 - CANAL ESQUERDO (Left / L): Áudio do sistema (Reuniões Google Meet/Teams/Zoom/Discord, vídeos do YouTube, podcasts ou palestras).
@@ -191,7 +191,7 @@ DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO E IDENTIFICAÇÃO DE VOZES:
    - REGRA CRÍTICA ANTI-LOOP: Nunca repita palavras, gaguejos, partículas ("que o, que o...") ou turnos idênticos em ciclo repetitivo; em hesitações, registre no máximo 1 vez (ou `[incompreensível]`) e avance no áudio. Mantenha estritamente o idioma português e o formato `[MM:SS] **Falante**: <fala>` do início ao fim (nunca mude para cabeçalhos `**MM:SS - MM:SS**` nem verbos em inglês como `speaks.`).
 """
 
-    PRESENTIAL_TRANSCRIPTION_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do OmniScribe AI.
+    PRESENTIAL_TRANSCRIPTION_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do Escutaí.
 O áudio fornecido em WAV MONO (1 canal) foi captado por um único microfone de ambiente em uma **REUNIÃO PRESENCIAL** de sala única (com múltiplos participantes falando ao redor do mesmo microfone).
 
 DIRETRIZES FUNDAMENTAIS DE DIARIZAÇÃO ACÚSTICA EM SALA ÚNICA:
@@ -412,7 +412,7 @@ Transcrição completa da reunião:
             if source_audio_path is not None
             else (target_dir / f"audio_{timestamp_str}{suffix}.wav")
         )
-        self.archive_file_path = target_dir / f"reuniao_{timestamp_str}{suffix}.omniscribe"
+        self.archive_file_path = target_dir / f"reuniao_{timestamp_str}{suffix}.escutai"
 
         # Inicializa o arquivo de transcrição com cabeçalho Markdown
         data_formatada = self.meeting_start_time.strftime("%d/%m/%Y às %H:%M")
@@ -570,7 +570,7 @@ Transcrição completa da reunião:
 
     @classmethod
     def _normalize_broken_format(cls, text: str) -> Tuple[str, bool]:
-        """Detecta e converte cabeçalhos `**MM:SS - MM:SS**` / `- Falante speaks.` para o padrão OmniScribe."""
+        """Detecta e converte cabeçalhos `**MM:SS - MM:SS**` / `- Falante speaks.` para o padrão Escutaí."""
         out_lines: List[str] = []
         broken_detected = False
         pending_ts: Optional[str] = None
@@ -1049,11 +1049,11 @@ Transcrição completa da reunião:
             logger.exception(f"Erro ao escrever no arquivo de transcrição: {e}")
 
     def _export_session_archive(self, transcript_md: str, minutes_md: str) -> None:
-        """Exporta o pacote SQLite portátil `.omniscribe` contendo texto e áudio comprimido da reunião."""
+        """Exporta o pacote SQLite portátil `.escutai` contendo texto e áudio comprimido da reunião."""
         if not self.auto_export_sqlite or not self.archive_file_path:
             return
         try:
-            self._set_status("Compactando pacote SQLite (.omniscribe)...")
+            self._set_status("Compactando pacote SQLite (.escutai)...")
             summary = self.archive_service.export_meeting_package(
                 output_path=self.archive_file_path,
                 title=self.meeting_title or "Reuniao",
@@ -1074,11 +1074,11 @@ Transcrição completa da reunião:
             if self.on_archive_generated:
                 self.on_archive_generated(self.archive_file_path, summary)
         except Exception as arch_err:
-            logger.warning(f"Falha ao gerar pacote SQLite .omniscribe: {arch_err}")
-            self._log(f"[AVISO] Não foi possível gerar pacote .omniscribe: {arch_err}")
+            logger.warning(f"Falha ao gerar pacote SQLite .escutai: {arch_err}")
+            self._log(f"[AVISO] Não foi possível gerar pacote .escutai: {arch_err}")
 
     def _generate_executive_minutes(self) -> None:
-        """Lê a transcrição consolidada, gera a Ata Executiva (Online ou Offline) e salva o pacote `.omniscribe`."""
+        """Lê a transcrição consolidada, gera a Ata Executiva (Online ou Offline) e salva o pacote `.escutai`."""
         if not self.transcription_file_path or not self.minute_file_path:
             self._log("[ERRO] Caminhos de arquivos de Ata não definidos.")
             return

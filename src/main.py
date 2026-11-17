@@ -1,4 +1,4 @@
-"""Ponto de entrada principal do OmniScribe AI - Universal Meeting Transcriber.
+"""Ponto de entrada principal do Escutaí - Transcrição e Atas Inteligentes de Reuniões.
 
 Configura ambiente de execução, caminhos de importação, logging global e inicia a interface CustomTkinter.
 """
@@ -52,7 +52,7 @@ def main():
     """Inicializa o sistema e dispara o loop de eventos da interface gráfica."""
     setup_logging()
     logger = logging.getLogger("omniscribe.main")
-    logger.info("Iniciando OmniScribe AI...")
+    logger.info("Iniciando Escutaí...")
     logger.info(f"Diretório base detectado: {get_base_dir()}")
 
     # Pré-carrega variáveis de ambiente

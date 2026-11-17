@@ -179,7 +179,7 @@ namespace OmniScribeSetup
 
         public InstallerForm()
         {
-            Text = "Instalador do OmniScribe AI";
+            Text = "Instalador do Escutaí";
             ClientSize = new Size(640, 480);
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false;
@@ -189,7 +189,7 @@ namespace OmniScribeSetup
             Font = new Font("Segoe UI", 9.5f);
 
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            _targetDir = Path.Combine(localAppData, "Programs", "OmniScribe AI");
+            _targetDir = Path.Combine(localAppData, "Programs", "Escutai");
 
             BuildShell();
             ShowStep(1);
@@ -312,7 +312,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(badge);
 
             Label title = new Label();
-            title.Text = "Bem-vindo ao Assistente de Instalação\ndo OmniScribe AI";
+            title.Text = "Bem-vindo ao Assistente de Instalação\ndo Escutaí";
             title.Font = new Font("Segoe UI", 17f, FontStyle.Bold);
             title.ForeColor = TextMain;
             title.Size = new Size(576, 70);
@@ -327,7 +327,7 @@ namespace OmniScribeSetup
 
             Label desc = new Label();
             desc.Text =
-                "O OmniScribe AI realiza transcrição incremental em tempo real e gera Atas Executivas\n" +
+                "O Escutaí realiza transcrição incremental em tempo real e gera Atas Executivas\n" +
                 "automáticas para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n" +
                 "Recursos incluídos nesta versão:\n" +
                 "  - Diarização multi-voz inteligente e suporte a falas sobrepostas\n" +
@@ -358,7 +358,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(title);
 
             Label sub = new Label();
-            sub.Text = "Escolha a pasta onde o OmniScribe AI será instalado em seu computador:";
+            sub.Text = "Escolha a pasta onde o Escutaí será instalado em seu computador:";
             sub.Font = new Font("Segoe UI", 9.5f);
             sub.ForeColor = TextMuted;
             sub.Location = new Point(32, 74);
@@ -385,14 +385,14 @@ namespace OmniScribeSetup
             {
                 using (FolderBrowserDialog dlg = new FolderBrowserDialog())
                 {
-                    dlg.Description = "Selecione a pasta de destino para o OmniScribe AI";
+                    dlg.Description = "Selecione a pasta de destino para o Escutaí";
                     dlg.SelectedPath = _txtDir.Text;
                     if (dlg.ShowDialog(this) == DialogResult.OK && !string.IsNullOrEmpty(dlg.SelectedPath))
                     {
                         string chosen = dlg.SelectedPath;
-                        if (!chosen.EndsWith("OmniScribe AI", StringComparison.OrdinalIgnoreCase))
+                        if (!chosen.EndsWith("Escutai", StringComparison.OrdinalIgnoreCase))
                         {
-                            chosen = Path.Combine(chosen, "OmniScribe AI");
+                            chosen = Path.Combine(chosen, "Escutai");
                         }
                         _targetDir = chosen;
                         _txtDir.Text = chosen;
@@ -477,7 +477,7 @@ namespace OmniScribeSetup
             _btnNext.BackColor = BtnGray;
 
             Label title = new Label();
-            title.Text = "Instalando o OmniScribe AI...";
+            title.Text = "Instalando o Escutaí...";
             title.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
             title.ForeColor = TextMain;
             title.Location = new Point(32, 70);
@@ -527,7 +527,7 @@ namespace OmniScribeSetup
 
             Label desc = new Label();
             desc.Text =
-                "O OmniScribe AI foi instalado com sucesso em:\n" +
+                "O Escutaí foi instalado com sucesso em:\n" +
                 _targetDir + "\n\n" +
                 "Seus atalhos foram configurados e o software está pronto para uso imediato.";
             desc.Font = new Font("Segoe UI", 9.5f);
@@ -538,7 +538,7 @@ namespace OmniScribeSetup
             _pageContainer.Controls.Add(card);
 
             _chkLaunch = new CheckBox();
-            _chkLaunch.Text = "Iniciar o OmniScribe AI agora";
+            _chkLaunch.Text = "Iniciar o Escutaí agora";
             _chkLaunch.Checked = _launchNow;
             _chkLaunch.Font = new Font("Segoe UI", 10.5f, FontStyle.Bold);
             _chkLaunch.ForeColor = TextMain;
@@ -594,6 +594,7 @@ namespace OmniScribeSetup
             try
             {
                 UpdateProgress(0.08, "Fechando instâncias em execução...");
+                RunHiddenProcess("taskkill.exe", "/f /im Escutai.exe");
                 RunHiddenProcess("taskkill.exe", "/f /im OmniScribe.exe");
                 Thread.Sleep(150);
 
@@ -644,10 +645,14 @@ namespace OmniScribeSetup
                     }
                     else
                     {
-                        string externalDir = Path.Combine(exeDir, "dist", "OmniScribe");
+                        string externalDir = Path.Combine(exeDir, "dist", "Escutai");
+                        if (!Directory.Exists(externalDir))
+                        {
+                            externalDir = Path.Combine(exeDir, "dist", "OmniScribe");
+                        }
                         if (Directory.Exists(externalDir))
                         {
-                            UpdateProgress(0.45, "Copiando arquivos do OmniScribe AI...");
+                            UpdateProgress(0.45, "Copiando arquivos do Escutaí...");
                             CopyDirectory(externalDir, fullTargetDir);
                         }
                         else
@@ -681,16 +686,20 @@ namespace OmniScribeSetup
                 WriteUninstaller(fullTargetDir);
 
                 UpdateProgress(0.95, "Criando atalhos no Windows...");
-                string exePath = Path.Combine(fullTargetDir, "OmniScribe.exe");
+                string exePath = Path.Combine(fullTargetDir, "Escutai.exe");
+                if (!File.Exists(exePath))
+                {
+                    exePath = Path.Combine(fullTargetDir, "OmniScribe.exe");
+                }
                 if (_desktopShortcut)
                 {
                     string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-                    CreateShortcut(exePath, Path.Combine(desktop, "OmniScribe AI.lnk"), fullTargetDir);
+                    CreateShortcut(exePath, Path.Combine(desktop, "Escutaí.lnk"), fullTargetDir);
                 }
                 if (_startShortcut)
                 {
                     string startMenu = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
-                    CreateShortcut(exePath, Path.Combine(startMenu, "OmniScribe AI.lnk"), fullTargetDir);
+                    CreateShortcut(exePath, Path.Combine(startMenu, "Escutaí.lnk"), fullTargetDir);
                 }
 
                 UpdateProgress(1.0, "Instalação concluída!");
@@ -812,7 +821,7 @@ namespace OmniScribeSetup
                     "$s = $ws.CreateShortcut('{0}'); " +
                     "$s.TargetPath = '{1}'; " +
                     "$s.WorkingDirectory = '{2}'; " +
-                    "$s.Description = 'OmniScribe AI'; " +
+                    "$s.Description = 'Escutaí'; " +
                     "$s.Save()",
                     safeShortcut, safeTarget, safeWork);
 
@@ -831,20 +840,23 @@ namespace OmniScribeSetup
                 string script =
                     "@echo off\r\n" +
                     "chcp 65001 >nul\r\n" +
-                    "title Desinstalador do OmniScribe AI\r\n" +
+                    "title Desinstalador do Escutaí\r\n" +
                     "echo ===============================================================================\r\n" +
-                    "echo                   Desinstalador do OmniScribe AI\r\n" +
+                    "echo                       Desinstalador do Escutaí\r\n" +
                     "echo ===============================================================================\r\n" +
                     "echo.\r\n" +
-                    "set /p CONFIRM=\"Deseja remover o OmniScribe AI deste computador? (S/N): \"\r\n" +
+                    "set /p CONFIRM=\"Deseja remover o Escutaí deste computador? (S/N): \"\r\n" +
                     "if /i not \"%CONFIRM%\"==\"S\" exit /b\r\n" +
+                    "taskkill /f /im Escutai.exe >nul 2>&1\r\n" +
                     "taskkill /f /im OmniScribe.exe >nul 2>&1\r\n" +
+                    "del /f /q \"%USERPROFILE%\\Desktop\\Escutaí.lnk\" >nul 2>&1\r\n" +
                     "del /f /q \"%USERPROFILE%\\Desktop\\OmniScribe AI.lnk\" >nul 2>&1\r\n" +
+                    "del /f /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Escutaí.lnk\" >nul 2>&1\r\n" +
                     "del /f /q \"%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\OmniScribe AI.lnk\" >nul 2>&1\r\n" +
                     "cd ..\r\n" +
                     "set \"APP_DIR=%~dp0\"\r\n" +
                     "rmdir /s /q \"%APP_DIR%\" >nul 2>&1\r\n" +
-                    "echo OmniScribe AI desinstalado com sucesso!\r\n" +
+                    "echo Escutaí desinstalado com sucesso!\r\n" +
                     "pause\r\n";
 
                 File.WriteAllText(uninstPath, script, new UTF8Encoding(false));
@@ -878,7 +890,11 @@ namespace OmniScribeSetup
         {
             if (_chkLaunch != null && _chkLaunch.Checked)
             {
-                string exePath = Path.Combine(_targetDir, "OmniScribe.exe");
+                string exePath = Path.Combine(_targetDir, "Escutai.exe");
+                if (!File.Exists(exePath))
+                {
+                    exePath = Path.Combine(_targetDir, "OmniScribe.exe");
+                }
                 if (File.Exists(exePath))
                 {
                     try

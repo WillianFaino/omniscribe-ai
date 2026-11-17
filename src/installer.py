@@ -1,4 +1,4 @@
-"""Instalador Gráfico Moderno (Setup Wizard) para o OmniScribe AI em CustomTkinter.
+"""Instalador Gráfico Moderno (Setup Wizard) para o Escutaí em CustomTkinter.
 
 Permite que qualquer usuário instale o software com interface visual, escolha a pasta de destino,
 crie atalhos no Desktop e Menu Iniciar, preserve dados de reuniões anteriores e execute imediatamente.
@@ -20,7 +20,7 @@ from typing import Optional
 
 import customtkinter as ctk
 
-logger = logging.getLogger("omniscribe.installer")
+logger = logging.getLogger("escutai.installer")
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -30,8 +30,8 @@ def get_default_install_dir() -> Path:
     """Retorna o diretório de instalação padrão recomendado pelo Windows (sem requerer elevação UAC)."""
     local_appdata = os.environ.get("LOCALAPPDATA")
     if local_appdata:
-        return Path(local_appdata) / "Programs" / "OmniScribe AI"
-    return Path.home() / "AppData" / "Local" / "Programs" / "OmniScribe AI"
+        return Path(local_appdata) / "Programs" / "Escutai"
+    return Path.home() / "AppData" / "Local" / "Programs" / "Escutai"
 
 
 def get_app_package_zip() -> Optional[Path]:
@@ -60,27 +60,28 @@ def get_app_package_zip() -> Optional[Path]:
 
 
 def get_source_app_dir() -> Optional[Path]:
-    """Localiza a pasta com os binários compilados do OmniScribe AI (fallback)."""
+    """Localiza a pasta com os binários compilados do Escutaí (fallback)."""
     # 1. Se estiver empacotado dentro do executável do Setup pelo PyInstaller
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         bundled = Path(sys._MEIPASS) / "app_data"
         if bundled.exists():
             return bundled
 
-    # 2. Modo local de desenvolvimento (procura em dist/OmniScribe ao lado do script)
+    # 2. Modo local de desenvolvimento (procura em dist/Escutai ou legado dist/OmniScribe)
     root = Path(__file__).resolve().parent.parent
-    candidate = root / "dist" / "OmniScribe"
-    if candidate.exists() and (candidate / "OmniScribe.exe").exists():
-        return candidate
+    for app_folder, exe_name in (("Escutai", "Escutai.exe"), ("OmniScribe", "OmniScribe.exe")):
+        candidate = root / "dist" / app_folder
+        if candidate.exists() and (candidate / exe_name).exists():
+            return candidate
 
-    candidate_root = Path(sys.executable).resolve().parent / "dist" / "OmniScribe"
-    if candidate_root.exists():
-        return candidate_root
+        candidate_root = Path(sys.executable).resolve().parent / "dist" / app_folder
+        if candidate_root.exists():
+            return candidate_root
 
     return None
 
 
-def create_windows_shortcut(target_exe: Path, shortcut_path: Path, description: str = "OmniScribe AI") -> None:
+def create_windows_shortcut(target_exe: Path, shortcut_path: Path, description: str = "Escutaí") -> None:
     """Cria um atalho (.lnk) do Windows nativamente via PowerShell WScript.Shell."""
     target_exe = target_exe.resolve()
     shortcut_path = shortcut_path.resolve()
@@ -110,21 +111,24 @@ def write_uninstaller_script(install_dir: Path) -> None:
     uninst_bat = install_dir / "uninstall.bat"
     content = """@echo off
 chcp 65001 >nul
-title Desinstalador do OmniScribe AI
+title Desinstalador do Escutaí
 echo ===============================================================================
-echo                   Desinstalador do OmniScribe AI
+echo                       Desinstalador do Escutaí
 echo ===============================================================================
 echo.
-echo Tem certeza de que deseja remover o OmniScribe AI deste computador?
+echo Tem certeza de que deseja remover o Escutaí deste computador?
 set /p CONFIRM="Digite S para confirmar ou N para cancelar: "
 if /i not "%CONFIRM%"=="S" exit /b
 
 echo.
 echo [1/3] Fechando aplicacao se estiver em execucao...
+taskkill /f /im Escutai.exe >nul 2>&1
 taskkill /f /im OmniScribe.exe >nul 2>&1
 
 echo [2/3] Removendo atalhos do Desktop e Menu Iniciar...
+del /f /q "%USERPROFILE%\\Desktop\\Escutaí.lnk" >nul 2>&1
 del /f /q "%USERPROFILE%\\Desktop\\OmniScribe AI.lnk" >nul 2>&1
+del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Escutaí.lnk" >nul 2>&1
 del /f /q "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\OmniScribe AI.lnk" >nul 2>&1
 
 echo [3/3] Removendo arquivos do programa...
@@ -134,7 +138,7 @@ rmdir /s /q "%APP_DIR%" >nul 2>&1
 
 echo.
 echo ===============================================================================
-echo                OmniScribe AI foi desinstalado com sucesso!
+echo                    Escutaí foi desinstalado com sucesso!
 echo ===============================================================================
 pause
 """
@@ -151,7 +155,7 @@ class InstallerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Instalador do OmniScribe AI")
+        self.title("Instalador do Escutaí")
         self.geometry("640x520")
         self.resizable(False, False)
 
@@ -242,7 +246,7 @@ class InstallerApp(ctk.CTk):
 
         lbl_title = ctk.CTkLabel(
             frame,
-            text="Bem-vindo ao Assistente de Instalação do\nOmniScribe AI",
+            text="Bem-vindo ao Assistente de Instalação do\nEscutaí",
             font=ctk.CTkFont(size=22, weight="bold"),
             justify="center",
         )
@@ -251,7 +255,7 @@ class InstallerApp(ctk.CTk):
         lbl_desc = ctk.CTkLabel(
             frame,
             text=(
-                "O OmniScribe AI é o assistente universal para transcrição em tempo real e\n"
+                "O Escutaí é o assistente universal para transcrição em tempo real e\n"
                 "geração automática de Atas Executivas para reuniões (Google Meet, Teams, Zoom e voz).\n\n"
                 "Este assistente irá instalar o software em seu computador de forma rápida e segura,\n"
                 "sem necessitar de privilégios de administrador ou comandos de terminal."
@@ -279,7 +283,7 @@ class InstallerApp(ctk.CTk):
 
         lbl_desc = ctk.CTkLabel(
             frame,
-            text="Escolha a pasta onde o OmniScribe AI será instalado:",
+            text="Escolha a pasta onde o Escutaí será instalado:",
             font=ctk.CTkFont(size=12),
             text_color="#9ca3af",
         )
@@ -313,7 +317,10 @@ class InstallerApp(ctk.CTk):
     def _browse_dir(self):
         chosen = filedialog.askdirectory(initialdir=str(self.target_dir), parent=self)
         if chosen:
-            self.target_dir = Path(chosen) / "OmniScribe AI"
+            chosen_path = Path(chosen)
+            if chosen_path.name.lower() != "escutai":
+                chosen_path = chosen_path / "Escutai"
+            self.target_dir = chosen_path
             self.entry_dir.delete(0, "end")
             self.entry_dir.insert(0, str(self.target_dir))
 
@@ -378,7 +385,7 @@ class InstallerApp(ctk.CTk):
 
         lbl_title = ctk.CTkLabel(
             frame,
-            text="Instalando o OmniScribe AI...",
+            text="Instalando o Escutaí...",
             font=ctk.CTkFont(size=18, weight="bold"),
         )
         lbl_title.pack(anchor="w", pady=(0, 10))
@@ -404,6 +411,7 @@ class InstallerApp(ctk.CTk):
             time.sleep(0.3)
             self._update_progress(0.2, "Fechando processos antigos se abertos...")
             if sys.platform == "win32":
+                subprocess.run(["taskkill", "/f", "/im", "Escutai.exe"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(["taskkill", "/f", "/im", "OmniScribe.exe"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             # Localiza pacote zip de alta performance ou pasta de origem
@@ -432,7 +440,7 @@ class InstallerApp(ctk.CTk):
 
             # Instalação via descompactação ultrarrápida do pacote
             if pkg_zip and pkg_zip.exists():
-                self._update_progress(0.35, "Extraindo arquivos do OmniScribe AI...")
+                self._update_progress(0.35, "Extraindo arquivos do Escutaí...")
                 with zipfile.ZipFile(pkg_zip, "r") as zf:
                     members = zf.namelist()
                     total = len(members)
@@ -478,20 +486,22 @@ class InstallerApp(ctk.CTk):
 
             # Gera atalhos do Windows
             self._update_progress(0.92, "Criando atalhos no Windows...")
-            exe_path = target_dir / "OmniScribe.exe"
+            exe_path = target_dir / "Escutai.exe"
+            if not exe_path.exists():
+                exe_path = target_dir / "OmniScribe.exe"
 
             if sys.platform == "win32":
                 # Desktop
                 if self.var_desktop_shortcut.get():
                     user_desktop = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
-                    create_windows_shortcut(exe_path, user_desktop / "OmniScribe AI.lnk")
+                    create_windows_shortcut(exe_path, user_desktop / "Escutaí.lnk")
 
                 # Menu Iniciar
                 if self.var_start_shortcut.get():
                     appdata = os.environ.get("APPDATA")
                     if appdata:
                         start_menu = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-                        create_windows_shortcut(exe_path, start_menu / "OmniScribe AI.lnk")
+                        create_windows_shortcut(exe_path, start_menu / "Escutaí.lnk")
 
             self._update_progress(1.0, "Instalação concluída!")
             time.sleep(0.4)
@@ -548,7 +558,7 @@ class InstallerApp(ctk.CTk):
         lbl_desc = ctk.CTkLabel(
             frame,
             text=(
-                f"O OmniScribe AI foi instalado com sucesso em:\n{self.target_dir}\n\n"
+                f"O Escutaí foi instalado com sucesso em:\n{self.target_dir}\n\n"
                 "Seus atalhos foram criados e o aplicativo está pronto para uso imediato."
             ),
             font=ctk.CTkFont(size=12),
@@ -559,7 +569,7 @@ class InstallerApp(ctk.CTk):
 
         chk_launch = ctk.CTkCheckBox(
             frame,
-            text="Iniciar o OmniScribe AI agora",
+            text="Iniciar o Escutaí agora",
             variable=self.var_launch_now,
             font=ctk.CTkFont(size=13, weight="bold"),
         )
@@ -567,7 +577,9 @@ class InstallerApp(ctk.CTk):
 
     def _finish_and_launch(self):
         if self.var_launch_now.get():
-            exe_path = self.target_dir / "OmniScribe.exe"
+            exe_path = self.target_dir / "Escutai.exe"
+            if not exe_path.exists():
+                exe_path = self.target_dir / "OmniScribe.exe"
             if exe_path.exists():
                 try:
                     if sys.platform == "win32":

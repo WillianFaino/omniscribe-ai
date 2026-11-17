@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
-title OmniScribe AI - Gerenciador de Build e Instalacao
+title Escutaí - Gerenciador de Build e Instalacao
 echo ===============================================================================
-echo            OmniScribe AI - Universal Meeting Transcriber & Minute Generator
+echo                Escutaí - Universal Meeting Transcriber & Minute Generator
 echo ===============================================================================
 echo.
 
@@ -50,6 +50,7 @@ set CLEAN_MODE=1
 set /p CLEAN_MODE="Digite 1, 2 ou 3 (Pressione ENTER para o padrao [1] Seguro): "
 
 :: Fecha eventuais processos abertos para evitar travamento do arquivo
+taskkill /f /im Escutai.exe >nul 2>&1
 taskkill /f /im OmniScribe.exe >nul 2>&1
 taskkill /f /im ZoomTranscriber.exe >nul 2>&1
 
@@ -62,11 +63,13 @@ echo [BACKUP] Salvando suas atas e configuracoes antes da limpeza...
 if not exist "_temp_backup" mkdir "_temp_backup"
 
 :: Salva arquivo de ambiente (.env)
+if exist "dist\Escutai\.env" copy /Y "dist\Escutai\.env" "_temp_backup\.env" >nul 2>&1
 if exist "dist\OmniScribe\.env" copy /Y "dist\OmniScribe\.env" "_temp_backup\.env" >nul 2>&1
 if exist "dist\.env" copy /Y "dist\.env" "_temp_backup\.env" >nul 2>&1
 if exist ".env" copy /Y ".env" "_temp_backup\.env" >nul 2>&1
 
 :: Salva historico de atas e transcricoes
+if exist "dist\Escutai\atas_reunioes" xcopy /E /I /Y "dist\Escutai\atas_reunioes" "_temp_backup\atas_reunioes" >nul 2>&1
 if exist "dist\OmniScribe\atas_reunioes" xcopy /E /I /Y "dist\OmniScribe\atas_reunioes" "_temp_backup\atas_reunioes" >nul 2>&1
 if exist "dist\atas_reunioes" xcopy /E /I /Y "dist\atas_reunioes" "_temp_backup\atas_reunioes" >nul 2>&1
 if exist "atas_reunioes" xcopy /E /I /Y "atas_reunioes" "_temp_backup\atas_reunioes" >nul 2>&1
@@ -94,7 +97,7 @@ echo.
 echo Escolha o formato de empacotamento:
 echo   [1] Modo Turbo Instantaneo (--onedir)  - Abre em menos de 1 segundo! [RECOMENDADO]
 echo   [2] Executavel Unico (--onefile)       - Arquivo unico portatil (~3 a 5s para abrir)
-echo   [3] Assistente de Instalacao Grafico   - Gera 'OmniScribe_Setup.exe' completo [NOVO]
+echo   [3] Assistente de Instalacao Grafico   - Gera 'Escutai_Setup.exe' completo [NOVO]
 echo.
 set BUILD_MODE=1
 set /p BUILD_MODE="Digite 1, 2 ou 3 (Pressione ENTER para o padrao [1] Turbo): "
@@ -106,7 +109,7 @@ goto build_onedir
 :build_onedir
 echo.
 echo [3/4] Empacotando aplicacao em Modo Turbo Instantaneo (--onedir --windowed)...
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -117,14 +120,14 @@ if %errorlevel% neq 0 (
 
 echo.
 echo [4/4] Configurando arquivos e restaurando dados...
-if not exist "dist\OmniScribe" mkdir "dist\OmniScribe"
-if exist ".env.example" copy /Y ".env.example" "dist\OmniScribe\.env.example" >nul
-if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
+if not exist "dist\Escutai" mkdir "dist\Escutai"
+if exist ".env.example" copy /Y ".env.example" "dist\Escutai\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\Escutai\.env" >nul
 
 if "%RESTORE_BACKUP%"=="1" (
     echo [RESTAURACAO] Injetando suas atas e .env salvos na nova versao...
-    if exist "_temp_backup\.env" copy /Y "_temp_backup\.env" "dist\OmniScribe\.env" >nul
-    if exist "_temp_backup\atas_reunioes" xcopy /E /I /Y "_temp_backup\atas_reunioes" "dist\OmniScribe\atas_reunioes" >nul
+    if exist "_temp_backup\.env" copy /Y "_temp_backup\.env" "dist\Escutai\.env" >nul
+    if exist "_temp_backup\atas_reunioes" xcopy /E /I /Y "_temp_backup\atas_reunioes" "dist\Escutai\atas_reunioes" >nul
     rmdir /s /q "_temp_backup" >nul 2>&1
     echo [OK] Atas anteriores restauradas com sucesso!
 )
@@ -134,9 +137,9 @@ echo ===========================================================================
 echo                     BUILD TURBO CONCLUIDO COM SUCESSO!
 echo ===============================================================================
 echo  Executavel com inicializacao ultra-rapida gerado em:
-echo    ^> dist\OmniScribe\OmniScribe.exe
+echo    ^> dist\Escutai\Escutai.exe
 echo.
-echo  DICA: Voce pode clicar com o botao direito em 'OmniScribe.exe' e
+echo  DICA: Voce pode clicar com o botao direito em 'Escutai.exe' e
 echo        selecionar 'Enviar para' -^> 'Area de trabalho (criar atalho)'!
 echo ===============================================================================
 goto end
@@ -144,7 +147,7 @@ goto end
 :build_onefile
 echo.
 echo [3/4] Empacotando aplicacao via PyInstaller (--onefile --windowed)...
-python -m PyInstaller --noconfirm --clean --onefile --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
@@ -172,30 +175,31 @@ echo ===========================================================================
 echo                          BUILD CONCLUIDO COM SUCESSO!
 echo ===============================================================================
 echo  Executavel portavel gerado em:
-echo    ^> dist\OmniScribe.exe
+echo    ^> dist\Escutai.exe
 echo ===============================================================================
 goto end
 
 :build_installer_flow
 echo.
-echo [3/5] Compilando versao base Turbo em 'dist\OmniScribe\'...
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OmniScribe" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+echo [3/5] Compilando versao base Turbo em 'dist\Escutai\'...
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 
 if %errorlevel% neq 0 (
     echo.
-    echo [ERRO] Falha ao compilar arquivos base do OmniScribe.
+    echo [ERRO] Falha ao compilar arquivos base do Escutaí.
     pause
     exit /b 1
 )
 
-if not exist "dist\OmniScribe" mkdir "dist\OmniScribe"
-if exist ".env.example" copy /Y ".env.example" "dist\OmniScribe\.env.example" >nul
-if exist ".env" copy /Y ".env" "dist\OmniScribe\.env" >nul
+if not exist "dist\Escutai" mkdir "dist\Escutai"
+if exist ".env.example" copy /Y ".env.example" "dist\Escutai\.env.example" >nul
+if exist ".env" copy /Y ".env" "dist\Escutai\.env" >nul
 
 echo.
 echo [4/5] Gerando pacote ultracompacto e empacotando Instalador Nativo Instantaneo...
+taskkill /f /im Escutai_Setup.exe >nul 2>&1
 taskkill /f /im OmniScribe_Setup.exe >nul 2>&1
-python make_package.py "dist\OmniScribe" "dist\app_data.zip"
+python make_package.py "dist\Escutai" "dist\app_data.zip"
 
 if %errorlevel% neq 0 (
     echo.
@@ -204,12 +208,12 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-copy /Y "dist\OmniScribe_Setup.exe" "OmniScribe_Setup.exe" >nul 2>&1
+copy /Y "dist\Escutai_Setup.exe" "Escutai_Setup.exe" >nul 2>&1
 
 if "%RESTORE_BACKUP%"=="1" (
     echo [RESTAURACAO] Restaurando dados preservados...
-    if exist "_temp_backup\.env" copy /Y "_temp_backup\.env" "dist\OmniScribe\.env" >nul
-    if exist "_temp_backup\atas_reunioes" xcopy /E /I /Y "_temp_backup\atas_reunioes" "dist\OmniScribe\atas_reunioes" >nul
+    if exist "_temp_backup\.env" copy /Y "_temp_backup\.env" "dist\Escutai\.env" >nul
+    if exist "_temp_backup\atas_reunioes" xcopy /E /I /Y "_temp_backup\atas_reunioes" "dist\Escutai\atas_reunioes" >nul
     rmdir /s /q "_temp_backup" >nul 2>&1
 )
 
@@ -218,7 +222,7 @@ echo ===========================================================================
 echo                   INSTALADOR GERADO COM SUCESSO!
 echo ===============================================================================
 echo  O instalador grafico profissional e autonomo foi gerado em:
-echo    ^> dist\OmniScribe_Setup.exe
+echo    ^> dist\Escutai_Setup.exe
 echo.
 echo  Qualquer usuario pode dar dois cliques nele para instalar no Windows!
 echo ===============================================================================

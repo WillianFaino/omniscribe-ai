@@ -1,6 +1,6 @@
-"""Empacotador de alta performance para o instalador nativo do OmniScribe AI.
+"""Empacotador de alta performance para o instalador nativo do Escutaí.
 
-1. Compacta os binários de dist/OmniScribe em dist/app_data.zip.
+1. Compacta os binários de dist/Escutai em dist/app_data.zip.
 2. Compila src/installer_native.cs com o compilador nativo Win32/.NET (csc.exe) gerando um stub de ~30 KB.
 3. Anexa app_data.zip ao final (EOF Overlay) do executável com assinatura de 16 bytes 'OMNISCRB',
    garantindo abertura instantânea (< 0.1s) sem extração prévia para %TEMP%.
@@ -36,7 +36,7 @@ def create_app_package(source_dir: Path, output_zip: Path) -> Path:
             # Evita empacotar pastas de runtime/logs locais, mantendo `models/` quando pré-embutida no build
             dirs[:] = [d for d in dirs if d not in ("atas_reunioes", "__pycache__")]
             for file in files:
-                if file == ".env" or file.endswith((".tmp", ".omniscribe")):
+                if file == ".env" or file.endswith((".tmp", ".escutai", ".omniscribe")):
                     continue
                 file_path = Path(root) / file
                 arcname = file_path.relative_to(source_dir)
@@ -68,9 +68,9 @@ def build_native_installer(root_dir: Path, zip_path: Path) -> Path:
         raise FileNotFoundError(f"Arquivo fonte nativo não encontrado: {cs_source}")
 
     csc_exe = find_csc_compiler()
-    stub_exe = root_dir / "dist" / "OmniScribe_Setup_Stub.exe"
-    final_exe = root_dir / "dist" / "OmniScribe_Setup.exe"
-    root_copy = root_dir / "OmniScribe_Setup.exe"
+    stub_exe = root_dir / "dist" / "Escutai_Setup_Stub.exe"
+    final_exe = root_dir / "dist" / "Escutai_Setup.exe"
+    root_copy = root_dir / "Escutai_Setup.exe"
 
     cmd = [
         str(csc_exe),
@@ -116,7 +116,10 @@ def build_native_installer(root_dir: Path, zip_path: Path) -> Path:
 
 if __name__ == "__main__":
     root = Path(__file__).resolve().parent
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "dist" / "OmniScribe"
+    default_src = root / "dist" / "Escutai"
+    if not default_src.exists() and (root / "dist" / "OmniScribe").exists():
+        default_src = root / "dist" / "OmniScribe"
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else default_src
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else root / "dist" / "app_data.zip"
 
     zip_file = create_app_package(src, out)
