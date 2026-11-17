@@ -275,15 +275,12 @@ class RetranscribeModal(ctk.CTkToplevel):
         ctk.CTkLabel(form, text="Motor de IA:", font=ctk.CTkFont(weight="bold")).grid(
             row=3, column=0, padx=14, pady=6, sticky="w"
         )
-        self.opt_engine = _style_option_menu(
-            ctk.CTkOptionMenu(
-                form,
-                values=["☁️ Online (Gemini 2.5)", "💻 Offline (Whisper ONNX)"],
-            )
-        )
-        default_eng = "💻 Offline (Whisper ONNX)" if getattr(parent, "engine_mode", "online") == "offline" else "☁️ Online (Gemini 2.5)"
-        self.opt_engine.set(default_eng)
-        self.opt_engine.grid(row=3, column=1, padx=14, pady=6, sticky="w")
+        ctk.CTkLabel(
+            form,
+            text="💻 100% Offline (Whisper CT2 + Voiceprints)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#10b981",
+        ).grid(row=3, column=1, padx=14, pady=6, sticky="w")
 
         ctk.CTkLabel(form, text="Tratamento Vocal:", font=ctk.CTkFont(weight="bold")).grid(
             row=4, column=0, padx=14, pady=(6, 12), sticky="w"
@@ -406,7 +403,7 @@ class RetranscribeModal(ctk.CTkToplevel):
         context_notes = self.entry_context.get().strip()
         block_str = self.opt_block.get()
         block_seconds = 60 if "1" in block_str else (300 if "5" in block_str else 180)
-        eng_mode = "offline" if "Offline" in self.opt_engine.get() else "online"
+        eng_mode = "offline"
         enh_mode = self._selected_enhancement_mode()
         self.destroy()
         self.parent.start_retranscription(
@@ -1651,7 +1648,7 @@ class ZoomTranscriberApp(ctk.CTk):
 
         ui_cfg = self._load_ui_settings()
         self.theme_mode = "Light" if str(ui_cfg.get("theme", "")).lower() == "light" else "Dark"
-        self.engine_mode = "offline" if str(ui_cfg.get("engine_mode", "")).lower() == "offline" else "online"
+        self.engine_mode = "offline"
         raw_var = str(ui_cfg.get("whisper_variant", "turbo") or "turbo").lower()
         self.offline_whisper_variant = raw_var if raw_var in ("turbo", "small", "base") else "turbo"
         self.offline_ollama_model = str(ui_cfg.get("ollama_model", "") or "")
@@ -1952,23 +1949,19 @@ class ZoomTranscriberApp(ctk.CTk):
         eng_col = ctk.CTkFrame(modes_subrow, fg_color="transparent")
         eng_col.grid(row=0, column=1, sticky="e")
         ctk.CTkLabel(
-            eng_col, text="MOTOR DE IA", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
+            eng_col, text="MOTOR", font=ctk.CTkFont(size=10, weight="bold"), text_color=THEME_TEXT_MUTED
         ).pack(side="left", padx=(0, 8))
-        self.seg_engine_mode = ctk.CTkSegmentedButton(
+        self.lbl_engine_badge = ctk.CTkLabel(
             eng_col,
-            values=[self.ENGINE_ONLINE, self.ENGINE_OFFLINE],
+            text="💻 100% Offline (Whisper CT2)",
             font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#10b981",
             fg_color=THEME_INPUT,
-            selected_color="#7c3aed",
-            selected_hover_color="#6d28d9",
-            unselected_color=THEME_INPUT,
-            unselected_hover_color=BTN_NEUTRAL_HOVER,
-            text_color=THEME_TEXT_PRIMARY,
-            height=32,
-            command=self._on_engine_mode_change,
+            corner_radius=8,
+            padx=12,
+            pady=6,
         )
-        self.seg_engine_mode.set(self.ENGINE_OFFLINE if self.engine_mode == "offline" else self.ENGINE_ONLINE)
-        self.seg_engine_mode.pack(side="left")
+        self.lbl_engine_badge.pack(side="left")
 
         # Linha 1: Botão Único Principal + Timer + Status + VU compactos
         sep = ctk.CTkFrame(sess_card, height=1, fg_color=THEME_BORDER)
@@ -2437,7 +2430,7 @@ class ZoomTranscriberApp(ctk.CTk):
         api_card.grid_columnconfigure(0, weight=1)
 
         ctk.CTkLabel(
-            api_card, text="🔑 Gemini API & Cota Free Tier", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME_TEXT_PRIMARY
+            api_card, text="🔑 Gemini API (Opcional • Apenas Ata em Texto)", font=ctk.CTkFont(size=14, weight="bold"), text_color=THEME_TEXT_PRIMARY
         ).grid(row=0, column=0, padx=16, pady=(14, 10), sticky="w")
 
         k_body = ctk.CTkFrame(api_card, fg_color="transparent")
@@ -2732,7 +2725,7 @@ class ZoomTranscriberApp(ctk.CTk):
         mic_name = self.opt_mic.get()
         loop_name = self.opt_loopback.get()
         block_txt = self.opt_block_duration.get()
-        eng_txt = "Offline Whisper" if self.engine_mode == "offline" else "Gemini 2.5"
+        eng_txt = "100% Offline (Whisper)"
         profs = self.gemini_service.voiceprint_service.list_profiles() if self.gemini_service.voiceprint_service else []
         vp_txt = f"{len(profs)} voiceprint(s)" if profs else "sem voiceprints"
 
@@ -3080,13 +3073,8 @@ class ZoomTranscriberApp(ctk.CTk):
 
     # ---------------- GERENCIAMENTO DA CHAVE API & MODAIS ----------------
     def _check_initial_api_key(self) -> None:
-        if self.engine_mode == "offline":
-            return
-        key = load_api_key_from_env()
-        if not key:
-            if self.mascot:
-                self.mascot.trigger_warning("Chave Gemini não configurada! Cole sua API Key ou use o modo Offline.")
-            self._open_api_key_dialog()
+        # Transcrição é 100% offline; chave Gemini é opcional (apenas para Ata em texto).
+        return
 
     def _open_api_key_dialog(self) -> None:
         ApiKeyModal(self, on_save_callback=self._on_api_key_saved)
@@ -3123,7 +3111,6 @@ class ZoomTranscriberApp(ctk.CTk):
         self.entry_meeting_title.configure(state=field_state)
         self.entry_context_notes.configure(state=field_state)
         self.seg_capture_mode.configure(state=field_state)
-        self.seg_engine_mode.configure(state=field_state)
 
         if recording:
             self.btn_rec_action.configure(
@@ -3164,11 +3151,8 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui("[AVISO] Já existe uma gravação ou re-transcrição em andamento.")
             return
 
-        active_engine = "offline" if "Offline" in self.seg_engine_mode.get() else "online"
+        active_engine = "offline"
         self.engine_mode = active_engine
-        if active_engine == "online" and not self.gemini_service.api_key:
-            self._open_api_key_dialog()
-            return
 
         selected_mic_str = self.opt_mic.get()
         mic_index = self.mic_map.get(selected_mic_str)
@@ -3276,10 +3260,7 @@ class ZoomTranscriberApp(ctk.CTk):
             self._log_gui("[AVISO] Aguarde a conclusão da gravação ou re-transcrição atual.")
             return
 
-        target_engine = engine_mode if engine_mode in ("online", "offline") else self.engine_mode
-        if target_engine == "online" and not self.gemini_service.api_key:
-            self._open_api_key_dialog()
-            return
+        target_engine = "offline"
 
         wav_path = Path(wav_path).resolve()
         if not wav_path.exists():
@@ -3318,7 +3299,7 @@ class ZoomTranscriberApp(ctk.CTk):
         block_seconds: int,
         apply_enhancement: Optional[bool],
         enhancement_mode: Optional[str] = None,
-        engine_mode: str = "online",
+        engine_mode: str = "offline",
     ) -> None:
         try:
             eff_mode = enhancement_mode or ("clarify_room" if apply_enhancement else "none")

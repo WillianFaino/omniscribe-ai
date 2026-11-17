@@ -1,7 +1,7 @@
 # Handoff Técnico — Escutaí
 
 > Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **Escutaí** (anteriormente *OmniScribe AI*).
-> Última atualização: 17/11/2026 (baseado no commit `268e0cb` na branch `main` após PR #25 + filtro biométrico opcional do microfone / Canal R na branch `feat/mic-voiceprint-filter`).
+> Última atualização: 17/11/2026 (baseado no commit `c724378` na branch `main` após PR #27 + arquitetura de transcrição 100% offline na branch `refactor/offline-only-transcription`).
 
 ---
 
