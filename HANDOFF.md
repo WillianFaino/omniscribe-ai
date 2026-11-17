@@ -173,6 +173,7 @@ python src/main.py
 2. **Separação Estrita de Canais (Mic vs. Loopback):** processar/marcar explicitamente o canal do microfone (`Você`) separado do áudio do sistema (`Remoto`) antes do envio ao Gemini, melhorando a precisão em falas sobrepostas (*cross-talk*).
 3. **VAD (Voice Activity Detection) + Overlap nos Cortes:** cortar blocos em pausas naturais de fala com pequena janela de sobreposição para não perder sílabas nas fronteiras.
 4. **Pré-processamento de Áudio:** normalização automática de ganho (AGC) e filtro de ruído ambiente.
+5. **Evolução do Cadastro de Voiceprints:** aumentar a duração máxima de gravação por frase (atualmente ~5s, considerada curta) e substituir frases técnicas voltadas a BI/sprints por um banco amplo de frases simples e cotidianas, sorteando de 3 a 5 frases distintas (sem repetição) em cada sessão de cadastro.
 
 ### B. Melhorias na Interface (UI/UX)
 1. **Renomeação em Lote de Participantes:** clicar em `Participante A` na transcrição e substituir todas as ocorrências pelo nome real na transcrição e na ata.
@@ -191,6 +192,14 @@ python src/main.py
 ### E. Upload e Transcrição de Arquivos de Áudio e Vídeo
 1. **Importação Direta (Drag-and-Drop / Seletor):** aceitar `.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`, `.mp3`, `.wav`, `.m4a`, `.ogg` e `.flac` pela tela inicial.
 2. **Extração & Segmentação Automática:** converter a faixa de áudio (via `ffmpeg` ou `av`/`pydub`) para chunks de `16 kHz` com barra de progresso e aplicar o mesmo pipeline de diarização e geração de Ata Executiva.
+
+### F. Rebranding e Nome Mais Acessível
+1. **Novo Nome da Ferramenta:** substituir *OmniScribe AI* (comprido e de leitura difícil para usuários com pouco contato com a língua inglesa) por um nome mais curto, simples e intuitivo.
+
+### G. Arquitetura Multi-LLM Agnóstica, Autenticação por Login e Fallback Automático
+1. **Independência de Provedor/Modelo:** tornar a aplicação agnóstica ao modelo de LLM, permitindo ao usuário escolher entre **Claude, ChatGPT (OpenAI), Gemini, Grok** e outros provedores compatíveis.
+2. **Autenticação Flexível (API Key ou Login):** permitir que o usuário escolha entre informar uma chave de API ou autenticar via **login na conta do provedor**, reduzindo a dependência de créditos pré-pagos de API.
+3. **Plano de Fallback Automático:** permitir o cadastro de um segundo provedor (login ou chave API secundária) como contingência automática caso o provedor primário falhe, atinja limite de cota ou fique indisponível.
 
 ---
 
