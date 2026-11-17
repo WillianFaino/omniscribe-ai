@@ -32,7 +32,7 @@ if exist "dist\Escutai\Escutai.exe" goto build_setup
 echo [AVISO] Os binarios do Escutai nao foram encontrados em 'dist\Escutai\'.
 echo Compilando versao Turbo enxuta antes de empacotar o Instalador...
 echo.
-python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
+python -m PyInstaller --noconfirm --clean --onedir --windowed --name "Escutai" --paths "src" --collect-all "customtkinter" --collect-all "sherpa_onnx" --collect-all "ctranslate2" --collect-all "tokenizers" --collect-all "faster_whisper" --add-data "assets/mascot;assets/mascot" --hidden-import "google.genai" --exclude-module tzdata --exclude-module pytest --exclude-module unittest --exclude-module pandas --exclude-module scipy --exclude-module lxml --exclude-module openpyxl --exclude-module selenium --exclude-module SQLAlchemy --exclude-module psycopg2 src/main.py
 if %errorlevel% neq 0 (
     echo [ERRO] Falha ao compilar os arquivos base do Escutai.
     pause
@@ -43,8 +43,8 @@ if exist ".env" copy /Y ".env" "dist\Escutai\.env" >nul
 
 :build_setup
 echo.
-echo [2/3] Preparando modelos locais ONNX (Voiceprints + Whisper small INT8)...
-python src/offline_asr_service.py --prepare small
+echo [2/3] Preparando modelos locais (Voiceprints + Whisper Turbo CT2 + Qwen2.5)...
+python src/offline_asr_service.py --prepare turbo
 if %errorlevel% neq 0 (
     echo [AVISO] Falha ao baixar modelos offline agora; o app fara o download sob demanda no primeiro uso.
 )
@@ -52,9 +52,17 @@ if exist "models\voiceprint" (
     if not exist "dist\Escutai\models\voiceprint" mkdir "dist\Escutai\models\voiceprint"
     xcopy /E /I /Y "models\voiceprint" "dist\Escutai\models\voiceprint" >nul
 )
-if exist "models\asr\sherpa-onnx-whisper-small" (
-    if not exist "dist\Escutai\models\asr\sherpa-onnx-whisper-small" mkdir "dist\Escutai\models\asr\sherpa-onnx-whisper-small"
-    xcopy /E /I /Y "models\asr\sherpa-onnx-whisper-small" "dist\Escutai\models\asr\sherpa-onnx-whisper-small" >nul
+if exist "models\denoiser" (
+    if not exist "dist\Escutai\models\denoiser" mkdir "dist\Escutai\models\denoiser"
+    xcopy /E /I /Y "models\denoiser" "dist\Escutai\models\denoiser" >nul
+)
+if exist "models\asr\faster-whisper-large-v3-turbo-int8" (
+    if not exist "dist\Escutai\models\asr\faster-whisper-large-v3-turbo-int8" mkdir "dist\Escutai\models\asr\faster-whisper-large-v3-turbo-int8"
+    xcopy /E /I /Y "models\asr\faster-whisper-large-v3-turbo-int8" "dist\Escutai\models\asr\faster-whisper-large-v3-turbo-int8" >nul
+)
+if exist "models\llm\bin" (
+    if not exist "dist\Escutai\models\llm\bin" mkdir "dist\Escutai\models\llm\bin"
+    xcopy /E /I /Y "models\llm\bin" "dist\Escutai\models\llm\bin" >nul
 )
 
 echo.

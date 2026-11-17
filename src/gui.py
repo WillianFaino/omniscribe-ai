@@ -1652,8 +1652,8 @@ class ZoomTranscriberApp(ctk.CTk):
         ui_cfg = self._load_ui_settings()
         self.theme_mode = "Light" if str(ui_cfg.get("theme", "")).lower() == "light" else "Dark"
         self.engine_mode = "offline" if str(ui_cfg.get("engine_mode", "")).lower() == "offline" else "online"
-        raw_var = str(ui_cfg.get("whisper_variant", "small") or "small").lower()
-        self.offline_whisper_variant = raw_var if raw_var in ("small", "turbo", "base") else "small"
+        raw_var = str(ui_cfg.get("whisper_variant", "turbo") or "turbo").lower()
+        self.offline_whisper_variant = raw_var if raw_var in ("turbo", "small", "base") else "turbo"
         self.offline_ollama_model = str(ui_cfg.get("ollama_model", "") or "")
         self.offline_isolate_voice = bool(ui_cfg.get("offline_isolate_voice", False))
         self.auto_export_sqlite = bool(ui_cfg.get("auto_export_sqlite", True))
@@ -2483,7 +2483,7 @@ class ZoomTranscriberApp(ctk.CTk):
             command=self._open_voiceprints_modal,
         ).pack(side="left")
 
-        # Card 4: Modo Offline (Whisper ONNX + Ollama) & Pacote Portátil SQLite
+        # Card 4: Modo Offline (Whisper CT2/ONNX + Qwen2.5/Ollama) & Pacote Portátil SQLite
         off_card = ctk.CTkFrame(
             scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
         )
@@ -2494,13 +2494,13 @@ class ZoomTranscriberApp(ctk.CTk):
         off_left.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
         ctk.CTkLabel(
             off_left,
-            text="💻 Transcrição Offline (Whisper ONNX + Ollama) & Pacote .escutai",
+            text="💻 Transcrição Offline (Whisper Turbo CT2 + Qwen2.5) & Pacote .escutai",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=THEME_TEXT_PRIMARY,
         ).pack(anchor="w")
         self.lbl_offline_status = ctk.CTkLabel(
             off_left,
-            text="Verificando modelos Whisper ONNX e Ollama local...",
+            text="Verificando modelos Whisper (CT2/ONNX) e LLM local...",
             font=ctk.CTkFont(size=12),
             text_color=THEME_TEXT_MUTED,
         )
@@ -2512,7 +2512,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.opt_whisper_variant = _style_option_menu(
             ctk.CTkOptionMenu(
                 off_btns,
-                values=["small", "turbo", "base"],
+                values=["turbo", "small", "base"],
                 width=108,
                 command=self._on_whisper_variant_change,
             )
@@ -2701,7 +2701,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self._log_gui(f"[MOTOR] Alterado para modo {'100% Offline (Whisper ONNX)' if self.engine_mode == 'offline' else 'Online (Gemini 2.5)'}.")
 
     def _on_whisper_variant_change(self, val: str) -> None:
-        self.offline_whisper_variant = val if val in ("small", "turbo", "base") else "small"
+        self.offline_whisper_variant = val if val in ("turbo", "small", "base") else "turbo"
         self.gemini_service.offline_whisper_variant = self.offline_whisper_variant
         self._save_ui_settings()
         self._refresh_offline_status()
@@ -2722,14 +2722,21 @@ class ZoomTranscriberApp(ctk.CTk):
     def _refresh_offline_status(self) -> None:
         if not hasattr(self, "lbl_offline_status"):
             return
-        ready, _ = self.gemini_service.offline_asr_service.is_ready(self.offline_whisper_variant)
+        asr_svc = self.gemini_service.offline_asr_service
+        ready, _ = asr_svc.is_ready(self.offline_whisper_variant)
+        llm_3b_ok, _ = asr_svc.is_llm_ready("qwen2.5-3b")
+        llm_1b_ok, _ = asr_svc.is_llm_ready("qwen2.5-1.5b") if not llm_3b_ok else (False, "")
         w_txt = f"✅ Whisper {self.offline_whisper_variant} pronto" if ready else f"⚠️ Whisper {self.offline_whisper_variant} não baixado"
-        self.lbl_offline_status.configure(text=f"{w_txt} • Verificando Ollama...")
+        self.lbl_offline_status.configure(text=f"{w_txt} • Verificando LLM local...")
 
         def _probe_ollama():
             ok_ol, models = list_ollama_models()
             if ok_ol and models:
                 ol_txt = f"🟢 Ollama ({models[0]})"
+            elif llm_3b_ok:
+                ol_txt = "🟢 LLM Local (Qwen2.5-3B)"
+            elif llm_1b_ok:
+                ol_txt = "🟢 LLM Local (Qwen2.5-1.5B)"
             elif ok_ol:
                 ol_txt = "🟡 Ollama sem modelos"
             else:
@@ -3374,7 +3381,11 @@ class ZoomTranscriberApp(ctk.CTk):
         is_final: bool,
     ) -> None:
         def update():
-            self.txt_transcription.insert("end", block_text)
+            if block_index == 0 and not block_text and full_transcript:
+                self.txt_transcription.delete("1.0", "end")
+                self.txt_transcription.insert("end", full_transcript)
+            else:
+                self.txt_transcription.insert("end", block_text)
             self.txt_transcription.see("end")
             if self.mascot and not is_final:
                 self.mascot.trigger_transcribing(2.2)

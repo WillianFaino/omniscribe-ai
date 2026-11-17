@@ -33,10 +33,12 @@ def create_app_package(source_dir: Path, output_zip: Path) -> Path:
     with zipfile.ZipFile(output_zip, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as zf:
         file_count = 0
         for root, dirs, files in os.walk(source_dir):
-            # Evita empacotar pastas de runtime/logs locais, mantendo `models/` quando pré-embutida no build
+            # Evita empacotar pastas de runtime/logs locais, duplicatas antigas e pesos .gguf >2 GB
             dirs[:] = [d for d in dirs if d not in ("atas_reunioes", "__pycache__")]
+            if Path(root).name == "asr" and any(d.startswith("faster-whisper-") for d in dirs):
+                dirs[:] = [d for d in dirs if not d.startswith("sherpa-onnx-whisper-")]
             for file in files:
-                if file == ".env" or file.endswith((".tmp", ".escutai", ".omniscribe")):
+                if file == ".env" or file.endswith((".tmp", ".escutai", ".omniscribe", ".gguf")):
                     continue
                 file_path = Path(root) / file
                 arcname = file_path.relative_to(source_dir)

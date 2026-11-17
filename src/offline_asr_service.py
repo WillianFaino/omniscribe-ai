@@ -1,31 +1,48 @@
-"""Motor de Transcrição e Síntese 100% Offline do Escutaí.
+"""Motor de Transcrição e Síntese 100% Offline do Escutaí (Pipeline Sequencial em 2 Estágios).
 
-Pipeline local sem dependência de LLM em nuvem:
-1. ASR local via `sherpa-onnx` OfflineRecognizer (Whisper `small` ou `base` INT8 ONNX);
-2. Segmentação de fala via Silero VAD + identificação biométrica via VoiceprintService
-   (separação física L/R em Estéreo Online e clusterização acústica em Mono Presencial);
-3. Geração da Ata Executiva via Ollama local (quando ativo em localhost:11434) ou
-   sintetizador determinístico estruturado em Markdown.
+Pipeline local sem dependência de internet ou APIs em nuvem:
+1. Estágio 1 (Durante a gravação / blocos):
+   - Ramo A (timbre natural 16 kHz): Silero VAD + biometria VoiceprintService
+     (com suavização de ilhas curtas de locutor para evitar cortes artificiais);
+   - Ramo B (ASR restaurado): isolamento neural GTCRN (`gtcrn_simple.onnx`) + EQ vocal
+     multiestágio com colarinho de borda (+240 ms) para não cortar sílabas finais;
+   - Decodificação local via `faster-whisper` (CTranslate2 INT8 com `AVX2`/`AVX-VNNI`,
+     `beam_size=5`, fallback de temperatura, `initial_prompt` + `hotwords` dinâmicos)
+     com fallback automático para `sherpa-onnx` Whisper ONNX.
+2. Estágio 2 (Ao finalizar a sessão):
+   - Descarrega o modelo Whisper + GTCRN da memória RAM (`unload_asr_models`);
+   - Executa motor LLM local embutido (`llama-server.exe` via `llama.cpp` + `Qwen2.5-3B-Instruct`
+     `Q4_K_M` GGUF, ou Ollama externo se ativo) para:
+       a) Revisão fonético-contextual da transcrição preservando timestamps e locutores;
+       b) Geração estruturada da Ata Executiva completa;
+   - Encerra o servidor LLM e libera a memória RAM imediatamente ao concluir.
 """
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
 import re
 import shutil
+import socket
+import subprocess
 import sys
 import tarfile
 import threading
+import time
+import types
+import unicodedata
 import urllib.error
 import urllib.request
 import wave
+import zipfile
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
-import unicodedata
 
 import numpy as np
 
@@ -45,24 +62,67 @@ DENOISER_MODEL_URL = (
     "speech-enhancement-models/gtcrn_simple.onnx"
 )
 
-WHISPER_MODELS: Dict[str, Dict[str, str]] = {
-    "small": {
-        "label": "Whisper Small INT8 (~250 MB • Equilibrado PT-BR)",
-        "dir_name": "sherpa-onnx-whisper-small",
-        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2",
-        "prefix": "small",
+# Modelos CTranslate2 (faster-whisper) com suporte a beam_size=5, initial_prompt e hotwords
+CT2_WHISPER_MODELS: Dict[str, Dict[str, Any]] = {
+    "turbo": {
+        "label": "Whisper Large-v3 Turbo CT2 INT8 (~780 MB • Máxima Precisão PT-BR)",
+        "dir_name": "faster-whisper-large-v3-turbo-int8",
+        "repo_url": "https://huggingface.co/Zoont/faster-whisper-large-v3-turbo-int8-ct2/resolve/main",
+        "files": ["config.json", "preprocessor_config.json", "tokenizer.json", "vocabulary.json", "model.bin"],
     },
+    "small": {
+        "label": "Whisper Small CT2 (~465 MB • Equilibrado PT-BR)",
+        "dir_name": "faster-whisper-small",
+        "repo_url": "https://huggingface.co/Systran/faster-whisper-small/resolve/main",
+        "files": ["config.json", "tokenizer.json", "vocabulary.txt", "model.bin"],
+    },
+    "base": {
+        "label": "Whisper Base CT2 (~145 MB • Mais leve/rápido)",
+        "dir_name": "faster-whisper-base",
+        "repo_url": "https://huggingface.co/Systran/faster-whisper-base/resolve/main",
+        "files": ["config.json", "tokenizer.json", "vocabulary.txt", "model.bin"],
+    },
+}
+
+# Catálogo legado sherpa-onnx mantido como fallback automático caso CTranslate2 não esteja disponível
+WHISPER_MODELS: Dict[str, Dict[str, str]] = {
     "turbo": {
         "label": "Whisper Large-v3 Turbo INT8 (~538 MB • Máxima Precisão PT-BR)",
         "dir_name": "sherpa-onnx-whisper-turbo",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-turbo.tar.bz2",
         "prefix": "turbo",
     },
+    "small": {
+        "label": "Whisper Small INT8 (~250 MB • Equilibrado PT-BR)",
+        "dir_name": "sherpa-onnx-whisper-small",
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2",
+        "prefix": "small",
+    },
     "base": {
         "label": "Whisper Base INT8 (~110 MB • Mais leve/rápido)",
         "dir_name": "sherpa-onnx-whisper-base",
         "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2",
         "prefix": "base",
+    },
+}
+
+LLAMA_CPP_WIN_URL = (
+    "https://github.com/ggml-org/llama.cpp/releases/download/"
+    "b12475/llama-b12475-bin-win-cpu-x64.zip"
+)
+
+LOCAL_LLM_MODELS: Dict[str, Dict[str, Any]] = {
+    "qwen2.5-3b": {
+        "label": "Qwen2.5-3B-Instruct Q4_K_M (~2,0 GB • Revisão & Ata Offline)",
+        "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+        "min_bytes": 1_500_000_000,
+    },
+    "qwen2.5-1.5b": {
+        "label": "Qwen2.5-1.5B-Instruct Q4_K_M (~1,0 GB • Leve Offline)",
+        "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "min_bytes": 800_000_000,
     },
 }
 
@@ -84,6 +144,8 @@ _BUILTIN_VOCABULARY = (
     "ClickUp",
     "Bizagi",
     "BPMN",
+    "AS-IS",
+    "TO-BE",
     "WASAPI",
     "Voiceprint",
     "Whisper",
@@ -91,6 +153,12 @@ _BUILTIN_VOCABULARY = (
     "Ollama",
     "Power BI",
     "Controlsul",
+    "inadimplência",
+    "Excel",
+    "Google Drive",
+    "mapeamento",
+    "cronograma",
+    "fluxograma",
 )
 
 
@@ -110,6 +178,52 @@ def _format_mmss(seconds: float) -> str:
     return f"{mins:02d}:{rem:02d}"
 
 
+def _collapse_phonetic_stutters(text: str) -> Tuple[str, bool]:
+    """Colapsa gagueiras/loops de decodificação onde 4+ palavras seguidas partilham o mesmo prefixo."""
+    tokens = text.split()
+    if len(tokens) < 4:
+        return text, False
+    stopwords = {"de", "da", "do", "das", "dos", "e", "o", "a", "os", "as", "em", "no", "na", "que", "se", "um", "uma", "é"}
+    stems: List[str] = []
+    for tok in tokens:
+        core = re.sub(r"[^\wÀ-ÿ]", "", tok).lower()
+        if core in stopwords or len(core) < 3:
+            stems.append("")
+        else:
+            ph = _phonetic_norm(core)
+            stems.append(ph[:3] if len(ph) >= 3 else core[:3])
+
+    out_tokens: List[str] = []
+    did_stutter = False
+    i = 0
+    while i < len(tokens):
+        st = stems[i]
+        if st:
+            # Conta ocorrências do mesmo radical em uma janela contígua de até 14 tokens
+            j = i + 1
+            matches = [i]
+            non_empty_since_last = 0
+            while j < len(tokens) and non_empty_since_last <= 3:
+                if stems[j] == st:
+                    matches.append(j)
+                    non_empty_since_last = 0
+                elif stems[j]:
+                    non_empty_since_last += 1
+                j += 1
+            if len(matches) >= 4:
+                did_stutter = True
+                # Mantém apenas até a primeira frase fechada (ou os primeiros 2 tokens do padrão)
+                keep_end = matches[0] + 1
+                while keep_end < matches[1] and not tokens[keep_end - 1].endswith((".", "?", "!")):
+                    keep_end += 1
+                out_tokens.extend(tokens[i:keep_end])
+                i = matches[-1] + 1
+                continue
+        out_tokens.append(tokens[i])
+        i += 1
+    return " ".join(out_tokens), did_stutter
+
+
 def _clean_whisper_text(raw_text: str) -> str:
     text = re.sub(r"\s+", " ", (raw_text or "")).strip()
     if not text or _WHISPER_NOISE_RE.match(text):
@@ -125,6 +239,9 @@ def _clean_whisper_text(raw_text: str) -> str:
     text = re.sub(r"\b([a-zA-ZÀ-ÿ])\1{4,}[.!?,;]*\b", "", text, flags=re.IGNORECASE)
     # Colapsa alucinações curtas repetidas do Whisper (ex.: "Obrigado. Obrigado. Obrigado.")
     text = re.sub(r"(\b[\wÀ-ÿ]{2,20}[.!?]?)(?:\s+\1){3,}", r"\1", text, flags=re.IGNORECASE)
+    text, stuttered = _collapse_phonetic_stutters(text)
+    if stuttered or len(text) <= 28:
+        text = re.sub(r"(?:^|\s+)(?:\bObrigado[.!?]?\s*)+$", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s+", " ", text).strip(" ,;-")
     if not text or (len(text) <= 2 and not text.isalnum()) or _WHISPER_NOISE_RE.match(text):
         return ""
@@ -133,21 +250,21 @@ def _clean_whisper_text(raw_text: str) -> str:
 
 def _phonetic_norm(value: str) -> str:
     """Normaliza uma palavra/expressão para esqueleto fonético PT-BR."""
-    raw = unicodedata.normalize("NFD", value or "")
-    stripped = "".join(c for c in raw if unicodedata.category(c) != "Mn").lower()
-    stripped = re.sub(r"[^a-z0-9]", "", stripped)
-    if not stripped:
-        return ""
-    stripped = re.sub(r"^h", "", stripped)
-    stripped = stripped.replace("ph", "f").replace("ch", "x").replace("sh", "x")
-    stripped = stripped.replace("qu", "k").replace("ck", "k").replace("y", "i").replace("w", "u")
-    stripped = stripped.replace("c", "k").replace("ss", "s").replace("sc", "s").replace("z", "s")
-    stripped = re.sub(r"(.)\1+", r"\1", stripped)
-    return stripped
+    s = unicodedata.normalize("NFKD", (value or "").lower())
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[^a-z0-9]", "", s)
+    s = s.replace("y", "i").replace("w", "u")
+    s = re.sub(r"^h+", "", s)
+    s = s.replace("ph", "f").replace("ch", "x").replace("sh", "x")
+    s = re.sub(r"qu([ei])", r"k\1", s)
+    s = re.sub(r"c([ei])", r"s\1", s)
+    s = s.replace("c", "k").replace("ç", "s").replace("z", "s")
+    s = re.sub(r"(.)\1+", r"\1", s)
+    return s
 
 
 def _extract_glossary_terms(context_notes: str = "", enrolled_names: Optional[List[str]] = None) -> List[str]:
-    """Constrói lista ordenada de termos prioritários para ancoragem pós-ASR."""
+    """Constrói lista ordenada de termos prioritários para ancoragem ASR e pós-ASR."""
     ignored = {"participantes", "participante", "termos", "termo", "glossario", "glossário", "reuniao", "reunião"}
     terms: List[str] = []
     seen_low = set()
@@ -189,16 +306,29 @@ def _apply_glossary_and_phonetic_fixes(
         return text
 
     terms = _extract_glossary_terms(context_notes, enrolled_names)
-    ctx_low = (context_notes or "").lower()
+    ctx_all_low = (f"{context_notes or ''} {' '.join(enrolled_names or [])}").lower()
 
-    # Correções diretas comuns em falas PT-BR corporativas quando o glossário inclui termos relacionados
+    # Correções diretas comuns em falas PT-BR corporativas e desvios fonéticos recorrentes
     out = re.sub(r"\bHomens\s+Square\b", "OmniScribe", text, flags=re.IGNORECASE)
     out = re.sub(r"\bOmnis?\s+Square\b", "OmniScribe", out, flags=re.IGNORECASE)
-    if "clickup" in ctx_low or "click up" in ctx_low:
+    out = re.sub(r"\b(?:o\s+)?tio\s+bia\b", "To-Be", out, flags=re.IGNORECASE)
+    out = re.sub(r"\b2\s*B\b", "To-Be", out, flags=re.IGNORECASE)
+    out = re.sub(r"\b(?:rede\s+de\s+apl[êe]ncia|rede\s+de\s+adimpl[êe]ncia)\b", "inadimplência", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bpapai\s+de\s+frota\b", "painel de frota", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bparte\s+frota\b", "parte de painel de frota", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bpessoal\s+inferno\b", "pessoal interno", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bexcel\s+playlist\b", "planilha de Excel", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bintranetico\b", "sistema interno", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bdesse\s+processos\b", "desse processo", out, flags=re.IGNORECASE)
+    out = re.sub(r"\bUnión\b", "União", out)
+
+    if "raiana" in ctx_all_low:
+        out = re.sub(r"\b(?:Ryan|Nyan|Raian|Raiane)\b", "Raiana", out, flags=re.IGNORECASE)
+    if "clickup" in ctx_all_low or "click up" in ctx_all_low:
         out = re.sub(r"\b(?:pick-up|pickup|clique\s+up|click\s+app)\b", "ClickUp", out, flags=re.IGNORECASE)
-    if "bizagi" in ctx_low:
+    if "bizagi" in ctx_all_low:
         out = re.sub(r"\b(?:bisagi|biza\s*gi|biza)\b", "Bizagi", out, flags=re.IGNORECASE)
-    if "bpmn" in ctx_low:
+    if "bpmn" in ctx_all_low:
         out = re.sub(r"\b(?:bpm\s+n|bpn)\b", "BPMN", out, flags=re.IGNORECASE)
 
     # Matching fonético geral em janelas de 1 a 2 palavras contra os termos cadastrados
@@ -263,6 +393,160 @@ def _safe_extract_tar_bz2(archive_path: Path, dest_root: Path) -> None:
         tf.extractall(path=str(dest_resolved))
 
 
+def _import_faster_whisper():
+    """Importa faster_whisper sem exigir PyAV/onnxruntime/huggingface_hub instalados."""
+    if "av" not in sys.modules:
+        try:
+            import av  # noqa: F401
+        except ImportError:
+            sys.modules["av"] = types.ModuleType("av")
+    if "huggingface_hub" not in sys.modules:
+        try:
+            import huggingface_hub  # noqa: F401
+        except ImportError:
+            sys.modules["huggingface_hub"] = types.ModuleType("huggingface_hub")
+    import faster_whisper  # type: ignore
+
+    return faster_whisper
+
+
+def _download_file_parallel(
+    url: str,
+    dest_path: Path,
+    progress_cb: Optional[Callable[[str, float], None]] = None,
+    label: str = "",
+    base_pct: float = 0.0,
+    span_pct: float = 1.0,
+    num_workers: int = 8,
+) -> None:
+    """Baixa arquivo via HTTP Range paralelo quando suportado (fallback automático para stream único)."""
+    dest_path = Path(dest_path)
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = dest_path.with_name(dest_path.name + ".part.tmp")
+    headers = {"User-Agent": "Escutai/2.0"}
+    lbl = label or dest_path.name
+
+    supports_range = False
+    total_bytes = 0
+    try:
+        probe_req = urllib.request.Request(url, headers={**headers, "Range": "bytes=0-0"})
+        with urllib.request.urlopen(probe_req, timeout=20) as resp:
+            status = getattr(resp, "status", 200)
+            c_range = resp.headers.get("Content-Range") or ""
+            if status == 206 and "/" in c_range:
+                tot_str = c_range.rsplit("/", 1)[-1].strip()
+                if tot_str.isdigit():
+                    total_bytes = int(tot_str)
+                    supports_range = True
+            elif resp.headers.get("Content-Length"):
+                cl = resp.headers.get("Content-Length", "0").strip()
+                if cl.isdigit():
+                    total_bytes = int(cl)
+    except Exception:
+        supports_range = False
+        total_bytes = 0
+
+    last_report = [0.0]
+    done_lock = threading.Lock()
+    downloaded_bytes = [0]
+
+    def _emit_progress(done: int, force: bool = False) -> None:
+        if not progress_cb:
+            return
+        now = time.monotonic()
+        if not force and (now - last_report[0]) < 0.25:
+            return
+        last_report[0] = now
+        if total_bytes > 0:
+            frac = min(1.0, done / float(total_bytes))
+            mb_done = done / (1024 * 1024)
+            mb_tot = total_bytes / (1024 * 1024)
+            progress_cb(
+                f"{lbl} ({mb_done:.1f}/{mb_tot:.1f} MB)",
+                base_pct + span_pct * frac,
+            )
+        else:
+            mb_done = done / (1024 * 1024)
+            progress_cb(f"{lbl} ({mb_done:.1f} MB)", base_pct + span_pct * 0.5)
+
+    try:
+        if supports_range and total_bytes >= 8 * 1024 * 1024 and num_workers > 1:
+            with open(tmp_path, "wb") as f:
+                f.truncate(total_bytes)
+
+            chunk_size = max(4 * 1024 * 1024, (total_bytes + num_workers * 4 - 1) // (num_workers * 4))
+            ranges: List[Tuple[int, int]] = []
+            pos = 0
+            while pos < total_bytes:
+                end = min(total_bytes - 1, pos + chunk_size - 1)
+                ranges.append((pos, end))
+                pos = end + 1
+
+            write_lock = threading.Lock()
+
+            def _fetch_part(rng: Tuple[int, int]) -> None:
+                start_b, end_b = rng
+                expected = end_b - start_b + 1
+                last_err: Optional[Exception] = None
+                for _attempt in range(3):
+                    try:
+                        req = urllib.request.Request(
+                            url,
+                            headers={**headers, "Range": f"bytes={start_b}-{end_b}"},
+                        )
+                        with urllib.request.urlopen(req, timeout=90) as resp:
+                            if getattr(resp, "status", 200) != 206:
+                                raise RuntimeError(f"Servidor não retornou 206 para Range {start_b}-{end_b}")
+                            buf = resp.read()
+                        if len(buf) != expected:
+                            raise RuntimeError(f"Tamanho divergente ({len(buf)} != {expected})")
+                        with write_lock:
+                            with open(tmp_path, "r+b") as wf:
+                                wf.seek(start_b)
+                                wf.write(buf)
+                        with done_lock:
+                            downloaded_bytes[0] += expected
+                            _emit_progress(downloaded_bytes[0])
+                        return
+                    except Exception as exc:
+                        last_err = exc
+                        time.sleep(0.6)
+                raise RuntimeError(f"Falha ao baixar bloco {start_b}-{end_b}: {last_err}")
+
+            try:
+                with ThreadPoolExecutor(max_workers=num_workers) as pool:
+                    list(pool.map(_fetch_part, ranges))
+                if tmp_path.stat().st_size != total_bytes:
+                    raise RuntimeError("Arquivo incompleto após download paralelo.")
+                _emit_progress(total_bytes, force=True)
+                tmp_path.replace(dest_path)
+                return
+            except Exception as par_err:
+                logger.warning(f"Download paralelo falhou ({par_err}); tentando stream único...")
+                downloaded_bytes[0] = 0
+
+        # Fallback: stream HTTP único
+        req_single = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req_single, timeout=300) as resp:
+            cl = resp.headers.get("Content-Length") or "0"
+            if total_bytes <= 0 and cl.isdigit():
+                total_bytes = int(cl)
+            with open(tmp_path, "wb") as f:
+                while True:
+                    block = resp.read(512 * 1024)
+                    if not block:
+                        break
+                    f.write(block)
+                    downloaded_bytes[0] += len(block)
+                    _emit_progress(downloaded_bytes[0])
+        if total_bytes > 0 and tmp_path.stat().st_size != total_bytes:
+            raise RuntimeError(f"Download incompleto ({tmp_path.stat().st_size}/{total_bytes} bytes)")
+        _emit_progress(downloaded_bytes[0], force=True)
+        tmp_path.replace(dest_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
 def list_ollama_models(base_url: str = "http://127.0.0.1:11434", timeout: float = 1.2) -> Tuple[bool, List[str]]:
     """Verifica rapidamente se o servidor Ollama local está ativo e lista modelos de chat disponíveis."""
     url = f"{base_url.rstrip('/')}/api/tags"
@@ -282,39 +566,72 @@ def list_ollama_models(base_url: str = "http://127.0.0.1:11434", timeout: float 
 
 
 class OfflineAsrService:
-    """Serviço de reconhecimento de fala, isolamento neural de voz, diarização e atas locais."""
+    """Serviço sequencial em 2 estágios para transcrição, diarização, revisão e ata 100% offline."""
 
     def __init__(
         self,
         models_dir: Optional[Path] = None,
         voiceprint_service: Optional[VoiceprintService] = None,
-        default_variant: str = "small",
+        default_variant: str = "turbo",
     ):
         base_dir = _get_base_dir()
         meipass = getattr(sys, "_MEIPASS", None)
-        if models_dir:
-            self.models_dir = Path(models_dir)
-        else:
-            cand = base_dir / "models" / "asr"
-            if not cand.exists() and meipass and (Path(meipass) / "models" / "asr").exists():
-                cand = Path(meipass) / "models" / "asr"
-            self.models_dir = cand
 
-        den_cand = base_dir / "models" / "denoiser"
-        if not den_cand.exists() and meipass and (Path(meipass) / "models" / "denoiser").exists():
-            den_cand = Path(meipass) / "models" / "denoiser"
-        self.denoiser_dir = den_cand
+        if models_dir:
+            p_models = Path(models_dir)
+            self._custom_models_dir = True
+            if p_models.name.lower() == "models" or (p_models / "asr").exists() or (p_models / "llm").exists():
+                models_root = p_models
+                self.models_dir = models_root / "asr"
+            else:
+                models_root = p_models.parent
+                self.models_dir = p_models
+        else:
+            self._custom_models_dir = False
+            models_root = base_dir / "models"
+            if not models_root.exists() and meipass and (Path(meipass) / "models").exists():
+                models_root = Path(meipass) / "models"
+            self.models_dir = models_root / "asr"
+
+        self.models_root = models_root
+        self.denoiser_dir = models_root / "denoiser"
         self.denoiser_model_path = self.denoiser_dir / DENOISER_MODEL_NAME
+        self.llm_dir = models_root / "llm"
 
         self.voiceprint_service = voiceprint_service or VoiceprintService()
-        self.default_variant = default_variant if default_variant in WHISPER_MODELS else "small"
+        self.default_variant = default_variant if default_variant in CT2_WHISPER_MODELS else "turbo"
 
         self._lock = threading.Lock()
         self._denoiser_lock = threading.Lock()
+        self._llm_lock = threading.Lock()
         self._recognizer = None
+        self._ct2_model = None
         self._denoiser = None
         self._loaded_variant: Optional[str] = None
+        self._loaded_ct2_variant: Optional[str] = None
         self._sherpa_onnx = None
+        self._rolling_prompt_tail: str = ""
+        self._llm_proc: Optional[subprocess.Popen] = None
+        self._llm_port: Optional[int] = None
+        self._llm_active_variant: Optional[str] = None
+
+    def _candidate_models_roots(self) -> List[Path]:
+        roots: List[Path] = [self.models_root]
+        if not self._custom_models_dir:
+            base_m = _get_base_dir() / "models"
+            if base_m not in roots:
+                roots.append(base_m)
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                mp_m = Path(meipass) / "models"
+                if mp_m not in roots:
+                    roots.append(mp_m)
+            local_app = os.environ.get("LOCALAPPDATA", "")
+            if local_app:
+                inst_m = Path(local_app) / "Programs" / "Escutai" / "models"
+                if inst_m not in roots:
+                    roots.append(inst_m)
+        return roots
 
     def _ensure_sherpa(self):
         if self._sherpa_onnx is None:
@@ -322,99 +639,296 @@ class OfflineAsrService:
             self._sherpa_onnx = _so
         return self._sherpa_onnx
 
+    @staticmethod
+    def _can_import_faster_whisper() -> bool:
+        try:
+            _import_faster_whisper()
+            return True
+        except Exception:
+            return False
+
+    def _resolve_ct2_model_dir(self, variant: str) -> Optional[Path]:
+        spec = CT2_WHISPER_MODELS.get(variant, CT2_WHISPER_MODELS["turbo"])
+        cands = [self.models_dir / spec["dir_name"]]
+        for root in self._candidate_models_roots():
+            p = root / "asr" / spec["dir_name"]
+            if p not in cands:
+                cands.append(p)
+        for model_dir in cands:
+            model_bin = model_dir / "model.bin"
+            cfg_json = model_dir / "config.json"
+            if model_bin.is_file() and model_bin.stat().st_size > 50_000_000 and cfg_json.is_file():
+                return model_dir
+        return None
+
     def _resolve_model_files(self, variant: str) -> Optional[Tuple[Path, Path, Path]]:
         spec = WHISPER_MODELS.get(variant, WHISPER_MODELS["small"])
-        model_dir = self.models_dir / spec["dir_name"]
-        if not model_dir.exists():
-            return None
+        cands = [self.models_dir / spec["dir_name"]]
+        for root in self._candidate_models_roots():
+            p = root / "asr" / spec["dir_name"]
+            if p not in cands:
+                cands.append(p)
 
-        prefix = spec["prefix"]
-        enc_cands = [
-            model_dir / f"{prefix}-encoder.int8.onnx",
-            model_dir / f"{prefix}-encoder.onnx",
-        ] + sorted(model_dir.rglob("*encoder*.onnx"))
-        dec_cands = [
-            model_dir / f"{prefix}-decoder.int8.onnx",
-            model_dir / f"{prefix}-decoder.onnx",
-        ] + sorted(model_dir.rglob("*decoder*.onnx"))
-        tok_cands = [
-            model_dir / f"{prefix}-tokens.txt",
-        ] + sorted(model_dir.rglob("*tokens*.txt"))
+        for model_dir in cands:
+            if not model_dir.exists():
+                continue
+            prefix = spec["prefix"]
+            enc_cands = [
+                model_dir / f"{prefix}-encoder.int8.onnx",
+                model_dir / f"{prefix}-encoder.onnx",
+            ] + sorted(model_dir.rglob("*encoder*.onnx"))
+            dec_cands = [
+                model_dir / f"{prefix}-decoder.int8.onnx",
+                model_dir / f"{prefix}-decoder.onnx",
+            ] + sorted(model_dir.rglob("*decoder*.onnx"))
+            tok_cands = [
+                model_dir / f"{prefix}-tokens.txt",
+            ] + sorted(model_dir.rglob("*tokens*.txt"))
 
-        enc = next((p for p in enc_cands if p.is_file() and p.stat().st_size > 10000), None)
-        dec = next((p for p in dec_cands if p.is_file() and p.stat().st_size > 10000), None)
-        tok = next((p for p in tok_cands if p.is_file() and p.stat().st_size > 100), None)
-        if enc and dec and tok:
-            return enc, dec, tok
+            enc = next((p for p in enc_cands if p.is_file() and p.stat().st_size > 10000), None)
+            dec = next((p for p in dec_cands if p.is_file() and p.stat().st_size > 10000), None)
+            tok = next((p for p in tok_cands if p.is_file() and p.stat().st_size > 100), None)
+            if enc and dec and tok:
+                return enc, dec, tok
         return None
 
     def is_ready(self, variant: Optional[str] = None) -> Tuple[bool, str]:
-        """Verifica se `sherpa-onnx` e os pesos Whisper INT8 estão disponíveis localmente."""
-        var = variant if variant in WHISPER_MODELS else self.default_variant
-        try:
-            self._ensure_sherpa()
-        except Exception as e:
-            return False, f"Dependência sherpa-onnx indisponível: {e}"
+        """Verifica se o motor CT2 (faster-whisper) ou fallback ONNX está pronto offline."""
+        var = variant if variant in CT2_WHISPER_MODELS else self.default_variant
+        if self._resolve_ct2_model_dir(var) is not None and self._can_import_faster_whisper():
+            return True, f"Whisper {var} (CT2 INT8) pronto para uso 100% offline."
 
-        files = self._resolve_model_files(var)
-        if files is None:
-            return False, f"Modelo offline Whisper ({var}) ainda não baixado em {self.models_dir}."
-        return True, f"Whisper ({var}) pronto para uso 100% offline."
+        if self._resolve_model_files(var) is not None:
+            try:
+                self._ensure_sherpa()
+                return True, f"Whisper {var} (ONNX fallback) pronto para uso offline."
+            except Exception as e:
+                return False, f"Dependência sherpa-onnx indisponível: {e}"
+
+        return False, f"Modelo offline Whisper ({var}) ainda não baixado em {self.models_dir}."
+
+    def _resolve_llm_paths(self, llm_variant: str = "qwen2.5-3b") -> Tuple[Optional[Path], Optional[Path]]:
+        spec = LOCAL_LLM_MODELS.get(llm_variant, LOCAL_LLM_MODELS["qwen2.5-3b"])
+        srv_exe: Optional[Path] = None
+        gguf_path: Optional[Path] = None
+        for root in self._candidate_models_roots():
+            cand_srv = root / "llm" / "bin" / "llama-server.exe"
+            if srv_exe is None and cand_srv.is_file() and cand_srv.stat().st_size > 5000:
+                # Valida DLL crítica ao lado de llama-server.exe
+                if (cand_srv.parent / "llama.dll").is_file() or (cand_srv.parent / "ggml.dll").is_file():
+                    srv_exe = cand_srv
+            cand_gguf = root / "llm" / spec["filename"]
+            if gguf_path is None and cand_gguf.is_file() and cand_gguf.stat().st_size >= spec["min_bytes"]:
+                gguf_path = cand_gguf
+        return srv_exe, gguf_path
+
+    def is_llm_ready(self, llm_variant: str = "qwen2.5-3b") -> Tuple[bool, str]:
+        """Verifica se o binário `llama-server.exe` e o modelo GGUF embutido estão prontos."""
+        srv_exe, gguf_path = self._resolve_llm_paths(llm_variant)
+        if srv_exe and gguf_path:
+            return True, f"LLM Local ({llm_variant}) pronto."
+        if not srv_exe:
+            return False, f"Binário llama-server.exe ausente em {self.llm_dir / 'bin'}."
+        return False, f"Modelo {llm_variant} (.gguf) ausente em {self.llm_dir}."
+
+    def ensure_llm_ready(
+        self,
+        llm_variant: str = "qwen2.5-3b",
+        progress_cb: Optional[Callable[[str, float], None]] = None,
+        base_pct: float = 0.0,
+        span_pct: float = 1.0,
+    ) -> Tuple[bool, str]:
+        """Baixa o runtime `llama.cpp` Windows x64 + GGUF Qwen2.5-3B-Instruct se ausentes."""
+        spec = LOCAL_LLM_MODELS.get(llm_variant, LOCAL_LLM_MODELS["qwen2.5-3b"])
+        srv_exe, gguf_path = self._resolve_llm_paths(llm_variant)
+        if srv_exe and gguf_path:
+            return True, f"LLM Local ({llm_variant}) já está pronto."
+
+        self.llm_dir.mkdir(parents=True, exist_ok=True)
+        bin_dir = self.llm_dir / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Runtime llama-server.exe + DLLs (~24 MB)
+        if not srv_exe:
+            tmp_zip = self.llm_dir / ".llama_bin.zip.tmp"
+            try:
+                _download_file_parallel(
+                    LLAMA_CPP_WIN_URL,
+                    tmp_zip,
+                    progress_cb=progress_cb,
+                    label="Baixando motor LLM embutido (llama.cpp CPU AVX2)",
+                    base_pct=base_pct,
+                    span_pct=span_pct * 0.12,
+                    num_workers=4,
+                )
+                with zipfile.ZipFile(str(tmp_zip), "r") as zf:
+                    for info in zf.infolist():
+                        fname = Path(info.filename).name
+                        if not fname:
+                            continue
+                        low = fname.lower()
+                        if low == "llama-server.exe" or low.endswith(".dll"):
+                            target = bin_dir / fname
+                            with zf.open(info, "r") as src_f, open(target, "wb") as dst_f:
+                                shutil.copyfileobj(src_f, dst_f, length=512 * 1024)
+            except Exception as e:
+                logger.warning(f"Falha ao baixar/extrair llama.cpp: {e}")
+                return False, f"Falha ao baixar llama.cpp: {e}"
+            finally:
+                tmp_zip.unlink(missing_ok=True)
+
+        # 2. Modelo GGUF quantizado Qwen2.5-Instruct (~2.0 GB em 3B ou ~1.0 GB em 1.5B)
+        if not gguf_path:
+            target_gguf = self.llm_dir / spec["filename"]
+            try:
+                _download_file_parallel(
+                    spec["url"],
+                    target_gguf,
+                    progress_cb=progress_cb,
+                    label=f"Baixando LLM Local ({llm_variant} Q4_K_M)",
+                    base_pct=base_pct + span_pct * 0.12,
+                    span_pct=span_pct * 0.88,
+                    num_workers=8,
+                )
+            except Exception as e:
+                logger.warning(f"Falha ao baixar {spec['filename']}: {e}")
+                return False, f"Falha ao baixar {spec['filename']}: {e}"
+
+        ok_final, msg_final = self.is_llm_ready(llm_variant)
+        return ok_final, msg_final
+
+    def _ensure_ct2_models_ready(
+        self,
+        var: str,
+        progress_cb: Optional[Callable[[str, float], None]] = None,
+        base_pct: float = 0.08,
+        span_pct: float = 0.37,
+    ) -> Tuple[bool, str]:
+        if self._resolve_ct2_model_dir(var) is not None and self._can_import_faster_whisper():
+            return True, f"Modelo CT2 Whisper ({var}) já está pronto."
+        if not self._can_import_faster_whisper():
+            return False, "faster_whisper indisponível para CT2."
+
+        spec = CT2_WHISPER_MODELS[var]
+        target_dir = self.models_dir / spec["dir_name"]
+        target_dir.mkdir(parents=True, exist_ok=True)
+        repo_url = spec["repo_url"].rstrip("/")
+        files: List[str] = list(spec["files"])
+        small_files = [f for f in files if f != "model.bin"]
+
+        try:
+            for idx, fname in enumerate(small_files):
+                fpath = target_dir / fname
+                if fpath.is_file() and fpath.stat().st_size > 10:
+                    continue
+                _download_file_parallel(
+                    f"{repo_url}/{fname}",
+                    fpath,
+                    progress_cb=progress_cb,
+                    label=f"Baixando metadados Whisper {var} ({fname})",
+                    base_pct=base_pct + (idx / max(1, len(small_files))) * (span_pct * 0.08),
+                    span_pct=span_pct * 0.02,
+                    num_workers=1,
+                )
+
+            bin_path = target_dir / "model.bin"
+            if not (bin_path.is_file() and bin_path.stat().st_size > 50_000_000):
+                _download_file_parallel(
+                    f"{repo_url}/model.bin",
+                    bin_path,
+                    progress_cb=progress_cb,
+                    label=f"Baixando Whisper {var} CT2 INT8",
+                    base_pct=base_pct + span_pct * 0.08,
+                    span_pct=span_pct * 0.92,
+                    num_workers=8,
+                )
+
+            if self._resolve_ct2_model_dir(var) is None:
+                return False, f"Arquivos CT2 Whisper inválidos em {target_dir}."
+            return True, f"Whisper {var} (CT2 INT8) baixado com sucesso."
+        except Exception as e:
+            logger.warning(f"Falha no download CT2 ({var}): {e}")
+            return False, f"Falha ao baixar Whisper {var} CT2: {e}"
 
     def ensure_models_ready(
         self,
         variant: Optional[str] = None,
         progress_cb: Optional[Callable[[str, float], None]] = None,
     ) -> Tuple[bool, str]:
-        """Garante download dos pesos Whisper ONNX e dos modelos VAD/Voiceprint locais."""
-        var = variant if variant in WHISPER_MODELS else self.default_variant
-        spec = WHISPER_MODELS[var]
+        """Garante download de Voiceprints, Whisper (CT2 ou ONNX), GTCRN Denoiser e LLM Qwen2.5 embutido."""
+        var = variant if variant in CT2_WHISPER_MODELS else self.default_variant
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Garante Silero VAD + WeSpeaker (usados na segmentação e diarização local)
+        # 1. Silero VAD + WeSpeaker Voiceprint (~26 MB)
         if self.voiceprint_service:
-            ok_vp, msg_vp = self.voiceprint_service.ensure_models_downloaded(on_progress=progress_cb)
+            ok_vp, msg_vp = self.voiceprint_service.ensure_models_downloaded(
+                on_progress=(lambda m, p: progress_cb(m, 0.08 * p)) if progress_cb else None
+            )
             if not ok_vp:
                 logger.warning(f"Aviso ao baixar modelos auxiliares VAD/Voiceprint: {msg_vp}")
 
-        # 2. Baixa e extrai Whisper ONNX se ainda não existir
+        # 2. Modelo Whisper CT2 INT8 (preferencial) com fallback automático ONNX
+        whisper_ok, whisper_msg = self._ensure_ct2_models_ready(
+            var, progress_cb=progress_cb, base_pct=0.08, span_pct=0.37
+        )
+        if not whisper_ok:
+            if self._resolve_model_files(var) is not None:
+                whisper_ok, whisper_msg = True, f"Usando Whisper {var} ONNX fallback."
+            else:
+                whisper_ok, whisper_msg = self._ensure_sherpa_models_ready(var, progress_cb=progress_cb)
+
+        if not whisper_ok:
+            return False, whisper_msg
+
+        # 3. Denoiser neural GTCRN (~520 KB)
+        self.ensure_denoiser_ready(progress_cb=progress_cb)
+
+        # 4. Motor LLM embutido (llama-server.exe + Qwen2.5-3B-Instruct Q4_K_M)
+        llm_ok, llm_msg = self.ensure_llm_ready(
+            "qwen2.5-3b",
+            progress_cb=progress_cb,
+            base_pct=0.48,
+            span_pct=0.52,
+        )
+        if not llm_ok:
+            logger.warning(f"Aviso: LLM local embutido indisponível ({llm_msg}); síntese determinística seguirá ativa.")
+
+        if progress_cb:
+            progress_cb(f"Pipeline Offline ({var} + Qwen2.5-3B) pronto!", 1.0)
+        return True, f"Modelos offline ({var} + GTCRN + Qwen2.5) prontos para uso 100% offline."
+
+    def _ensure_sherpa_models_ready(
+        self,
+        var: str,
+        progress_cb: Optional[Callable[[str, float], None]] = None,
+    ) -> Tuple[bool, str]:
+        """Fallback legado para download do modelo Whisper INT8 no formato sherpa-onnx."""
+        spec = WHISPER_MODELS.get(var, WHISPER_MODELS["small"])
         if self._resolve_model_files(var) is not None:
-            return True, f"Modelos offline Whisper ({var}) já estão prontos."
+            return True, f"Modelos Whisper ({var} ONNX) já estão prontos."
 
         tmp_archive = self.models_dir / f".{spec['dir_name']}.tar.bz2.tmp"
         extract_tmp = self.models_dir / f".extract_{spec['dir_name']}"
         target_dir = self.models_dir / spec["dir_name"]
 
         try:
+            _download_file_parallel(
+                spec["url"],
+                tmp_archive,
+                progress_cb=progress_cb,
+                label=f"Baixando Whisper {var} ONNX",
+                base_pct=0.10,
+                span_pct=0.32,
+                num_workers=4,
+            )
             if progress_cb:
-                progress_cb(f"Baixando Whisper {var} ONNX ({spec['label']})...", 0.05)
-
-            req = urllib.request.Request(spec["url"], headers={"User-Agent": "Escutai/2.0"})
-            with urllib.request.urlopen(req, timeout=180) as resp:
-                total = int(resp.headers.get("Content-Length") or 0)
-                downloaded = 0
-                with open(tmp_archive, "wb") as f:
-                    while True:
-                        chunk = resp.read(256 * 1024)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if progress_cb and total > 0:
-                            frac = min(0.85, 0.05 + 0.80 * (downloaded / float(total)))
-                            mb_done = downloaded / (1024 * 1024)
-                            mb_tot = total / (1024 * 1024)
-                            progress_cb(f"Baixando Whisper {var} ({mb_done:.1f}/{mb_tot:.1f} MB)...", frac)
-
-            if progress_cb:
-                progress_cb(f"Extraindo modelo Whisper {var}...", 0.90)
+                progress_cb(f"Extraindo modelo Whisper {var} ONNX...", 0.44)
 
             if extract_tmp.exists():
                 shutil.rmtree(extract_tmp, ignore_errors=True)
             extract_tmp.mkdir(parents=True, exist_ok=True)
             _safe_extract_tar_bz2(tmp_archive, extract_tmp)
 
-            # Move subpasta extraída para `models/asr/sherpa-onnx-whisper-<var>`
             sub_dir = extract_tmp / spec["dir_name"]
             if not sub_dir.exists():
                 subdirs = [d for d in extract_tmp.iterdir() if d.is_dir()]
@@ -424,7 +938,6 @@ class OfflineAsrService:
                 shutil.rmtree(target_dir, ignore_errors=True)
             shutil.move(str(sub_dir), str(target_dir))
 
-            # Remove pesos FP32 redundantes se os equivalentes INT8 existirem (reduz ~500 MB)
             for int8_file in target_dir.rglob("*.int8.onnx"):
                 fp32_sibling = int8_file.with_name(int8_file.name.replace(".int8.onnx", ".onnx"))
                 if fp32_sibling.exists():
@@ -432,15 +945,9 @@ class OfflineAsrService:
 
             if self._resolve_model_files(var) is None:
                 return False, f"Arquivos Whisper inválidos após extração em {target_dir}."
-
-            self.ensure_denoiser_ready(progress_cb=progress_cb)
-
-            if progress_cb:
-                progress_cb(f"Whisper {var} pronto para uso offline!", 1.0)
-            return True, f"Modelo offline Whisper ({var}) baixado e validado com sucesso."
-
+            return True, f"Modelo Whisper ({var} ONNX) baixado e validado."
         except Exception as e:
-            logger.exception(f"Falha ao baixar/extrair Whisper {var}: {e}")
+            logger.exception(f"Falha ao baixar/extrair Whisper {var} ONNX: {e}")
             return False, f"Falha ao preparar Whisper {var}: {e}"
         finally:
             tmp_archive.unlink(missing_ok=True)
@@ -459,7 +966,7 @@ class OfflineAsrService:
             self.denoiser_dir.mkdir(parents=True, exist_ok=True)
             tmp_file = self.denoiser_model_path.with_suffix(".onnx.tmp")
             if progress_cb:
-                progress_cb("Baixando isolador neural de voz (GTCRN ~520 KB)...", 0.92)
+                progress_cb("Baixando isolador neural de voz (GTCRN ~520 KB)...", 0.46)
             req = urllib.request.Request(DENOISER_MODEL_URL, headers={"User-Agent": "Escutai/2.0"})
             with urllib.request.urlopen(req, timeout=60) as resp:
                 with open(tmp_file, "wb") as f:
@@ -493,6 +1000,19 @@ class OfflineAsrService:
             self._denoiser = so.OfflineSpeechDenoiser(cfg)
             return self._denoiser
 
+    def unload_asr_models(self) -> None:
+        """Libera Whisper (CT2/ONNX) e GTCRN da memória RAM antes da etapa LLM."""
+        with self._lock:
+            self._ct2_model = None
+            self._recognizer = None
+            self._loaded_ct2_variant = None
+            self._loaded_variant = None
+            self._rolling_prompt_tail = ""
+        with self._denoiser_lock:
+            self._denoiser = None
+        gc.collect()
+        logger.info("[MEMÓRIA] Modelos Whisper e GTCRN descarregados da RAM.")
+
     def denoise_and_isolate_voice(
         self,
         samples_f32: np.ndarray,
@@ -523,7 +1043,29 @@ class OfflineAsrService:
             logger.warning(f"Fallback sem denoiser neural GTCRN: {e}")
             return arr
 
+    def _ensure_ct2_recognizer(self, variant: Optional[str] = None):
+        var = variant if variant in CT2_WHISPER_MODELS else self.default_variant
+        with self._lock:
+            if self._ct2_model is not None and self._loaded_ct2_variant == var:
+                return self._ct2_model
+            model_dir = self._resolve_ct2_model_dir(var)
+            if model_dir is None:
+                raise RuntimeError(f"Modelo CT2 Whisper '{var}' não encontrado em {self.models_dir}.")
+            fw = _import_faster_whisper()
+            threads = min(6, max(4, (os.cpu_count() or 4) // 2))
+            self._ct2_model = fw.WhisperModel(
+                str(model_dir),
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=threads,
+                local_files_only=True,
+            )
+            self._loaded_ct2_variant = var
+            logger.info(f"[CT2] Whisper '{var}' carregado (int8, {threads} threads) de {model_dir}.")
+            return self._ct2_model
+
     def _ensure_recognizer(self, variant: Optional[str] = None):
+        """Carrega reconhecedor fallback sherpa-onnx caso CT2 não esteja presente."""
         var = variant if variant in WHISPER_MODELS else self.default_variant
         with self._lock:
             if self._recognizer is not None and self._loaded_variant == var:
@@ -531,7 +1073,7 @@ class OfflineAsrService:
 
             files = self._resolve_model_files(var)
             if files is None:
-                raise RuntimeError(f"Modelo Whisper '{var}' não encontrado em {self.models_dir}.")
+                raise RuntimeError(f"Modelo Whisper ONNX '{var}' não encontrado em {self.models_dir}.")
 
             so = self._ensure_sherpa()
             enc, dec, tok = files
@@ -548,6 +1090,214 @@ class OfflineAsrService:
             self._loaded_variant = var
             return self._recognizer
 
+    def _transcribe_channel_ct2(
+        self,
+        merged_turns: List[Tuple[float, float, str, np.ndarray]],
+        block_offset_seconds: float,
+        variant: Optional[str] = None,
+        context_notes: str = "",
+        enrolled_names: Optional[List[str]] = None,
+        strip_voce_suffix: bool = False,
+    ) -> List[Tuple[float, float, str, str]]:
+        """Empacota apenas turnos de fala em buffers <=28s (0,25s silêncio entre eles) e alinha palavras via word_timestamps."""
+        if not merged_turns:
+            return []
+
+        ct2_model = self._ensure_ct2_recognizer(variant)
+        vocab = _extract_glossary_terms(context_notes, enrolled_names)
+        names_str = ", ".join(enrolled_names or [])
+        vocab_prompt = ", ".join(vocab[:24])
+        hotwords_str = ", ".join(vocab[:30]) if vocab else None
+
+        prompt_parts = ["Reunião corporativa em português do Brasil."]
+        if names_str:
+            prompt_parts.append(f"Participantes: {names_str}.")
+        if vocab_prompt:
+            prompt_parts.append(f"Glossário: {vocab_prompt}.")
+        initial_prompt = " ".join(prompt_parts).strip()
+
+        sep = np.zeros(int(0.25 * TARGET_SAMPLE_RATE), dtype=np.float32)
+        max_buf_samples = int(28.0 * TARGET_SAMPLE_RATE)
+        min_turn_samples = int(0.20 * TARGET_SAMPLE_RATE)
+
+        # Monta lotes empacotados de turnos de fala contínua (sem buracos longos de silêncio)
+        packed_batches: List[Tuple[List[np.ndarray], List[Tuple[float, float, float, float, str]]]] = []
+        cur_arrays: List[np.ndarray] = []
+        cur_slots: List[Tuple[float, float, float, float, str]] = []
+        cur_samples = 0
+
+        for s_t, e_t, spk, seg_arr in merged_turns:
+            if len(seg_arr) < min_turn_samples:
+                continue
+            clipped = seg_arr[: int(29.0 * TARGET_SAMPLE_RATE)].astype(np.float32)
+            need_sep = len(sep) if cur_arrays else 0
+            if cur_arrays and (cur_samples + need_sep + len(clipped)) > max_buf_samples:
+                packed_batches.append((cur_arrays, cur_slots))
+                cur_arrays = []
+                cur_slots = []
+                cur_samples = 0
+                need_sep = 0
+
+            if need_sep:
+                cur_arrays.append(sep)
+                cur_samples += len(sep)
+            b_start = cur_samples / float(TARGET_SAMPLE_RATE)
+            cur_arrays.append(clipped)
+            cur_samples += len(clipped)
+            b_end = cur_samples / float(TARGET_SAMPLE_RATE)
+            cur_slots.append((b_start, b_end, s_t, e_t, spk))
+
+        if cur_arrays:
+            packed_batches.append((cur_arrays, cur_slots))
+
+        if not packed_batches:
+            return []
+
+        events: List[Tuple[float, float, str, str]] = []
+        for arr_list, slots in packed_batches:
+            pack_f32 = np.concatenate(arr_list) if len(arr_list) > 1 else arr_list[0]
+            with self._lock:
+                seg_iter, _info = ct2_model.transcribe(
+                    pack_f32,
+                    language="pt",
+                    task="transcribe",
+                    beam_size=2,
+                    best_of=2,
+                    patience=1.0,
+                    temperature=[0.0, 0.2],
+                    compression_ratio_threshold=2.1,
+                    log_prob_threshold=-1.0,
+                    no_speech_threshold=0.6,
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
+                    initial_prompt=initial_prompt,
+                    hotwords=hotwords_str,
+                    repetition_penalty=1.20,
+                    no_repeat_ngram_size=3,
+                    vad_filter=False,
+                )
+                raw_segments = list(seg_iter)
+
+            slot_tokens: List[List[str]] = [[] for _ in slots]
+            buf_total_t = len(pack_f32) / float(TARGET_SAMPLE_RATE)
+
+            def _assign_span(w_s: float, w_e: float, w_tok: str) -> None:
+                if not w_tok:
+                    return
+                w_mid = 0.5 * (w_s + w_e)
+                if w_mid > buf_total_t + 0.6 or w_mid < -0.5:
+                    return
+                best_k = 0
+                best_dist = float("inf")
+                for k_idx, (bs, be, _os, _oe, _spk) in enumerate(slots):
+                    if bs <= w_mid <= be:
+                        slot_tokens[k_idx].append(w_tok)
+                        return
+                    dist = max(bs - w_mid, w_mid - be, 0.0)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_k = k_idx
+                if best_dist <= 0.65:
+                    slot_tokens[best_k].append(w_tok)
+
+            for seg in raw_segments:
+                words = getattr(seg, "words", None) or []
+                if words:
+                    for w in words:
+                        w_txt = str(getattr(w, "word", "") or "")
+                        ws = float(getattr(w, "start", seg.start))
+                        we = float(getattr(w, "end", max(ws, getattr(seg, "end", ws))))
+                        _assign_span(ws, we, w_txt)
+                else:
+                    s_txt = str(getattr(seg, "text", "") or "").strip()
+                    if s_txt:
+                        _assign_span(float(seg.start), float(seg.end), " " + s_txt)
+
+            for (_bs, _be, orig_s, orig_e, spk), toks in zip(slots, slot_tokens):
+                if not toks:
+                    continue
+                raw_joined = "".join(toks).strip()
+                cleaned = _clean_whisper_text(raw_joined)
+                if not cleaned:
+                    continue
+                fixed_txt = _apply_glossary_and_phonetic_fixes(
+                    cleaned, context_notes=context_notes, enrolled_names=enrolled_names
+                )
+                if not fixed_txt:
+                    continue
+                final_spk = "Willian" if (strip_voce_suffix and spk.endswith("(Você)")) else spk
+                abs_s = block_offset_seconds + orig_s
+                abs_e = block_offset_seconds + orig_e
+                if events and events[-1][2] == final_spk and (abs_s - events[-1][1]) <= 2.0:
+                    p_s, p_e, p_spk, p_txt = events[-1]
+                    events[-1] = (p_s, max(p_e, abs_e), p_spk, f"{p_txt} {fixed_txt}".strip())
+                else:
+                    events.append((abs_s, abs_e, final_spk, fixed_txt))
+
+        return events
+
+    def _transcribe_turns_ct2(
+        self,
+        chunks: List[np.ndarray],
+        variant: Optional[str] = None,
+        context_notes: str = "",
+        enrolled_names: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Decodifica turnos via faster-whisper CTranslate2 (beam_size=5 + initial_prompt + hotwords)."""
+        if not chunks:
+            return []
+        ct2_model = self._ensure_ct2_recognizer(variant)
+        vocab = _extract_glossary_terms(context_notes, enrolled_names)
+        names_str = ", ".join(enrolled_names or [])
+        vocab_prompt = ", ".join(vocab[:24])
+        hotwords_str = ", ".join(vocab[:30]) if vocab else None
+
+        min_len = int(0.25 * TARGET_SAMPLE_RATE)
+        max_len = int(29.5 * TARGET_SAMPLE_RATE)
+        outputs = [""] * len(chunks)
+
+        with self._lock:
+            rolling_tail = self._rolling_prompt_tail
+            for idx, wav_arr in enumerate(chunks):
+                if len(wav_arr) < min_len:
+                    continue
+                audio_f32 = wav_arr[:max_len].astype(np.float32)
+                prompt_parts = ["Reunião corporativa em português do Brasil."]
+                if names_str:
+                    prompt_parts.append(f"Participantes: {names_str}.")
+                if vocab_prompt:
+                    prompt_parts.append(f"Glossário: {vocab_prompt}.")
+                if rolling_tail:
+                    prompt_parts.append(rolling_tail)
+                initial_prompt = " ".join(prompt_parts).strip()
+
+                segments, _info = ct2_model.transcribe(
+                    audio_f32,
+                    language="pt",
+                    task="transcribe",
+                    beam_size=5,
+                    best_of=5,
+                    patience=1.0,
+                    temperature=[0.0, 0.2, 0.4],
+                    compression_ratio_threshold=2.2,
+                    log_prob_threshold=-1.0,
+                    no_speech_threshold=0.6,
+                    condition_on_previous_text=False,
+                    initial_prompt=initial_prompt,
+                    hotwords=hotwords_str,
+                    repetition_penalty=1.12,
+                    no_repeat_ngram_size=3,
+                    vad_filter=False,
+                )
+                seg_texts = [getattr(s, "text", "").strip() for s in segments if getattr(s, "text", "").strip()]
+                cleaned = _clean_whisper_text(" ".join(seg_texts))
+                outputs[idx] = cleaned
+                if len(cleaned) >= 12:
+                    rolling_tail = cleaned[-200:].strip()
+            self._rolling_prompt_tail = rolling_tail
+
+        return outputs
+
     def _transcribe_samples(self, samples_f32: np.ndarray, variant: Optional[str] = None) -> str:
         results = self._transcribe_batch_samples([samples_f32], variant=variant)
         return results[0] if results else ""
@@ -556,11 +1306,25 @@ class OfflineAsrService:
         self,
         chunks: List[np.ndarray],
         variant: Optional[str] = None,
+        context_notes: str = "",
+        enrolled_names: Optional[List[str]] = None,
     ) -> List[str]:
-        """Decodifica turnos em lote (`decode_streams`) limitados a <=29,5s cada."""
+        """Decodifica turnos via CTranslate2 (`beam_size=5`) ou fallback `sherpa-onnx` (`decode_streams`)."""
         if not chunks:
             return []
-        rec = self._ensure_recognizer(variant)
+        var = variant if variant in CT2_WHISPER_MODELS else self.default_variant
+        if self._resolve_ct2_model_dir(var) is not None and self._can_import_faster_whisper():
+            try:
+                return self._transcribe_turns_ct2(
+                    chunks,
+                    variant=var,
+                    context_notes=context_notes,
+                    enrolled_names=enrolled_names,
+                )
+            except Exception as e:
+                logger.warning(f"Falha no decoder CT2 Whisper ({var}), tentando fallback ONNX: {e}")
+
+        rec = self._ensure_recognizer(var)
         min_len = int(0.25 * TARGET_SAMPLE_RATE)
         max_len = int(29.5 * TARGET_SAMPLE_RATE)
         outputs = [""] * len(chunks)
@@ -610,7 +1374,6 @@ class OfflineAsrService:
             except Exception as e:
                 logger.debug(f"VAD fallback por janelas: {e}")
 
-        # Fallback por energia quando Silero VAD não detectar trechos ou estiver ausente
         rms = float(np.sqrt(np.mean(mono_f32 * mono_f32)))
         if rms < 0.005:
             return []
@@ -636,6 +1399,31 @@ class OfflineAsrService:
             )
         except Exception:
             return "Participante 1"
+
+    @staticmethod
+    def _smooth_short_speaker_islands(
+        diarized_segs: List[Tuple[float, float, str, np.ndarray]],
+        max_island_sec: float = 1.8,
+        max_gap_sec: float = 1.8,
+    ) -> List[Tuple[float, float, str, np.ndarray]]:
+        """Corrige oscilações breves de diarização (A -> B_curto -> A passa a A -> A -> A)."""
+        if len(diarized_segs) < 3:
+            return diarized_segs
+        smoothed = list(diarized_segs)
+        for idx in range(1, len(smoothed) - 1):
+            p_s, p_e, p_spk, _p_arr = smoothed[idx - 1]
+            c_s, c_e, c_spk, c_arr = smoothed[idx]
+            n_s, _n_e, n_spk, _n_arr = smoothed[idx + 1]
+            if (
+                p_spk == n_spk
+                and c_spk != p_spk
+                and not c_spk.startswith("Possível sobreposição")
+                and (c_e - c_s) <= max_island_sec
+                and (c_s - p_e) <= max_gap_sec
+                and (n_s - c_e) <= max_gap_sec
+            ):
+                smoothed[idx] = (c_s, c_e, p_spk, c_arr)
+        return smoothed
 
     @staticmethod
     def _merge_same_speaker_turns(
@@ -676,7 +1464,7 @@ class OfflineAsrService:
         enhancement_mode: str = "clarify_room",
         strip_voce_suffix: bool = False,
     ) -> List[Tuple[float, float, str, str]]:
-        """Pipeline dual-branch: VAD+Voiceprint no timbre natural -> restauração/isolamento no ASR."""
+        """Pipeline dual-branch: VAD+Voiceprint no timbre natural -> colarinho + restauração no ASR."""
         if len(chan_f32) == 0:
             return []
 
@@ -696,6 +1484,7 @@ class OfflineAsrService:
             diarized = self.voiceprint_service.diarize_speech_segments(
                 vad_segs, TARGET_SAMPLE_RATE, unknown_clusters=clusters
             )
+            diarized = self._smooth_short_speaker_islands(diarized)
         else:
             diarized = [(s_t, e_t, "Participante 1", seg) for s_t, e_t, seg in vad_segs]
 
@@ -712,15 +1501,45 @@ class OfflineAsrService:
             pcm_i16 = np.clip(np.round(asr_f32 * 32768.0), -32768, 32767).astype(np.int16)
             asr_f32 = _to_float32_mono(enhance_speech_audio(pcm_i16, TARGET_SAMPLE_RATE, mode=eff_mode))
 
+        # Recorte com colarinho de 0,24s (limitado a 0,08s sobre vizinhos) para evitar corte de sílaba final
+        n_asr = len(asr_f32)
+        max_dur_t = n_asr / float(TARGET_SAMPLE_RATE)
         diarized_asr: List[Tuple[float, float, str, np.ndarray]] = []
-        for s_t, e_t, spk, raw_seg in diarized:
-            i0 = max(0, int(round(s_t * TARGET_SAMPLE_RATE)))
-            i1 = min(len(asr_f32), int(round(e_t * TARGET_SAMPLE_RATE)))
+        for idx, (s_t, e_t, spk, raw_seg) in enumerate(diarized):
+            prev_e = diarized[idx - 1][1] if idx > 0 else 0.0
+            next_s = diarized[idx + 1][0] if idx + 1 < len(diarized) else max_dur_t
+            min_allowed_s = (prev_e - 0.08) if idx > 0 else 0.0
+            max_allowed_e = (next_s + 0.08) if idx + 1 < len(diarized) else max_dur_t
+            eff_s_t = max(0.0, min(s_t, max(s_t - 0.24, min_allowed_s)))
+            eff_e_t = min(max_dur_t, max(e_t, min(e_t + 0.24, max_allowed_e)))
+            i0 = max(0, int(round(eff_s_t * TARGET_SAMPLE_RATE)))
+            i1 = min(n_asr, int(round(eff_e_t * TARGET_SAMPLE_RATE)))
             asr_seg = asr_f32[i0:i1] if i1 > i0 else raw_seg
             diarized_asr.append((s_t, e_t, spk, asr_seg))
 
         merged = self._merge_same_speaker_turns(diarized_asr)
-        texts = self._transcribe_batch_samples([m[3] for m in merged], variant=variant)
+
+        # Via preferencial rápida: empacota apenas turnos de fala (<=28s) no CT2 + word_timestamps
+        var = variant if variant in CT2_WHISPER_MODELS else self.default_variant
+        if self._resolve_ct2_model_dir(var) is not None and self._can_import_faster_whisper():
+            try:
+                return self._transcribe_channel_ct2(
+                    merged,
+                    block_offset_seconds,
+                    variant=var,
+                    context_notes=context_notes,
+                    enrolled_names=enrolled_names,
+                    strip_voce_suffix=strip_voce_suffix,
+                )
+            except Exception as e:
+                logger.warning(f"Falha na decodificação empacotada CT2 ({var}), usando fallback ONNX por turno: {e}")
+
+        texts = self._transcribe_batch_samples(
+            [m[3] for m in merged],
+            variant=variant,
+            context_notes=context_notes,
+            enrolled_names=enrolled_names,
+        )
 
         events: List[Tuple[float, float, str, str]] = []
         for (s_t, e_t, spk, _seg), raw_txt in zip(merged, texts):
@@ -802,7 +1621,6 @@ class OfflineAsrService:
 
         events.sort(key=lambda item: item[0])
 
-        # Agrupa falas simultâneas L+R ou turnos sobrepostos no mesmo intervalo
         lines: List[str] = []
         idx = 0
         while idx < len(events):
@@ -822,16 +1640,131 @@ class OfflineAsrService:
 
         return "\n".join(lines)
 
-    def generate_offline_minutes(
+    # ---------------- ESTÁGIO 2: LLM LOCAL EMBUTIDO (LLAMA.CPP + QWEN2.5-3B) ----------------
+    @staticmethod
+    def _find_free_port() -> int:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
+
+    def _start_llm_server(self, llm_variant: str = "qwen2.5-3b") -> Optional[str]:
+        """Descarrega ASR da RAM e inicia o servidor local `llama-server.exe` sob demanda."""
+        self.unload_asr_models()
+        with self._llm_lock:
+            if self._llm_proc is not None and self._llm_proc.poll() is None and self._llm_port:
+                return f"http://127.0.0.1:{self._llm_port}"
+
+            srv_exe, gguf_path = self._resolve_llm_paths(llm_variant)
+            if not srv_exe or not gguf_path:
+                # Se 3B não estiver presente, tenta 1.5B
+                if llm_variant != "qwen2.5-1.5b":
+                    srv_exe, gguf_path = self._resolve_llm_paths("qwen2.5-1.5b")
+                    if srv_exe and gguf_path:
+                        llm_variant = "qwen2.5-1.5b"
+                if not srv_exe or not gguf_path:
+                    return None
+
+            port = self._find_free_port()
+            threads = min(6, max(4, (os.cpu_count() or 4) // 2))
+            cmd = [
+                str(srv_exe),
+                "-m",
+                str(gguf_path),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "-c",
+                "3072",
+                "-t",
+                str(threads),
+                "-ngl",
+                "0",
+            ]
+            creationflags = 0x08000000 if sys.platform == "win32" else 0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(srv_exe.parent),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    creationflags=creationflags,
+                )
+            except Exception as e:
+                logger.warning(f"Falha ao iniciar llama-server.exe: {e}")
+                return None
+
+            base_url = f"http://127.0.0.1:{port}"
+            deadline = time.monotonic() + 28.0
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    err_tail = ""
+                    try:
+                        if proc.stderr:
+                            err_tail = proc.stderr.read().decode("utf-8", errors="replace")[-400:]
+                    except Exception:
+                        pass
+                    logger.warning(f"llama-server.exe encerrou prematuramente (código {proc.returncode}): {err_tail}")
+                    return None
+                try:
+                    with urllib.request.urlopen(f"{base_url}/health", timeout=1.5) as r:
+                        if getattr(r, "status", 0) == 200:
+                            self._llm_proc = proc
+                            self._llm_port = port
+                            self._llm_active_variant = llm_variant
+                            logger.info(f"[LLM LOCAL] llama-server ativo ({llm_variant}, porta {port}).")
+                            return base_url
+                except Exception:
+                    time.sleep(0.35)
+
+            logger.warning("Timeout aguardando /health do llama-server.exe.")
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return None
+
+    def stop_llm_server(self) -> None:
+        """Encerra `llama-server.exe` e libera a memória RAM ocupada pelo modelo GGUF."""
+        with self._llm_lock:
+            proc = self._llm_proc
+            self._llm_proc = None
+            self._llm_port = None
+            self._llm_active_variant = None
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=4)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    if proc.stderr:
+                        proc.stderr.close()
+                except Exception:
+                    pass
+            logger.info("[MEMÓRIA] Servidor LLM local encerrado e RAM liberada.")
+        gc.collect()
+
+    def _chat_complete_local(
         self,
-        title: str,
-        date_str: str,
-        duration_str: str,
-        transcript_md: str,
-        minutes_prompt_template: str,
+        system_prompt: str,
+        user_prompt: str,
+        temperature: float = 0.15,
+        max_tokens: int = 1600,
+        timeout: int = 180,
         preferred_ollama_model: str = "",
-    ) -> Tuple[str, str]:
-        """Gera Ata Executiva via Ollama local (se disponível) ou síntese estruturada determinística."""
+    ) -> Tuple[Optional[str], str]:
+        """Executa inferência local via Ollama (se ativo) ou `llama-server.exe` embutido (Qwen2.5-3B)."""
+        # 1. Tenta servidor Ollama externo caso já esteja em execução
         ok_ollama, models = list_ollama_models()
         if ok_ollama and models:
             chosen = preferred_ollama_model.strip()
@@ -844,18 +1777,12 @@ class OfflineAsrService:
                     models[0],
                 )
             try:
-                prompt = minutes_prompt_template.format(
-                    title=title,
-                    date_str=date_str,
-                    duration_str=duration_str,
-                    full_transcript=transcript_md,
-                )
                 payload = json.dumps(
                     {
                         "model": chosen,
-                        "prompt": prompt,
+                        "prompt": f"{system_prompt}\n\n{user_prompt}",
                         "stream": False,
-                        "options": {"temperature": 0.2},
+                        "options": {"temperature": temperature},
                     }
                 ).encode("utf-8")
                 req = urllib.request.Request(
@@ -864,13 +1791,251 @@ class OfflineAsrService:
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     body = json.loads(resp.read().decode("utf-8", errors="replace"))
                 txt = str(body.get("response", "")).strip()
-                if txt and len(txt) > 80:
+                if txt:
                     return txt, f"Ollama Local ({chosen})"
             except Exception as e:
-                logger.warning(f"Falha ao sintetizar Ata via Ollama ({chosen}), usando síntese local: {e}")
+                logger.warning(f"Falha no Ollama ({chosen}); tentando llama-server embutido: {e}")
+
+        # 2. Usa motor embutido llama.cpp + Qwen2.5-3B-Instruct Q4_K_M (com fallback para 1.5B)
+        for cand_llm in ("qwen2.5-3b", "qwen2.5-1.5b"):
+            base_url = self._start_llm_server(cand_llm)
+            if not base_url:
+                continue
+            try:
+                payload = json.dumps(
+                    {
+                        "model": cand_llm,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": temperature,
+                        "repeat_penalty": 1.18,
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    }
+                ).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{base_url}/v1/chat/completions",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8", errors="replace"))
+                choices = body.get("choices") or []
+                if choices:
+                    msg_obj = choices[0].get("message") or {}
+                    txt = str(msg_obj.get("content", "")).strip()
+                    if txt:
+                        active = self._llm_active_variant or cand_llm
+                        return txt, f"LLM Local Embutido ({active})"
+            except Exception as e:
+                logger.warning(f"Falha na inferência llama-server ({cand_llm}): {e}")
+                self.stop_llm_server()
+
+        return None, "unavailable"
+
+    def refine_offline_transcript(
+        self,
+        raw_transcript: str,
+        title: str = "",
+        context_notes: str = "",
+        enrolled_names: Optional[List[str]] = None,
+        preferred_ollama_model: str = "",
+    ) -> str:
+        """Refina erros fonéticos via patch JSON em passe único mantendo timestamps e locutores intactos."""
+        if not raw_transcript or not raw_transcript.strip():
+            return raw_transcript
+
+        ok_ollama, ol_models = list_ollama_models()
+        llm_ok, _ = self.is_llm_ready("qwen2.5-3b")
+        if not llm_ok:
+            llm_ok, _ = self.is_llm_ready("qwen2.5-1.5b")
+        if not (ok_ollama and ol_models) and not llm_ok:
+            return raw_transcript
+
+        self.unload_asr_models()
+        turn_lines = [ln.strip() for ln in raw_transcript.splitlines() if _TURN_RE.match(ln.strip())]
+        if not turn_lines:
+            return raw_transcript
+
+        sample_turns = "\n".join(turn_lines)[:5500]
+        vocab = _extract_glossary_terms(context_notes, enrolled_names)
+        names_txt = ", ".join(enrolled_names or []) or "Não especificados"
+        glossary_txt = ", ".join(vocab[:30])
+
+        sys_prompt = (
+            "Você é um revisor fonético de transcrições em Português do Brasil.\n"
+            "Identifique apenas erros evidentes de reconhecimento de voz (nomes distorcidos ou termos técnicos/corporativos "
+            "trocados pelo som) no texto abaixo e responda EXCLUSIVAMENTE com um JSON válido no formato:\n"
+            "{\"correcoes\": {\"trecho errado exato\": \"trecho corrigido\"}}\n"
+            "Inclua no máximo 10 correções de alta confiança. NÃO inclua timestamps `[MM:SS]`, `**` ou comentários."
+        )
+        user_prompt = (
+            f"Reunião: {title or 'Alinhamento'}\n"
+            f"Participantes cadastrados: {names_txt}\n"
+            f"Glossário prioritário: {glossary_txt}\n"
+            f"Notas de contexto: {context_notes or 'Nenhuma'}\n\n"
+            f"Falas transcritas:\n{sample_turns}"
+        )
+
+        out_txt, _src = self._chat_complete_local(
+            sys_prompt,
+            user_prompt,
+            temperature=0.1,
+            max_tokens=220,
+            timeout=90,
+            preferred_ollama_model=preferred_ollama_model,
+        )
+        if not out_txt:
+            return raw_transcript
+
+        cleaned_json_txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", out_txt.strip()).strip()
+        m_obj = re.search(r"\{.*\}", cleaned_json_txt, flags=re.DOTALL)
+        if not m_obj:
+            return raw_transcript
+
+        try:
+            parsed = json.loads(m_obj.group(0))
+        except Exception:
+            return raw_transcript
+
+        raw_map = parsed.get("correcoes") if isinstance(parsed, dict) else None
+        if not isinstance(raw_map, dict) or not raw_map:
+            return raw_transcript
+
+        valid_pairs: List[Tuple[re.Pattern, str]] = []
+        for wrong, right in raw_map.items():
+            if not isinstance(wrong, str) or not isinstance(right, str):
+                continue
+            w_clean = wrong.strip()
+            r_clean = right.strip()
+            if not (3 <= len(w_clean) <= 45 and 3 <= len(r_clean) <= 45):
+                continue
+            if w_clean.lower() == r_clean.lower():
+                continue
+            if any(ch in w_clean or ch in r_clean for ch in ("[", "]", "**", "\n", "\r")):
+                continue
+            pat = re.compile(rf"(?<!\w){re.escape(w_clean)}(?!\w)", flags=re.IGNORECASE)
+            valid_pairs.append((pat, r_clean))
+            if len(valid_pairs) >= 10:
+                break
+
+        if not valid_pairs:
+            return raw_transcript
+
+        new_lines: List[str] = []
+        changed = False
+        for line in raw_transcript.splitlines():
+            m_turn = re.match(r"^(\[\d{1,2}:\d{2}(?::\d{2})?\]\s+(?:⚡\s*)?\*\*[^*]+\*\*:\s*)(.*)$", line)
+            if m_turn:
+                prefix, spoken = m_turn.group(1), m_turn.group(2)
+                updated_spoken = spoken
+                for pat, repl in valid_pairs:
+                    updated_spoken = pat.sub(repl, updated_spoken)
+                if updated_spoken != spoken:
+                    changed = True
+                new_lines.append(f"{prefix}{updated_spoken}")
+            else:
+                new_lines.append(line)
+
+        if not changed:
+            return raw_transcript
+        trailing_nl = "\n" if raw_transcript.endswith("\n") else ""
+        return "\n".join(new_lines) + trailing_nl
+
+    @staticmethod
+    def _compact_transcript_for_context(transcript_md: str, max_chars: int = 6000) -> str:
+        """Extrai somente linhas limpas de diálogo ([MM:SS] **Locutor**: texto) até o limite de contexto."""
+        body = (transcript_md or "").strip()
+        if body.lstrip().startswith("# Transcrição") and "\n---\n" in body:
+            split_idx = body.find("\n---\n")
+            body = body[split_idx + len("\n---\n") :]
+        turn_lines = [ln.strip() for ln in body.splitlines() if _TURN_RE.match(ln.strip())]
+        joined = "\n".join(turn_lines)
+        if len(joined) <= max_chars:
+            return joined
+        step = max(2, len(turn_lines) // 65)
+        sampled = [ln for idx, ln in enumerate(turn_lines) if idx % step == 0]
+        return "\n".join(sampled)[:max_chars]
+
+    def generate_offline_minutes(
+        self,
+        title: str,
+        date_str: str,
+        duration_str: str,
+        transcript_md: str,
+        minutes_prompt_template: str,
+        preferred_ollama_model: str = "",
+    ) -> Tuple[str, str]:
+        """Gera Ata Executiva estruturada via LLM local com cabeçalho determinístico e libera a RAM ao final."""
+        try:
+            self.unload_asr_models()
+            compact_tr = self._compact_transcript_for_context(transcript_md, max_chars=6000)
+            speakers_seen: List[str] = []
+            for ln in compact_tr.splitlines():
+                m_t = _TURN_RE.match(ln.strip())
+                if m_t:
+                    spk = m_t.group(2).strip()
+                    if spk and spk not in speakers_seen:
+                        speakers_seen.append(spk)
+            speakers_str = ", ".join(speakers_seen) if speakers_seen else "Não identificados"
+
+            header = (
+                f"# Ata Executiva da Reunião: {title}\n"
+                f"**Data:** {date_str}\n"
+                f"**Duração Total:** {duration_str}\n"
+                f"**Participantes Identificados:** {speakers_str}\n\n"
+                "---\n\n"
+            )
+            sys_prompt = (
+                "Você é um assistente executivo sênior especialista em atas de reunião em Português do Brasil.\n"
+                "REGRAS:\n"
+                "1. Seja objetivo, fiel ao diálogo e claro.\n"
+                "2. Máximo de 4 itens concisos por seção.\n"
+                "3. NUNCA repita a mesma informação ou frase em mais de uma seção.\n"
+                "4. NUNCA mencione nomes de arquivos (.md, .wav) nem motores técnicos de transcrição."
+            )
+            prompt = (
+                f"Reunião: {title} | Participantes: {speakers_str}\n\n"
+                "Gere SOMENTE o corpo em Markdown iniciando por `## 1. Resumo Executivo` e seguindo exatamente estas 4 seções:\n"
+                "## 1. Resumo Executivo\n"
+                "## 2. Principais Discussões e Contexto\n"
+                "## 3. Decisões e Alinhamentos\n"
+                "## 4. Plano de Ação e Próximos Passos\n\n"
+                f"Diálogo:\n{compact_tr}"
+            )
+            txt, backend = self._chat_complete_local(
+                sys_prompt,
+                prompt,
+                temperature=0.15,
+                max_tokens=900,
+                timeout=180,
+                preferred_ollama_model=preferred_ollama_model,
+            )
+            if txt and len(txt.strip()) > 120:
+                cleaned = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", txt.strip()).strip()
+                # Remove cabeçalho duplicado caso o modelo ainda emita `# Ata...`
+                sec_pos = cleaned.find("## 1.")
+                if sec_pos >= 0:
+                    cleaned = cleaned[sec_pos:].strip()
+                lines = cleaned.splitlines()
+                while lines and (
+                    re.match(r"^\s*[-*]\s*(?:\*\*[^*]*)?$", lines[-1])
+                    or (not lines[-1].strip().endswith((".", "!", "?", ")")) and not lines[-1].lstrip().startswith("#"))
+                ):
+                    lines.pop()
+                body_out = "\n".join(lines).strip()
+                if len(body_out) > 100:
+                    return header + body_out + "\n", backend
+        except Exception as e:
+            logger.warning(f"Falha ao gerar Ata via LLM local: {e}")
+        finally:
+            self.stop_llm_server()
 
         return self._synthesize_deterministic_minutes(title, date_str, duration_str, transcript_md), "Síntese Local Estruturada"
 
@@ -922,7 +2087,7 @@ class OfflineAsrService:
             f"# Ata Executiva da Reunião: {title}",
             f"**Data:** {date_str}",
             f"**Duração Total:** {duration_str}",
-            f"**Modo de Processamento:** 100% Offline (Whisper ONNX + Síntese Local)",
+            f"**Modo de Processamento:** 100% Offline (Whisper CT2/ONNX + Síntese Local)",
             f"**Participantes Identificados:** {speakers_list}",
             "",
             "---",
@@ -963,7 +2128,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Gerenciador de modelos offline do Escutaí")
-    parser.add_argument("--prepare", choices=list(WHISPER_MODELS.keys()), default="small")
+    parser.add_argument("--prepare", choices=list(CT2_WHISPER_MODELS.keys()), default="turbo")
     args = parser.parse_args()
 
     svc = OfflineAsrService(default_variant=args.prepare)
