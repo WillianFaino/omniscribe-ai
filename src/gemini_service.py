@@ -316,6 +316,8 @@ Transcrição completa da reunião:
         self.offline_ollama_model = ""
         self.offline_isolate_voice = False
         self.offline_enhancement_mode = "clarify_room"
+        self.mic_owner_filter_enabled = False
+        self.mic_owner_profile_name = ""
         self.auto_export_sqlite = True
         self._offline_unknown_clusters = []
 
@@ -875,6 +877,8 @@ Transcrição completa da reunião:
                 isolate_voice=bool(self.offline_isolate_voice or eff_mode == "neural_voice_isolation"),
                 clarify_audio=(eff_mode != "none"),
                 enhancement_mode=eff_mode,
+                mic_owner_filter_enabled=bool(self.mic_owner_filter_enabled),
+                mic_owner_profile_name=str(self.mic_owner_profile_name or ""),
             )
             transcription_text, _, _ = self._detect_and_sanitize_repetition(raw_text)
             if not transcription_text:
@@ -918,10 +922,38 @@ Transcrição completa da reunião:
         system_prompt = self._select_transcription_prompt(num_channels)
 
         uploaded_remote_file = None
+        filtered_wav_path: Optional[Path] = None
+        upload_path = task.wav_path
         try:
+            if num_channels >= 2 and self.mic_owner_filter_enabled:
+                if self.voiceprint_service and self.voiceprint_service.is_ready_for_matching():
+                    owner_name = self.voiceprint_service.resolve_owner_profile_name(self.mic_owner_profile_name)
+                    if owner_name:
+                        candidate_filtered = task.wav_path.with_name(f"{task.wav_path.stem}_micfiltered.wav")
+                        try:
+                            changed, mic_stats = self.voiceprint_service.filter_channel_to_speaker_wav(
+                                task.wav_path,
+                                owner_name=owner_name,
+                                out_wav_path=candidate_filtered,
+                                channel_index=1,
+                            )
+                            if changed and candidate_filtered.exists():
+                                filtered_wav_path = candidate_filtered
+                                upload_path = candidate_filtered
+                                self._log(
+                                    f"[BIOMETRIA MIC] Bloco #{task.block_index}: Canal R filtrado para '{owner_name}' "
+                                    f"(mantidos {mic_stats['kept_s']:.1f}s, silenciados {mic_stats['muted_s']:.1f}s de terceiros)."
+                                )
+                        except Exception as mic_flt_err:
+                            logger.warning(f"Falha no filtro biométrico do Canal R no bloco #{task.block_index}: {mic_flt_err}")
+                    else:
+                        self._log("[AVISO] Filtro biométrico do microfone ativo, mas nenhum perfil de usuário foi encontrado.")
+                else:
+                    self._log("[AVISO] Filtro biométrico do microfone ativo, mas os modelos/perfis de voiceprint não estão prontos.")
+
             # 1. Upload do WAV para a API Files do Gemini
-            self._log(f"[UPLOAD] Enviando {task.wav_path.name} para a nuvem Gemini...")
-            uploaded_remote_file = self._client.files.upload(file=str(task.wav_path))
+            self._log(f"[UPLOAD] Enviando {upload_path.name} para a nuvem Gemini...")
+            uploaded_remote_file = self._client.files.upload(file=str(upload_path))
 
             # 2. Chamada com temperature=0.2, limite de tokens proporcional e proteção anti-loop
             recent_context = self._build_safe_recent_context(max_turns=6)
@@ -931,7 +963,7 @@ Transcrição completa da reunião:
             if self.voiceprint_service and self.voiceprint_service.is_ready_for_matching():
                 try:
                     biometric_hints = self.voiceprint_service.analyze_wav_speakers(
-                        task.wav_path,
+                        upload_path,
                         block_offset_seconds=task.start_seconds,
                     )
                     if biometric_hints:
@@ -1019,6 +1051,11 @@ Transcrição completa da reunião:
             self._append_to_transcription(task, error_markdown, success=False)
 
         finally:
+            if filtered_wav_path is not None and filtered_wav_path.exists():
+                try:
+                    filtered_wav_path.unlink()
+                except Exception:
+                    pass
             # 5. Exclusão do arquivo remoto na nuvem
             if uploaded_remote_file is not None and self._client is not None:
                 try:

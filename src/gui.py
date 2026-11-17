@@ -1656,6 +1656,8 @@ class ZoomTranscriberApp(ctk.CTk):
         self.offline_whisper_variant = raw_var if raw_var in ("turbo", "small", "base") else "turbo"
         self.offline_ollama_model = str(ui_cfg.get("ollama_model", "") or "")
         self.offline_isolate_voice = bool(ui_cfg.get("offline_isolate_voice", False))
+        self.mic_owner_filter_enabled = bool(ui_cfg.get("mic_owner_filter_enabled", False))
+        self.mic_owner_profile_name = str(ui_cfg.get("mic_owner_profile_name", "") or "")
         self.auto_export_sqlite = bool(ui_cfg.get("auto_export_sqlite", True))
         ctk.set_appearance_mode(self.theme_mode)
 
@@ -1698,6 +1700,8 @@ class ZoomTranscriberApp(ctk.CTk):
         self.gemini_service.offline_enhancement_mode = (
             "neural_voice_isolation" if self.offline_isolate_voice else "clarify_room"
         )
+        self.gemini_service.mic_owner_filter_enabled = self.mic_owner_filter_enabled
+        self.gemini_service.mic_owner_profile_name = self.mic_owner_profile_name
         self.gemini_service.auto_export_sqlite = self.auto_export_sqlite
 
         self.audio_engine = AudioEngine(
@@ -1747,6 +1751,8 @@ class ZoomTranscriberApp(ctk.CTk):
                         "whisper_variant": self.offline_whisper_variant,
                         "ollama_model": self.offline_ollama_model,
                         "offline_isolate_voice": self.offline_isolate_voice,
+                        "mic_owner_filter_enabled": self.mic_owner_filter_enabled,
+                        "mic_owner_profile_name": self.mic_owner_profile_name,
                         "auto_export_sqlite": self.auto_export_sqlite,
                     },
                     indent=2,
@@ -2391,7 +2397,37 @@ class ZoomTranscriberApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
             text_color=THEME_TEXT_PRIMARY,
         )
-        self.chk_mic_mute.pack(anchor="w")
+        self.chk_mic_mute.pack(anchor="w", pady=(0, 4))
+
+        self.chk_mic_voiceprint_filter = ctk.CTkCheckBox(
+            a_body,
+            text="Filtrar apenas minha voz no microfone (Reunião Online / Canal R)",
+            command=self._on_toggle_mic_voiceprint_filter,
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_PRIMARY,
+        )
+        if self.mic_owner_filter_enabled:
+            self.chk_mic_voiceprint_filter.select()
+        self.chk_mic_voiceprint_filter.pack(anchor="w", pady=(0, 4))
+
+        owner_row = ctk.CTkFrame(a_body, fg_color="transparent")
+        owner_row.pack(fill="x", pady=(2, 0))
+        ctk.CTkLabel(
+            owner_row,
+            text="Perfil da minha voz:",
+            font=ctk.CTkFont(size=12),
+            text_color=THEME_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.opt_mic_owner_profile = ctk.CTkOptionMenu(
+            owner_row,
+            values=["Automático (Willian)"],
+            width=185,
+            command=self._on_select_mic_owner_profile,
+        )
+        self.opt_mic_owner_profile.set(
+            self.mic_owner_profile_name if self.mic_owner_profile_name else "Automático (Willian)"
+        )
+        self.opt_mic_owner_profile.pack(side="right")
 
         # Card 2: Gemini API & Free Tier
         api_card = ctk.CTkFrame(
@@ -2804,6 +2840,11 @@ class ZoomTranscriberApp(ctk.CTk):
         model_ok = "✅ Modelos ONNX prontos" if vp.are_models_ready() else "⚠️ Modelos ONNX pendentes (~26 MB)"
         prof_txt = f"{len(profs)} perfil(is) ativo(s): {names}" if profs else "Nenhum perfil cadastrado"
         self.lbl_vp_summary.configure(text=f"{prof_txt} • {model_ok}")
+        if hasattr(self, "opt_mic_owner_profile"):
+            opts = ["Automático (Willian)"] + [p["name"] for p in profs]
+            self.opt_mic_owner_profile.configure(values=opts)
+            cur = self.mic_owner_profile_name if self.mic_owner_profile_name in opts else "Automático (Willian)"
+            self.opt_mic_owner_profile.set(cur)
         self._update_hw_summary_label()
 
     def _refresh_history_tab(self) -> None:
@@ -3501,6 +3542,16 @@ class ZoomTranscriberApp(ctk.CTk):
 
     def _on_toggle_mic_mute(self) -> None:
         self.audio_engine.set_mic_muted(bool(self.chk_mic_mute.get()))
+
+    def _on_toggle_mic_voiceprint_filter(self) -> None:
+        self.mic_owner_filter_enabled = bool(self.chk_mic_voiceprint_filter.get())
+        self.gemini_service.mic_owner_filter_enabled = self.mic_owner_filter_enabled
+        self._save_ui_settings()
+
+    def _on_select_mic_owner_profile(self, choice: str) -> None:
+        self.mic_owner_profile_name = "" if str(choice).startswith("Automático") else str(choice).strip()
+        self.gemini_service.mic_owner_profile_name = self.mic_owner_profile_name
+        self._save_ui_settings()
 
     def _open_atas_folder(self) -> None:
         now = datetime.now()

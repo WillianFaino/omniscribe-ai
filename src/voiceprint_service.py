@@ -39,6 +39,7 @@ VAD_MODEL_URL = (
 )
 
 DEFAULT_MATCH_THRESHOLD = 0.56
+DEFAULT_MIC_OWNER_RAW_THRESHOLD = 0.48
 DEFAULT_OVERLAP_MARGIN = 0.08
 DEFAULT_UNKNOWN_CLUSTER_THRESHOLD = 0.72
 DEFAULT_COHORT_PAIRWISE_MIN = 0.50
@@ -1127,3 +1128,186 @@ class VoiceprintService:
             lines.append(f"- [{abs_s} - {abs_e}] -> {lbl}")
         lines.append("----------------------------------------------------------------------\n")
         return "\n".join(lines) + "\n"
+
+    def resolve_owner_profile_name(self, preferred_name: str = "") -> Optional[str]:
+        """Resolve qual perfil biométrico representa o dono do microfone local."""
+        self.ensure_profiles_loaded()
+        if not self._profiles:
+            return None
+
+        pref = (preferred_name or "").strip()
+        if pref and not pref.lower().startswith("automático"):
+            if pref in self._profiles:
+                return pref
+            pref_low = pref.lower()
+            for name in self._profiles:
+                if name.lower() == pref_low:
+                    return name
+            return None
+
+        # Autodetecção padrão: prioriza Willian / Você ou perfil único
+        for name in self._profiles:
+            low = name.lower()
+            if "willian" in low or "você" in low or "voce" in low:
+                return name
+        if len(self._profiles) == 1:
+            return next(iter(self._profiles.keys()))
+        return None
+
+    def filter_channel_to_speaker_samples(
+        self,
+        samples_float32: np.ndarray,
+        sample_rate: int,
+        owner_name: str,
+        raw_threshold: float = DEFAULT_MIC_OWNER_RAW_THRESHOLD,
+        fade_ms: float = 20.0,
+    ) -> Tuple[np.ndarray, Dict[str, float]]:
+        """Silencia trechos de fala de terceiros no canal do microfone, mantendo apenas o locutor `owner_name`.
+
+        Usa verificação 1:1 direta (`raw_score`) com sub-janelas deslizantes em falas longas e regra
+        conservadora para interjeições curtas (< 0.45s) para evitar cortes em respostas rápidas.
+        """
+        stats: Dict[str, float] = {
+            "total_speech_s": 0.0,
+            "kept_s": 0.0,
+            "muted_s": 0.0,
+            "segments_kept": 0.0,
+            "segments_muted": 0.0,
+        }
+        arr_in = np.asarray(samples_float32, dtype=np.float32)
+        if arr_in.size == 0 or sample_rate <= 0:
+            return arr_in, stats
+
+        self.ensure_profiles_loaded()
+        owner_data = self._profiles.get(owner_name)
+        if not owner_data or not self.is_ready_for_matching():
+            return arr_in, stats
+
+        owner_emb = np.asarray(owner_data["embedding"], dtype=np.float32)
+        vad_segments = self.extract_speech_segments(arr_in, sample_rate)
+        if not vad_segments:
+            return arr_in, stats
+
+        keep_intervals: List[Tuple[float, float]] = []
+        win_samples = int(round(1.6 * TARGET_SAMPLE_RATE))
+        hop_samples = int(round(0.8 * TARGET_SAMPLE_RATE))
+        min_eval_samples = int(round(0.45 * TARGET_SAMPLE_RATE))
+
+        for seg_start, seg_end, seg_arr in vad_segments:
+            seg_dur = max(0.0, seg_end - seg_start)
+            stats["total_speech_s"] += seg_dur
+            seg_len = len(seg_arr)
+
+            if seg_len < min_eval_samples:
+                # Regra conservadora: preserva interjeições curtas ("sim", "ok", "tá")
+                keep_intervals.append((seg_start, seg_end))
+                stats["kept_s"] += seg_dur
+                stats["segments_kept"] += 1.0
+                continue
+
+            if seg_len <= int(round(2.2 * TARGET_SAMPLE_RATE)):
+                emb = self.compute_embedding(seg_arr, TARGET_SAMPLE_RATE)
+                score = float(np.dot(emb, owner_emb)) if emb is not None else 1.0
+                if emb is None or score >= raw_threshold:
+                    keep_intervals.append((seg_start, seg_end))
+                    stats["kept_s"] += seg_dur
+                    stats["segments_kept"] += 1.0
+                else:
+                    stats["muted_s"] += seg_dur
+                    stats["segments_muted"] += 1.0
+                continue
+
+            # Segmento longo: avalia em sub-janelas para não colar colega + usuário no mesmo bloco VAD
+            pos = 0
+            while pos < seg_len:
+                end_pos = min(seg_len, pos + win_samples)
+                sub = seg_arr[pos:end_pos]
+                if len(sub) < min_eval_samples and pos > 0:
+                    break
+                w_s = seg_start + (pos / float(TARGET_SAMPLE_RATE))
+                w_e = seg_start + (end_pos / float(TARGET_SAMPLE_RATE))
+                w_dur = max(0.0, w_e - w_s)
+                emb = self.compute_embedding(sub, TARGET_SAMPLE_RATE)
+                score = float(np.dot(emb, owner_emb)) if emb is not None else 1.0
+                if emb is None or score >= raw_threshold:
+                    keep_intervals.append((w_s, w_e))
+                    stats["kept_s"] += w_dur
+                    stats["segments_kept"] += 1.0
+                else:
+                    stats["muted_s"] += w_dur
+                    stats["segments_muted"] += 1.0
+                if end_pos >= seg_len:
+                    break
+                pos += hop_samples
+
+        if stats["segments_muted"] <= 0.0:
+            return arr_in, stats
+
+        total_len = len(arr_in)
+        pad_samples = int(round(0.12 * sample_rate))
+        mask = np.zeros(total_len, dtype=np.float32)
+        for s_t, e_t in keep_intervals:
+            i0 = max(0, int(round(s_t * sample_rate)) - pad_samples)
+            i1 = min(total_len, int(round(e_t * sample_rate)) + pad_samples)
+            if i1 > i0:
+                mask[i0:i1] = 1.0
+
+        # Aplica fade linear suave nas bordas para evitar cliques digitais
+        fade_samples = max(1, int(round((fade_ms / 1000.0) * sample_rate)))
+        if fade_samples > 1 and total_len > 2:
+            kernel = np.ones(fade_samples, dtype=np.float32) / float(fade_samples)
+            mask = np.convolve(mask, kernel, mode="same").clip(0.0, 1.0)
+
+        return (arr_in * mask).astype(np.float32), stats
+
+    def filter_channel_to_speaker_wav(
+        self,
+        wav_path: Path,
+        owner_name: str,
+        out_wav_path: Path,
+        channel_index: int = 1,
+        raw_threshold: float = DEFAULT_MIC_OWNER_RAW_THRESHOLD,
+        fade_ms: float = 20.0,
+    ) -> Tuple[bool, Dict[str, float]]:
+        """Gera uma cópia do WAV estéreo com o canal `channel_index` filtrado apenas para `owner_name`."""
+        wav_path = Path(wav_path)
+        out_wav_path = Path(out_wav_path)
+        empty_stats: Dict[str, float] = {
+            "total_speech_s": 0.0,
+            "kept_s": 0.0,
+            "muted_s": 0.0,
+            "segments_kept": 0.0,
+            "segments_muted": 0.0,
+        }
+        if not wav_path.exists():
+            return False, empty_stats
+
+        with wave.open(str(wav_path), "rb") as wf:
+            nchannels = int(wf.getnchannels())
+            sampwidth = int(wf.getsampwidth())
+            sr = int(wf.getframerate())
+            total_frames = int(wf.getnframes())
+            if nchannels < 2 or sampwidth != 2 or total_frames == 0 or channel_index >= nchannels:
+                return False, empty_stats
+            raw = wf.readframes(total_frames)
+
+        arr = np.frombuffer(raw, dtype=np.int16).reshape(-1, nchannels).copy()
+        ch_float = _to_float32_mono(arr[:, channel_index])
+        filtered_ch, stats = self.filter_channel_to_speaker_samples(
+            ch_float,
+            sr,
+            owner_name=owner_name,
+            raw_threshold=raw_threshold,
+            fade_ms=fade_ms,
+        )
+        if stats["segments_muted"] <= 0.0:
+            return False, stats
+
+        arr[:, channel_index] = np.clip(np.round(filtered_ch * 32768.0), -32768, 32767).astype(np.int16)
+        out_wav_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(out_wav_path), "wb") as wf_out:
+            wf_out.setnchannels(nchannels)
+            wf_out.setsampwidth(2)
+            wf_out.setframerate(sr)
+            wf_out.writeframes(arr.tobytes())
+        return True, stats
