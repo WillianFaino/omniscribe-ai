@@ -10,7 +10,7 @@ from typing import Callable, Optional
 import customtkinter as ctk
 from PIL import ImageTk
 
-from mascot_3d import DISPLAY_H, DISPLAY_W, OmniMic3DRenderer
+from mascot_3d import DISPLAY_H, DISPLAY_W, Vozito3DRenderer
 
 XP_BALLOON_BG = "#FFFFE1"
 XP_BALLOON_BORDER = "#374151"
@@ -40,7 +40,7 @@ MASCOT_THEMES = {
 }
 
 
-class OmniMicWidget(ctk.CTkFrame):
+class VozitoWidget(ctk.CTkFrame):
     """Overlay flutuante e arrastavel com o mascote 3D Vozito + balao estilo Win95/XP."""
 
     def __init__(
@@ -56,7 +56,7 @@ class OmniMicWidget(ctk.CTkFrame):
         )
         self._master = master
         self._on_visibility_change = on_visibility_change
-        self._renderer = OmniMic3DRenderer()
+        self._renderer = Vozito3DRenderer()
         self._theme_mode = "Light" if str(theme_mode).lower() == "light" else "Dark"
         self._palette = MASCOT_THEMES[self._theme_mode]
 
@@ -399,5 +399,5 @@ class OmniMicWidget(ctk.CTkFrame):
         super().destroy()
 
 
-VozitoWidget = OmniMicWidget
+OmniMicWidget = VozitoWidget
 

@@ -1,4 +1,4 @@
-"""Motor de áudio do OmniScribe AI com suporte a WASAPI Loopback (sistema/reuniões) e microfone local.
+"""Motor de áudio do Escutaí com suporte a WASAPI Loopback (sistema/reuniões) e microfone local.
 
 Realiza captura dual sincronizada ou mono presencial, resampling anti-aliasing para 16 kHz,
 pré-processamento acústico (HPF 80 Hz + AGC suave com limiter -1 dBFS), noise gate suave,
@@ -38,7 +38,7 @@ except ImportError:
         pyaudio = None
         HAS_PYAUDIOWPATCH = False
 
-logger = logging.getLogger("omniscribe.audio_engine")
+logger = logging.getLogger("escutai.audio_engine")
 
 TARGET_SAMPLE_RATE = 16000  # Taxa padrão otimizada para modelos de voz do Gemini
 DEFAULT_CHUNK_FRAMES = 2048

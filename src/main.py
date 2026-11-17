@@ -23,7 +23,7 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
-    logging.getLogger("omniscribe.main").critical(
+    logging.getLogger("escutai.main").critical(
         "Exceção não tratada capturada pelo sistema:",
         exc_info=(exc_type, exc_value, exc_traceback),
     )
@@ -51,7 +51,7 @@ def setup_logging():
 def main():
     """Inicializa o sistema e dispara o loop de eventos da interface gráfica."""
     setup_logging()
-    logger = logging.getLogger("omniscribe.main")
+    logger = logging.getLogger("escutai.main")
     logger.info("Iniciando Escutaí...")
     logger.info(f"Diretório base detectado: {get_base_dir()}")
 

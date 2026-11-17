@@ -23,7 +23,7 @@ import numpy as np
 
 from audio_engine import TARGET_SAMPLE_RATE, resample_to_16k
 
-logger = logging.getLogger("omniscribe.voiceprint")
+logger = logging.getLogger("escutai.voiceprint")
 
 EMBEDDING_MODEL_NAME = "wespeaker_en_voxceleb_resnet34_LM.onnx"
 EMBEDDING_MODEL_URL = (

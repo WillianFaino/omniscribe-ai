@@ -28,7 +28,7 @@ from audio_engine import (
     slice_wav_for_retranscription,
 )
 from archive_service import MeetingArchiveService
-from mascot_widget import OmniMicWidget
+from mascot_widget import VozitoWidget, OmniMicWidget
 from offline_asr_service import WHISPER_MODELS, list_ollama_models
 from gemini_service import (
     GeminiService,
@@ -38,7 +38,7 @@ from gemini_service import (
     save_api_key_to_env,
 )
 
-logger = logging.getLogger("omniscribe.gui")
+logger = logging.getLogger("escutai.gui")
 _ARCHIVE_READER = MeetingArchiveService()
 
 # Configurações globais de aparência (Escuro como padrão; alternável para Claro em tempo real)
@@ -1540,7 +1540,7 @@ class ZoomTranscriberApp(ctk.CTk):
         self.update()
 
         self._timer_running = False
-        self.mascot: Optional[OmniMicWidget] = None
+        self.mascot: Optional[VozitoWidget] = None
 
         self.after(60, self._refresh_audio_devices)
         self.after(120, self._deferred_init_services)
@@ -2817,7 +2817,7 @@ class ZoomTranscriberApp(ctk.CTk):
         """Inicializa o mascote 3D Vozito atualizado após a abertura da janela principal."""
         if self.mascot is not None:
             return
-        self.mascot = OmniMicWidget(self, theme_mode=self.theme_mode)
+        self.mascot = VozitoWidget(self, theme_mode=self.theme_mode)
         self.mascot.place_default()
 
     def _toggle_mascot(self) -> None:

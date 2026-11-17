@@ -1,4 +1,4 @@
-"""Rig OmniMic_TPOSE, build PS1 low-poly props, generate 7 detailed fluid animations, QA & export."""
+"""Rig Vozito_TPOSE, build PS1 low-poly props, generate 7 detailed fluid animations, QA & export."""
 
 import math
 import os
@@ -8,9 +8,9 @@ from mathutils import Matrix, Vector, Quaternion
 
 _BLENDER_DIR = os.path.dirname(os.path.abspath(__file__))
 _ASSETS_DIR = os.path.dirname(_BLENDER_DIR)
-INPUT_BLEND = os.path.join(_BLENDER_DIR, "omnimic_tpose.blend")
-OUTPUT_BLEND = os.path.join(_BLENDER_DIR, "omnimic_rigged.blend")
-OUTPUT_GLB = os.path.join(_ASSETS_DIR, "models", "omnimic.glb")
+INPUT_BLEND = os.path.join(_BLENDER_DIR, "vozito_tpose.blend")
+OUTPUT_BLEND = os.path.join(_BLENDER_DIR, "vozito_rigged.blend")
+OUTPUT_GLB = os.path.join(_ASSETS_DIR, "models", "vozito.glb")
 
 FPS = 24
 
@@ -34,18 +34,21 @@ def make_ortho_basis(aim_y: Vector, up_hint: Vector, twist_rad: float = 0.0) -> 
 
 
 def clean_unused_collections():
-    """Remove hidden draft collections from rigged copy so export & scene stay clean."""
-    for col_name in ("OmniMic_Detailed", "OmniMic_V2_Exact"):
+    """Remove hidden draft collections from rigged copy and normalize Vozito collection name."""
+    for col_name in ("Vozito_Detailed", "Vozito_V2_Exact", "OmniMic_Detailed", "OmniMic_V2_Exact"):
         col = bpy.data.collections.get(col_name)
         if not col:
             continue
         for obj in list(col.objects):
             bpy.data.objects.remove(obj, do_unlink=True)
         bpy.data.collections.remove(col)
+    legacy_col = bpy.data.collections.get("OmniMic_TPOSE")
+    if legacy_col and not bpy.data.collections.get("Vozito_TPOSE"):
+        legacy_col.name = "Vozito_TPOSE"
 
 
 def make_ps1_material(name: str, base_rgba, metallic=0.0, roughness=0.75, emission_rgb=None, emission_str=0.0):
-    """Clone TPOSE_Chrome's NG_PS1_Bayer4x4 node shader so props match OmniMic's exact PS1 look."""
+    """Clone TPOSE_Chrome's NG_PS1_Bayer4x4 node shader so props match Vozito's exact PS1 look."""
     existing = bpy.data.materials.get(name)
     if existing:
         return existing
@@ -76,10 +79,10 @@ def make_ps1_material(name: str, base_rgba, metallic=0.0, roughness=0.75, emissi
 
 
 def create_prop_object(name: str, builder_fn, materials, outline_thickness=-0.007):
-    """Create a prop mesh in OmniMic_TPOSE collection with PS1 materials & Outline_Solidify."""
+    """Create a prop mesh in Vozito_TPOSE collection with PS1 materials & Outline_Solidify."""
     mesh = bpy.data.meshes.new(f"{name}_Mesh")
     obj = bpy.data.objects.new(name, mesh)
-    col = bpy.data.collections.get("OmniMic_TPOSE") or bpy.context.scene.collection
+    col = bpy.data.collections.get("Vozito_TPOSE") or bpy.data.collections.get("OmniMic_TPOSE") or bpy.context.scene.collection
     col.objects.link(obj)
 
     for mat in materials:
@@ -318,9 +321,9 @@ def attach_armature_modifier(obj, arm_obj, preserve_volume: bool = True):
 
 
 def build_armature(props_dict):
-    arm_data = bpy.data.armatures.new("OmniMic_RigData")
-    arm_obj = bpy.data.objects.new("OmniMic_Rig", arm_data)
-    col = bpy.data.collections.get("OmniMic_TPOSE") or bpy.context.scene.collection
+    arm_data = bpy.data.armatures.new("Vozito_RigData")
+    arm_obj = bpy.data.objects.new("Vozito_Rig", arm_data)
+    col = bpy.data.collections.get("Vozito_TPOSE") or bpy.data.collections.get("OmniMic_TPOSE") or bpy.context.scene.collection
     col.objects.link(arm_obj)
 
     bpy.context.view_layer.objects.active = arm_obj
@@ -1018,7 +1021,7 @@ def validate_geometry(arm_obj):
 def prepare_glb_export(arm_obj):
     os.makedirs(os.path.dirname(OUTPUT_GLB), exist_ok=True)
     bpy.ops.object.select_all(action="DESELECT")
-    col = bpy.data.collections["OmniMic_TPOSE"]
+    col = bpy.data.collections.get("Vozito_TPOSE") or bpy.data.collections["OmniMic_TPOSE"]
     for obj in col.objects:
         obj.select_set(True)
     arm_obj.select_set(True)
