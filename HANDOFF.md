@@ -1,7 +1,7 @@
 # Handoff Técnico — Escutaí
 
 > Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **Escutaí** (anteriormente *OmniScribe AI*).
-> Última atualização: 17/11/2026 (baseado no commit `056142f` na branch `main` após PR #23 + pipeline offline sequencial em 2 estágios na branch `feat/offline-ct2-turbo-and-embedded-qwen-llm`).
+> Última atualização: 17/11/2026 (baseado no commit `b0c498a` na branch `main` após PR #24 + ajustes anti-alucinação de prompt, continuidade de locutor e instalador dinâmico na branch `fix/offline-prompt-leak-diarization-and-installer-info`).
 
 ---
 
@@ -9,7 +9,7 @@
 
 O **Escutaí** é uma aplicação desktop para **Windows 10/11** em Python (`3.11+`) que realiza:
 1. **Captura dual sincronizada de áudio** via WASAPI (saída do sistema em loopback + microfone local).
-2. **Transcrição incremental em blocos** usando a API do **Google Gemini (`gemini-2.5-flash`)** com diarização entre o usuário local (**Canal Direito / R**) e participantes remotos (**Canal Esquerdo / L**), ou **modo 100% Offline sequencial** (`faster-whisper` CT2 `Large-v3 Turbo INT8` com fallback `sherpa-onnx` + LLM local embutido `llama.cpp` + `Qwen2.5-3B-Instruct Q4_K_M`).
+2. **Transcrição incremental em blocos** usando a API do **Google Gemini (`gemini-2.5-flash` com fallback multi-modelo)** com diarização entre o usuário local (**Canal Direito / R**) e participantes remotos (**Canal Esquerdo / L**), ou **modo Offline enxuto de alta precisão** (`faster-whisper` CT2 `Large-v3 Turbo INT8` + GTCRN + Voiceprints, com síntese de Ata Híbrida via 1 requisição leve de texto quando conectado ou Síntese Local Estruturada instantânea `<0,05s` quando 100% offline).
 3. **Geração consolidada de Ata Executiva** estruturada em Markdown ao encerrar a sessão e empacotamento portátil **`.escutai`** (com retrocompatibilidade para `.omniscribe`).
 4. **Acompanhamento visual e interativo** por medidores VU, histórico de atas, monitor de cota/custo da API e o mascote 3D **Vozito** (anteriormente *OmniMic*) estilo Windows 95/XP.
 
@@ -45,7 +45,7 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
     ├── main.py               # Entry point, sys.path, logging em atas_reunioes/logs/app.log e boot da GUI
     ├── audio_engine.py       # Descoberta WASAPI, captura dual, resampling 16 kHz, noise gate e VU meters
     ├── gemini_service.py     # Orquestrador híbrido (Gemini 2.5 + anti-loop + roteamento Offline) e Ata Executiva
-    ├── offline_asr_service.py# Transcrição 100% offline (sherpa-onnx Whisper INT8 + VAD + Ollama/síntese local)
+    ├── offline_asr_service.py# Transcrição 100% offline (Whisper CT2 INT8 + GTCRN + VAD + Síntese Local / Ollama opcional)
     ├── archive_service.py    # Pacote portátil SQLite (.escutai / legado .omniscribe) com áudio comprimido (b4p_zlib)
     ├── voiceprint_service.py # Biometria vocal ONNX (sherpa-onnx + ResNet34-LM + Silero VAD) e identificação automática
     ├── usage_tracker.py      # Persistência de uso diário (Free Tier 1.500 req/dia) e cálculo estimado USD/BRL
@@ -92,8 +92,8 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
   4. **Guarda Anti-Loop (`_detect_and_sanitize_repetition`)**: detecta repetições intra-linha (`5+x`), ciclos alternados de turnos (períodos 1–4) ou desvios de idioma/formato; em caso de colapso, executa 1 *retry* automático com `temperature=0.45` no mesmo arquivo remoto e saneia sobras antes de salvar.
   5. Registra áudio e tokens no `UsageTracker`, anexa no Markdown e apaga o `.wav` temporário somente após escrita confirmada (removendo o arquivo remoto no `finally`).
 - No modo **Offline** (`engine_mode="offline"`), `_process_single_block_offline` e `_generate_executive_minutes` executam o **Pipeline Sequencial em 2 Estágios**:
-  1. **Estágio 1 (ASR Dual-Branch):** Ramo A realiza Silero VAD + `VoiceprintService.diarize_speech_segments` (no timbre natural 16 kHz) com suavização de ilhas curtas (`_smooth_short_speaker_islands`); Ramo B aplica isolamento neural **GTCRN** (`gtcrn_simple.onnx`) + EQ vocal + colarinho de `+0,24s` nos turnos, consolida locutores consecutivos (`<=24s`) e decodifica via **`faster-whisper` (`CTranslate2 INT8` com `beam_size=5`, fallback de temperatura, `initial_prompt` dinâmico e `hotwords`, padrão `Large-v3 Turbo`)** — mantendo `sherpa-onnx` como fallback automático — seguido de sanitização e ancoragem fonética.
-  2. **Estágio 2 (Revisão & Ata Offline com troca de RAM):** ao concluir os blocos, descarrega o Whisper e GTCRN da RAM (`unload_asr_models()`), inicia sob demanda o servidor embutido **`llama-server.exe` (`llama.cpp CPU AVX2`) + `Qwen2.5-3B-Instruct Q4_K_M`** (ou Ollama externo se ativo) para executar revisão fonético-contextual (`refine_offline_transcript`) preservando timestamps/locutores e redigir a Ata Executiva completa (`generate_offline_minutes`), encerrando o servidor ao final (`stop_llm_server()`).
+  1. **Estágio 1 (ASR Dual-Branch):** Ramo A realiza Silero VAD + `VoiceprintService.diarize_speech_segments` (no timbre natural 16 kHz, com inércia para trechos curtos `<2,5s`, divisão sustentada apenas em trechos `>10s` com margem `>=0,09` e suavização de pontes curtas `_smooth_short_speaker_islands`); Ramo B aplica isolamento neural **GTCRN** (`gtcrn_simple.onnx`) + EQ vocal + colarinho de `+0,24s`, empacota buffers contínuos `<=28s` e decodifica via **`faster-whisper` (`CTranslate2 INT8`, `beam_size=2`, prompt neutro sem lista de nomes/hotwords para evitar vazamento)** + `word_timestamps=True`, seguido de sanitização anti-gagueira/anti-eco (`_clean_whisper_text`) e ancoragem fonética pós-ASR (`_apply_glossary_and_phonetic_fixes`).
+  2. **Estágio 2 (Ata Híbrida Leve ou Síntese Local Instantânea):** ao concluir os blocos, descarrega o Whisper e GTCRN da RAM (`unload_asr_models()`). Havendo internet + `GEMINI_API_KEY`, envia **apenas o texto** em 1 única requisição leve (~4s, com fallback `gemini-2.5-flash` → `gemini-2.5-flash-lite` → `gemini-2.0-flash`) para gerar a Ata Executiva completa; sem internet/API Key (ou sem Ollama externo ativo), gera instantaneamente (`<0,05s`, 0 MB RAM) a **Ata Determinística Estruturada em 5 seções** (`_synthesize_deterministic_minutes`). Na aba `📋 Ata`, o botão `✨ Gerar Ata com IA` permite enriquecer qualquer ata determinística com 1 clique ao reconectar à internet.
 - Ao receber a sentinela `None` via `finish_session()`, `_generate_executive_minutes()` consolida o arquivo final e, quando `auto_export_sqlite` está ativo (padrão), empacota texto, metadados, segmentos e áudio compactado (`b4p_zlib`) em `atas_reunioes/AAAA/MM/reuniao_YYYYMMDD_HHMM[_titulo].escutai`.
 
 ### 3.4 Monitoramento de Cotas e Custos (`src/usage_tracker.py`)
@@ -111,9 +111,9 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
 ### 3.5 Interface Gráfica v2.0 (`src/gui.py`)
 - Classe principal `ZoomTranscriberApp(ctk.CTk)` com paleta dupla `(Light, Dark)` de alto contraste (WCAG AA >= 4.5:1 no Dark/Light, **Modo Escuro** como padrão + alternador instantâneo `☀️ Claro / 🌙 Escuro` persistido em `atas_reunioes/ui_settings.json`) e navegação limpa em **4 abas principais** no topo (`🎙️ Gravação`, `📋 Ata`, `🗂️ Histórico`, `⚙️ Config & Voz`):
   - **Aba `🎙️ Gravação`**: título + glossário (50%/50%), sublinha limpa com `Captação` (`Online`/`Presencial`) e `Motor de IA` (`☁️ Gemini` / `💻 Offline`), botão único principal, cronômetro, medidores VU, barra de progresso assíncrona (`bar_async_progress`) e transcrição ao vivo.
-  - **Aba `📋 Ata`**: leitura da Ata Executiva com `📂 Abrir Pasta`, `📦 Exportar .escutai` e `📋 Copiar Ata Markdown`.
+  - **Aba `📋 Ata`**: leitura da Ata Executiva com `📂 Abrir Pasta`, `✨ Gerar Ata com IA` (1 requisição leve de texto com fallback multi-modelo), `📦 Exportar .escutai` e `📋 Copiar Ata Markdown`.
   - **Aba `🗂️ Histórico`**: listagem nativa unificada de `.escutai`/`.omniscribe`, `.wav` e `.md` via `render_history_cards_into()`, com **busca instantânea**, filtros por tipo (`📦 Pacotes`), `📥 Importar Pacote`, player (`▶ Ouvir`), abertura direta e `🔄 Re-transcrever`.
-  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + bloco (1/3/5 min) + Noise Gate, `GEMINI_API_KEY` + medidor Free Tier, Voiceprints, card Offline (`Whisper turbo / small / base` CT2/ONNX + download paralelo + detector Ollama / LLM embutido `Qwen2.5-3B` + checkbox Isolamento Neural GTCRN + checkbox `.escutai`) e gaveta de logs técnicos recolhível.
+  - **Aba `⚙️ Config & Voz`**: hardware WASAPI + bloco (1/3/5 min) + Noise Gate, `GEMINI_API_KEY` + medidor Free Tier, Voiceprints, card Offline (`Whisper turbo / small / base` CT2/ONNX + download paralelo + detector Ollama externo / Ata Híbrida / Síntese Local + checkbox Isolamento Neural GTCRN + checkbox `.escutai`) e gaveta de logs técnicos recolhível.
 - Modais auxiliares (`VoiceProfilesModal`, `RetranscribeModal` com **Diagnóstico Acústico**, seletor de **Tratamento/Isolamento Vocal** e botão **🔊 Ouvir Prévia Tratada (6s)**, `ApiKeyModal`, `UsageModal`, `HistoryModal`) estilizados uniformemente com `_style_option_menu`.
 
 ### 3.6 Mascote 3D Vozito (`src/mascot_3d.py` e `src/mascot_widget.py`)
@@ -210,8 +210,8 @@ python src/main.py
 
 ## 6. Estado Atual do Git e Pontos de Atenção
 
-- **Branch base**: `main` (sincronizada com `origin/main` após PR #23 `056142f`; pipeline offline sequencial em 2 estágios na branch `feat/offline-ct2-turbo-and-embedded-qwen-llm`).
-- **Instalador Windows (`Escutai_Setup.exe`)**: exclui arquivos `.gguf` (baixados sob demanda para `%LOCALAPPDATA%\Programs\Escutai\models\llm`) para manter o payload abaixo do limite de 2 GB do ZIP nativo `.NET` e economizar disco. Recompilar após o merge no Windows Desktop caso deseje atualizar o binário instalado (`ctranslate2` + `faster-whisper` + `llama-server`).
+- **Branch base**: `main` (sincronizada com `origin/main` após PR #24 `b0c498a`; correções de vazamento de prompt no Whisper, inércia de Voiceprint, ata offline encorpada e cálculo dinâmico de espaço em disco no instalador na branch `fix/offline-prompt-leak-diarization-and-installer-info`).
+- **Instalador Windows (`Escutai_Setup.exe`)**: não inclui LLM local nem `.gguf` pesados (economia de ~2 GB em disco), mantendo somente os modelos leves de voz/ASR (Whisper CT2 INT8 + GTCRN + Voiceprints), e calcula dinamicamente na tela de instalação o espaço exato descompactado a partir do payload ZIP + espaço livre da unidade escolhida (`src/installer_native.cs` e `src/installer.py`).
 - **Dependência externa principal (apenas modo Online)**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal). No modo **Offline**, o app opera integralmente sem API Key.
 - **Observações técnicas conhecidas no código atual**:
   - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` e `src/offline_asr_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).

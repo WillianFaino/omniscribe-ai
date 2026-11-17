@@ -1671,6 +1671,8 @@ class ZoomTranscriberApp(ctk.CTk):
         self.block_count = 0
         self._logs_expanded = False
         self._api_key_visible = False
+        self._active_transcript_path: Optional[Path] = None
+        self._active_minute_path: Optional[Path] = None
 
         # Mapeamentos de hardware de áudio
         self.loopback_map: Dict[str, Optional[int]] = {}
@@ -2156,11 +2158,23 @@ class ZoomTranscriberApp(ctk.CTk):
             fg_color=BTN_NEUTRAL,
             hover_color=BTN_NEUTRAL_HOVER,
             text_color=THEME_TEXT_PRIMARY,
-            width=116,
+            width=112,
             height=32,
             command=self._open_atas_folder,
         )
         self.btn_open_folder.pack(side="left", padx=(0, 8))
+
+        self.btn_regen_ata_ai = ctk.CTkButton(
+            btn_row,
+            text="✨ Gerar Ata com IA",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=COLOR_TEAL,
+            hover_color="#0e7490",
+            width=156,
+            height=32,
+            command=self._regenerate_current_minutes_ai,
+        )
+        self.btn_regen_ata_ai.pack(side="left", padx=(0, 8))
 
         self.btn_export_sqlite = ctk.CTkButton(
             btn_row,
@@ -2168,7 +2182,7 @@ class ZoomTranscriberApp(ctk.CTk):
             font=ctk.CTkFont(size=12, weight="bold"),
             fg_color="#7c3aed",
             hover_color="#6d28d9",
-            width=166,
+            width=156,
             height=32,
             command=self._export_current_archive,
         )
@@ -2483,7 +2497,7 @@ class ZoomTranscriberApp(ctk.CTk):
             command=self._open_voiceprints_modal,
         ).pack(side="left")
 
-        # Card 4: Modo Offline (Whisper CT2/ONNX + Qwen2.5/Ollama) & Pacote Portátil SQLite
+        # Card 4: Modo Offline (Whisper CT2/ONNX + GTCRN) & Pacote Portátil SQLite
         off_card = ctk.CTkFrame(
             scroll, fg_color=THEME_CARD, border_color=THEME_BORDER, border_width=1, corner_radius=12
         )
@@ -2494,13 +2508,13 @@ class ZoomTranscriberApp(ctk.CTk):
         off_left.grid(row=0, column=0, padx=16, pady=(14, 6), sticky="w")
         ctk.CTkLabel(
             off_left,
-            text="💻 Transcrição Offline (Whisper Turbo CT2 + Qwen2.5) & Pacote .escutai",
+            text="💻 Transcrição Offline (Whisper Turbo CT2 + GTCRN) & Pacote .escutai",
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color=THEME_TEXT_PRIMARY,
         ).pack(anchor="w")
         self.lbl_offline_status = ctk.CTkLabel(
             off_left,
-            text="Verificando modelos Whisper (CT2/ONNX) e LLM local...",
+            text="Verificando modelos Whisper (CT2/ONNX) e isolador GTCRN...",
             font=ctk.CTkFont(size=12),
             text_color=THEME_TEXT_MUTED,
         )
@@ -2724,24 +2738,22 @@ class ZoomTranscriberApp(ctk.CTk):
             return
         asr_svc = self.gemini_service.offline_asr_service
         ready, _ = asr_svc.is_ready(self.offline_whisper_variant)
-        llm_3b_ok, _ = asr_svc.is_llm_ready("qwen2.5-3b")
-        llm_1b_ok, _ = asr_svc.is_llm_ready("qwen2.5-1.5b") if not llm_3b_ok else (False, "")
-        w_txt = f"✅ Whisper {self.offline_whisper_variant} pronto" if ready else f"⚠️ Whisper {self.offline_whisper_variant} não baixado"
-        self.lbl_offline_status.configure(text=f"{w_txt} • Verificando LLM local...")
+        w_txt = (
+            f"✅ Whisper {self.offline_whisper_variant} pronto"
+            if ready
+            else f"⚠️ Whisper {self.offline_whisper_variant} não baixado"
+        )
+        self.lbl_offline_status.configure(text=f"{w_txt} • Verificando motor de ata...")
 
         def _probe_ollama():
             ok_ol, models = list_ollama_models()
             if ok_ol and models:
-                ol_txt = f"🟢 Ollama ({models[0]})"
-            elif llm_3b_ok:
-                ol_txt = "🟢 LLM Local (Qwen2.5-3B)"
-            elif llm_1b_ok:
-                ol_txt = "🟢 LLM Local (Qwen2.5-1.5B)"
-            elif ok_ol:
-                ol_txt = "🟡 Ollama sem modelos"
+                ata_txt = f"🟢 Ollama ({models[0]})"
+            elif self.gemini_service.api_key:
+                ata_txt = "🟢 Ata Híbrida (1 req texto) / Síntese Local"
             else:
-                ol_txt = "⚪ Ata via Síntese Local"
-            self.after(0, lambda: self.lbl_offline_status.configure(text=f"{w_txt} • {ol_txt}"))
+                ata_txt = "⚪ Síntese Estruturada Local (instantânea)"
+            self.after(0, lambda: self.lbl_offline_status.configure(text=f"{w_txt} • {ata_txt}"))
 
         threading.Thread(target=_probe_ollama, daemon=True, name="OllamaProbe").start()
 
@@ -2856,6 +2868,8 @@ class ZoomTranscriberApp(ctk.CTk):
     def load_archive(self, archive_path: Path) -> None:
         try:
             data = self.gemini_service.archive_service.load_archive_contents(archive_path)
+            self._active_transcript_path = None
+            self._active_minute_path = None
             self.txt_transcription.delete("1.0", "end")
             self.txt_transcription.insert("end", data.get("transcript_md", "") or "*[Transcrição vazia no pacote]*")
             self.txt_minutes.delete("1.0", "end")
@@ -3394,6 +3408,9 @@ class ZoomTranscriberApp(ctk.CTk):
 
     def _handle_minute_generated(self, minute_path: Path, minute_text: str) -> None:
         def update():
+            self._active_minute_path = Path(minute_path)
+            if self.gemini_service.transcription_file_path:
+                self._active_transcript_path = Path(self.gemini_service.transcription_file_path)
             self.txt_minutes.delete("1.0", "end")
             self.txt_minutes.insert("end", minute_text)
             self.lbl_ata_meta.configure(text=f"Arquivo salvo: {minute_path.name}")
@@ -3405,6 +3422,58 @@ class ZoomTranscriberApp(ctk.CTk):
                 self.mascot.trigger_celebrating("Ata executiva pronta e salva! 🏆")
 
         self.after(0, update)
+
+    def _regenerate_current_minutes_ai(self) -> None:
+        """Gera ou enriquece a Ata Executiva via 1 chamada leve de texto (ou fallback local instantâneo)."""
+        if self.is_recording or self.is_retranscribing:
+            self._log_gui("[AVISO] Aguarde a conclusão da gravação/re-transcrição atual antes de regerar a Ata.")
+            return
+
+        transcript_text = self.txt_transcription.get("1.0", "end-1c").strip()
+        if (
+            not transcript_text
+            or transcript_text.startswith("A transcrição incremental com diarização")
+            or len(transcript_text) < 40
+        ):
+            self._log_gui("[AVISO] Nenhuma transcrição carregada para gerar a Ata.")
+            return
+
+        if not self.gemini_service.api_key:
+            self._log_gui("[AVISO] GEMINI_API_KEY não configurada; atualizando com Síntese Local Estruturada.")
+
+        self.btn_regen_ata_ai.configure(state="disabled", text="⏳ Gerando Ata...")
+        self.lbl_status.configure(text="✨ Sintetizando Ata Executiva...", text_color=COLOR_PRIMARY)
+        title_hint = self.entry_meeting_title.get().strip() or self.gemini_service.meeting_title or None
+        min_path = self._active_minute_path or self.gemini_service.minute_file_path
+        tr_path = self._active_transcript_path or self.gemini_service.transcription_file_path
+
+        def _worker():
+            used_cloud, new_minute, backend_info = self.gemini_service.regenerate_minutes_with_ai(
+                transcript_text=transcript_text,
+                title=title_hint,
+                minute_file_path=min_path,
+                transcript_file_path=tr_path,
+            )
+
+            def _done():
+                self.btn_regen_ata_ai.configure(state="normal", text="✨ Gerar Ata com IA")
+                if not new_minute:
+                    self.lbl_status.configure(text="● Sem texto para Ata", text_color=COLOR_AMBER)
+                    return
+                self.txt_minutes.delete("1.0", "end")
+                self.txt_minutes.insert("end", new_minute)
+                saved_name = self.gemini_service.minute_file_path.name if self.gemini_service.minute_file_path else "memória"
+                self.lbl_ata_meta.configure(text=f"Atualizada ({backend_info}) • {saved_name}")
+                self.lbl_status.configure(
+                    text=f"● Ata atualizada ({backend_info})",
+                    text_color=COLOR_SUCCESS if used_cloud else COLOR_AMBER,
+                )
+                self._refresh_usage_panel()
+                self._switch_tab(self.TAB_ATA)
+
+            self.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True, name="RegenMinutesAI").start()
 
     def _handle_status_change(self, status: str) -> None:
         def _apply():
@@ -3449,6 +3518,7 @@ class ZoomTranscriberApp(ctk.CTk):
             filename = file_path.name
 
             if "ata_executiva" in filename:
+                self._active_minute_path = file_path
                 self.txt_minutes.delete("1.0", "end")
                 self.txt_minutes.insert("end", content)
                 self.lbl_ata_meta.configure(text=f"Visualizando: {filename}")
@@ -3456,6 +3526,7 @@ class ZoomTranscriberApp(ctk.CTk):
                 self.lbl_status.configure(text=f"● Ata: {filename[:24]}...", text_color=COLOR_SUCCESS)
 
                 matching_file = file_path.parent / filename.replace("ata_executiva_", "transcricao_", 1)
+                self._active_transcript_path = matching_file if matching_file.exists() else None
                 if matching_file.exists():
                     try:
                         self.txt_transcription.delete("1.0", "end")
@@ -3464,12 +3535,14 @@ class ZoomTranscriberApp(ctk.CTk):
                         pass
 
             elif "transcricao" in filename:
+                self._active_transcript_path = file_path
                 self.txt_transcription.delete("1.0", "end")
                 self.txt_transcription.insert("end", content)
                 self._switch_tab(self.TAB_REC)
                 self.lbl_status.configure(text=f"● Transcrição: {filename[:22]}...", text_color=COLOR_PRIMARY)
 
                 matching_file = file_path.parent / filename.replace("transcricao_", "ata_executiva_", 1)
+                self._active_minute_path = matching_file
                 if matching_file.exists():
                     try:
                         self.txt_minutes.delete("1.0", "end")
@@ -3478,6 +3551,8 @@ class ZoomTranscriberApp(ctk.CTk):
                     except Exception:
                         pass
             else:
+                self._active_transcript_path = file_path
+                self._active_minute_path = None
                 self.txt_transcription.delete("1.0", "end")
                 self.txt_transcription.insert("end", content)
                 self._switch_tab(self.TAB_REC)

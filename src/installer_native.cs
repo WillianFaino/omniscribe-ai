@@ -162,6 +162,8 @@ namespace EscutaiSetup
         private bool _startShortcut = true;
         private bool _preserveData = true;
         private bool _launchNow = true;
+        private long _cachedUnpackedBytes = -1;
+        private long _cachedInstallerBytes = -1;
 
         private Panel _pageContainer;
         private Panel _navBar;
@@ -299,11 +301,11 @@ namespace EscutaiSetup
             _btnNext.BackColor = AccentBlue;
 
             Panel badge = new Panel();
-            badge.Size = new Size(88, 26);
-            badge.Location = new Point(276, 38);
+            badge.Size = new Size(106, 26);
+            badge.Location = new Point(267, 38);
             badge.BackColor = Color.FromArgb(30, 41, 59);
             Label lblBadge = new Label();
-            lblBadge.Text = "PRO v1.2";
+            lblBadge.Text = "v2.0 Híbrido";
             lblBadge.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold);
             lblBadge.ForeColor = Color.FromArgb(56, 189, 248);
             lblBadge.Dock = DockStyle.Fill;
@@ -327,18 +329,130 @@ namespace EscutaiSetup
 
             Label desc = new Label();
             desc.Text =
-                "O Escutaí realiza transcrição incremental em tempo real e gera Atas Executivas\n" +
-                "automáticas para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n" +
+                "O Escutaí realiza transcrição incremental e gera Atas Executivas automáticas\n" +
+                "para reuniões (Google Meet, Teams, Zoom, YouTube ou microfone).\n\n" +
                 "Recursos incluídos nesta versão:\n" +
-                "  - Diarização multi-voz inteligente e suporte a falas sobrepostas\n" +
-                "  - Rastreador em tempo real de cotas Free Tier e custos da API\n" +
-                "  - Instalação rápida sem privilégios de administrador ou terminal";
-            desc.Font = new Font("Segoe UI", 9.5f);
+                "  - Motor Híbrido: Nuvem (Gemini 2.5) ou Offline (Whisper Turbo CT2 INT8 + GTCRN)\n" +
+                "  - Biometria multi-voz (Voiceprints) + Ata Híbrida (1 req texto) / Síntese Local\n" +
+                "  - Diagnóstico acústico, pacotes portáteis (.escutai) e assistente 3D Vozito";
+            desc.Font = new Font("Segoe UI", 9.2f);
             desc.ForeColor = TextMuted;
             desc.Dock = DockStyle.Fill;
-            desc.Padding = new Padding(20);
+            desc.Padding = new Padding(18);
             card.Controls.Add(desc);
             _pageContainer.Controls.Add(card);
+        }
+
+        private static string FormatBytes(long bytes)
+        {
+            if (bytes <= 0) return "0 MB";
+            double mb = bytes / (1024.0 * 1024.0);
+            if (mb >= 1024.0)
+            {
+                return string.Format("{0:F2} GB", mb / 1024.0);
+            }
+            return string.Format("{0:F0} MB", mb);
+        }
+
+        private void EnsurePackageSizesComputed()
+        {
+            if (_cachedUnpackedBytes > 0) return;
+
+            long installerLen = 0;
+            try
+            {
+                string selfPath = Application.ExecutablePath;
+                if (File.Exists(selfPath))
+                {
+                    FileInfo fi = new FileInfo(selfPath);
+                    installerLen = fi.Length;
+                    using (FileStream fs = new FileStream(selfPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        if (fs.Length >= 16)
+                        {
+                            fs.Seek(-16, SeekOrigin.End);
+                            byte[] footer = new byte[16];
+                            if (fs.Read(footer, 0, 16) == 16 && Encoding.ASCII.GetString(footer, 8, 8) == "OMNISCRB")
+                            {
+                                long payloadSize = BitConverter.ToInt64(footer, 0);
+                                long payloadStart = fs.Length - 16 - payloadSize;
+                                if (payloadSize > 0 && payloadStart >= 0)
+                                {
+                                    long totalUnpacked = 0;
+                                    using (SubStream sub = new SubStream(fs, payloadStart, payloadSize))
+                                    using (ZipArchive archive = new ZipArchive(sub, ZipArchiveMode.Read))
+                                    {
+                                        foreach (ZipArchiveEntry entry in archive.Entries)
+                                        {
+                                            totalUnpacked += entry.Length;
+                                        }
+                                    }
+                                    _cachedUnpackedBytes = totalUnpacked;
+                                    _cachedInstallerBytes = installerLen;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            // Fallback caso o instalador rode sem payload embutido (zip ou pasta dist/Escutai)
+            try
+            {
+                string exeDir = Path.GetDirectoryName(Application.ExecutablePath) ?? "";
+                string extDir = Path.Combine(exeDir, "dist", "Escutai");
+                if (Directory.Exists(extDir))
+                {
+                    long dirBytes = 0;
+                    foreach (string f in Directory.GetFiles(extDir, "*", SearchOption.AllDirectories))
+                    {
+                        dirBytes += new FileInfo(f).Length;
+                    }
+                    _cachedUnpackedBytes = dirBytes;
+                    _cachedInstallerBytes = installerLen;
+                    return;
+                }
+            }
+            catch
+            {
+            }
+
+            _cachedInstallerBytes = installerLen;
+            _cachedUnpackedBytes = installerLen > 0 ? installerLen * 2 : 950L * 1024L * 1024L;
+        }
+
+        private string GetDiskSpaceSummary(string targetDir)
+        {
+            EnsurePackageSizesComputed();
+            string reqTxt = "~" + FormatBytes(_cachedUnpackedBytes);
+            string instTxt = _cachedInstallerBytes > 0
+                ? " (instalador compactado: " + FormatBytes(_cachedInstallerBytes) + ")"
+                : "";
+
+            string freeTxt = "Disponível";
+            try
+            {
+                string full = Path.GetFullPath(string.IsNullOrWhiteSpace(targetDir) ? _targetDir : targetDir);
+                string root = Path.GetPathRoot(full);
+                if (!string.IsNullOrEmpty(root))
+                {
+                    DriveInfo di = new DriveInfo(root);
+                    if (di.IsReady)
+                    {
+                        freeTxt = FormatBytes(di.AvailableFreeSpace);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return "Espaço em disco necessário: " + reqTxt + instTxt + "\n" +
+                   "Espaço livre na unidade: " + freeTxt + " • Instalação segura no perfil do usuário (sem UAC).";
         }
 
         private void RenderDirectory()
@@ -375,6 +489,19 @@ namespace EscutaiSetup
             _txtDir.Size = new Size(454, 30);
             _pageContainer.Controls.Add(_txtDir);
 
+            Label info = new Label();
+            info.Text = GetDiskSpaceSummary(_targetDir);
+            info.Font = new Font("Segoe UI", 9f);
+            info.ForeColor = Color.FromArgb(148, 163, 184);
+            info.Location = new Point(32, 170);
+            info.Size = new Size(576, 56);
+            _pageContainer.Controls.Add(info);
+
+            _txtDir.TextChanged += delegate
+            {
+                info.Text = GetDiskSpaceSummary(_txtDir.Text);
+            };
+
             FlatButton btnBrowse = new FlatButton();
             btnBrowse.Text = "Procurar...";
             btnBrowse.BackColor = BtnGray;
@@ -396,18 +523,11 @@ namespace EscutaiSetup
                         }
                         _targetDir = chosen;
                         _txtDir.Text = chosen;
+                        info.Text = GetDiskSpaceSummary(chosen);
                     }
                 }
             };
             _pageContainer.Controls.Add(btnBrowse);
-
-            Label info = new Label();
-            info.Text = "Espaço em disco necessário: ~125 MB\nNão requer permissão de administrador (instalação segura no perfil do usuário).";
-            info.Font = new Font("Segoe UI", 9f);
-            info.ForeColor = Color.FromArgb(100, 116, 139);
-            info.Location = new Point(32, 170);
-            info.Size = new Size(576, 50);
-            _pageContainer.Controls.Add(info);
         }
 
         private void RenderOptions()

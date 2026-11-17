@@ -153,6 +153,8 @@ class AudioBlockTask:
 class GeminiService:
     """Gerenciador do pipeline de transcrição incremental e consolidação da Ata."""
 
+    TEXT_FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash")
+
     TRANSCRIPTION_SYSTEM_PROMPT = """Você é o motor de transcrição inteligente e diarizador acústico de alta precisão do Escutaí.
 O áudio fornecido em WAV estéreo possui exatamente 2 canais sincronizados:
 - CANAL DIREITO (Right / R): Microfone local do usuário -> SEMPRE identificado como **Willian (Você)**.
@@ -786,6 +788,64 @@ Transcrição completa da reunião:
             out_tok = getattr(response.usage_metadata, "candidates_token_count", 0) or 0
         return int(in_tok), int(out_tok)
 
+    def _generate_text_with_fallback(
+        self,
+        prompt: str,
+        temperature: float = 0.2,
+        top_p: float = 0.95,
+        max_output_tokens: Optional[int] = None,
+        is_new_meeting: bool = False,
+    ) -> Tuple[Optional[str], str]:
+        """Executa chamada leve de texto puro com fallback automático multi-modelo (429 / indisponibilidade)."""
+        if self._client is None:
+            if not self.api_key:
+                self.api_key = load_api_key_from_env()
+            if not self.api_key or not self._init_client():
+                return None, ""
+
+        gen_config = self._build_generation_config(
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+        )
+
+        for model_name in self.TEXT_FALLBACK_MODELS:
+            for attempt in range(2):
+                try:
+                    kwargs = {
+                        "model": model_name,
+                        "contents": [prompt],
+                    }
+                    if gen_config is not None:
+                        kwargs["config"] = gen_config
+                    response = self._client.models.generate_content(**kwargs)
+                    in_tok, out_tok = self._extract_usage_tokens(response)
+                    self.tracker.register_request(
+                        audio_seconds=0.0,
+                        input_tokens=in_tok,
+                        output_tokens=out_tok,
+                        is_new_meeting=is_new_meeting,
+                    )
+                    txt = response.text.strip() if getattr(response, "text", None) else ""
+                    if txt:
+                        return txt, model_name
+                    break
+                except Exception as exc:
+                    err_low = str(exc).lower()
+                    is_quota_or_missing = any(
+                        tok in err_low
+                        for tok in ("429", "resource_exhausted", "quota", "rate limit", "404", "not found")
+                    )
+                    logger.warning(f"Gemini texto ({model_name}, tentativa {attempt + 1}) falhou: {exc}")
+                    if is_quota_or_missing:
+                        self._log(f"[API] Modelo {model_name} indisponível/sem cota; tentando próximo modelo...")
+                        break
+                    if attempt == 0:
+                        time.sleep(0.8)
+                    else:
+                        break
+        return None, ""
+
     def _process_single_block_offline(self, task: AudioBlockTask, time_range: str, mode_label: str) -> None:
         """Transcreve um bloco WAV localmente usando Whisper ONNX + Voiceprints (sem API Gemini)."""
         try:
@@ -969,7 +1029,9 @@ Transcrição completa da reunião:
 
     def _refine_transcript_phonetics(self, raw_transcript: str) -> str:
         """Executa segunda passada fono-semântica (texto puro) para corrigir fonética, unificar nomes e deduplicar overlap."""
-        if not raw_transcript or not raw_transcript.strip() or not self._client:
+        if not raw_transcript or not raw_transcript.strip():
+            return raw_transcript
+        if not self._client and not self.api_key:
             return raw_transcript
 
         try:
@@ -997,26 +1059,19 @@ Transcrição completa da reunião:
                 raw_transcript=body_clean,
             )
 
-            gen_config = self._build_generation_config(temperature=0.15, top_p=0.95)
-            kwargs = {
-                "model": "gemini-2.5-flash",
-                "contents": [prompt],
-            }
-            if gen_config is not None:
-                kwargs["config"] = gen_config
+            refined_raw, used_model = self._generate_text_with_fallback(
+                prompt, temperature=0.15, top_p=0.95
+            )
+            if not refined_raw:
+                return header_prefix + body_clean + "\n" if body_clean != body_raw else raw_transcript
 
-            response = self._client.models.generate_content(**kwargs)
-            in_tok, out_tok = self._extract_usage_tokens(response)
-            self.tracker.register_request(audio_seconds=0.0, input_tokens=in_tok, output_tokens=out_tok)
-
-            refined_raw = response.text.strip() if getattr(response, "text", None) else ""
-            refined_text, _, _ = self._detect_and_sanitize_repetition(refined_raw) if refined_raw else ("", False, "")
+            refined_text, _, _ = self._detect_and_sanitize_repetition(refined_raw)
             # Proteção contra resposta vazia ou truncamento anômalo pela API (medido contra o corpo já sem loops)
             if not refined_text or len(refined_text) < int(0.35 * len(body_clean.strip())):
                 logger.warning("Revisão fono-semântica retornou conteúdo curto/vazio; mantendo transcrição sanitizada.")
                 return header_prefix + body_clean + "\n" if body_clean != body_raw else raw_transcript
 
-            self._log("[REVISÃO] Passada fono-semântica concluída com sucesso.")
+            self._log(f"[REVISÃO] Passada fono-semântica concluída ({used_model}).")
             return header_prefix + refined_text + "\n"
 
         except Exception as e:
@@ -1086,13 +1141,119 @@ Transcrição completa da reunião:
             logger.warning(f"Falha ao gerar pacote SQLite .escutai: {arch_err}")
             self._log(f"[AVISO] Não foi possível gerar pacote .escutai: {arch_err}")
 
+    @staticmethod
+    def _strip_markdown_fences(text: str) -> str:
+        cleaned = (text or "").strip()
+        cleaned = re.sub(r"^```(?:markdown|md)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        return cleaned.strip()
+
+    def _synthesize_minutes_hybrid_or_local(
+        self,
+        title: str,
+        date_str: str,
+        duration_str: str,
+        transcript_text: str,
+        allow_cloud_text: bool = True,
+        register_new_meeting: bool = False,
+    ) -> Tuple[str, str, bool]:
+        """Tenta gerar Ata Executiva em 1 chamada leve de texto (multi-modelo); cai em <0.05s para síntese local."""
+        prompt = self.MINUTES_SYSTEM_PROMPT.format(
+            title=title or "Reunião",
+            date_str=date_str,
+            duration_str=duration_str,
+            full_transcript=(transcript_text or "")[:65000],
+        )
+
+        if allow_cloud_text:
+            ai_raw, used_model = self._generate_text_with_fallback(
+                prompt,
+                temperature=0.2,
+                top_p=0.95,
+                is_new_meeting=register_new_meeting,
+            )
+            if ai_raw:
+                cleaned = self._strip_markdown_fences(ai_raw)
+                if len(cleaned) > 150:
+                    return cleaned + "\n", f"IA Nuvem ({used_model})", True
+
+        self._set_status("Gerando Ata Executiva estruturada local...")
+        local_text, local_backend = self.offline_asr_service.generate_offline_minutes(
+            title=title or "Reunião",
+            date_str=date_str,
+            duration_str=duration_str,
+            transcript_md=transcript_text,
+            minutes_prompt_template=self.MINUTES_SYSTEM_PROMPT,
+            preferred_ollama_model=self.offline_ollama_model,
+        )
+        if register_new_meeting:
+            self.tracker.register_request(audio_seconds=0.0, input_tokens=0, output_tokens=0, is_new_meeting=True)
+        return local_text, local_backend, False
+
+    def regenerate_minutes_with_ai(
+        self,
+        transcript_text: str,
+        title: Optional[str] = None,
+        minute_file_path: Optional[Path] = None,
+        transcript_file_path: Optional[Path] = None,
+    ) -> Tuple[bool, str, str]:
+        """Regenera a Ata Executiva sob demanda via 1 chamada leve de texto (com fallback multi-modelo/local)."""
+        clean_src, _, _ = self._detect_and_sanitize_repetition(transcript_text or "")
+        if not clean_src.strip():
+            return False, "", "Transcrição vazia."
+
+        eff_title = (title or "").strip()
+        eff_date = ""
+        eff_dur = ""
+        m_title = re.search(r"^#\s*Transcri[çc][ãa]o da Reuni[ãa]o:\s*(.+)$", clean_src, flags=re.MULTILINE)
+        if m_title and not eff_title:
+            eff_title = m_title.group(1).strip()
+        m_date = re.search(r"^\*\*Data de In[íi]cio:\*\*\s*(.+)$", clean_src, flags=re.MULTILINE)
+        if m_date:
+            eff_date = m_date.group(1).strip()
+        timestamps = re.findall(r"^\[(\d{1,2}:\d{2}(?::\d{2})?)\]", clean_src, flags=re.MULTILINE)
+        if timestamps:
+            parts = [int(p) for p in timestamps[-1].split(":")]
+            last_secs = parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
+            eff_dur = format_seconds(last_secs)
+
+        eff_title = eff_title or self.meeting_title or "Reunião"
+        eff_date = eff_date or datetime.now().strftime("%d/%m/%Y às %H:%M")
+        eff_dur = eff_dur or "Não informada"
+
+        minute_text, backend_used, used_cloud = self._synthesize_minutes_hybrid_or_local(
+            title=eff_title,
+            date_str=eff_date,
+            duration_str=eff_dur,
+            transcript_text=clean_src,
+            allow_cloud_text=True,
+            register_new_meeting=False,
+        )
+
+        target_path = minute_file_path or self.minute_file_path
+        if target_path is None and transcript_file_path is not None:
+            t_path = Path(transcript_file_path)
+            if t_path.name.startswith("transcricao_"):
+                target_path = t_path.with_name(t_path.name.replace("transcricao_", "ata_executiva_", 1))
+
+        if target_path is not None:
+            target_path = Path(target_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write(minute_text)
+            self.minute_file_path = target_path
+
+        self.last_minutes_text = minute_text
+        self._log(f"[ATA SOB DEMANDA] Ata atualizada via {backend_used}.")
+        return used_cloud, minute_text, backend_used
+
     def _generate_executive_minutes(self) -> None:
-        """Lê a transcrição consolidada, gera a Ata Executiva (Online ou Offline) e salva o pacote `.escutai`."""
+        """Lê a transcrição consolidada, gera a Ata Executiva (Híbrida/Online ou Offline) e salva o pacote `.escutai`."""
         if not self.transcription_file_path or not self.minute_file_path:
             self._log("[ERRO] Caminhos de arquivos de Ata não definidos.")
             return
 
-        if self.engine_mode == "online" and not self._client:
+        if self.engine_mode == "online" and not self._client and not self.api_key:
             self._log("[AVISO] Chave Gemini ausente; Ata Executiva não pôde ser gerada via IA.")
             fallback_text = (
                 f"# Ata Executiva da Reunião: {self.meeting_title}\n"
@@ -1138,46 +1299,47 @@ Transcrição completa da reunião:
                 raw_transcript = f.read()
 
             if self.engine_mode == "offline":
-                try:
-                    self.offline_asr_service.unload_asr_models()
-                    sanitized_raw, _, _ = self._detect_and_sanitize_repetition(raw_transcript)
-                    enrolled_names = (
-                        [p["name"] for p in self.voiceprint_service.list_profiles()]
-                        if self.voiceprint_service
-                        else []
-                    )
-                    self._set_status("Refinando transcrição com IA local (Qwen2.5)...")
-                    refined_transcript = self.offline_asr_service.refine_offline_transcript(
-                        sanitized_raw,
-                        title=self.meeting_title,
-                        context_notes=self.context_notes,
-                        enrolled_names=enrolled_names,
-                        preferred_ollama_model=self.offline_ollama_model,
-                    )
-                    if refined_transcript != raw_transcript and refined_transcript.strip():
-                        with open(self.transcription_file_path, "w", encoding="utf-8") as f:
-                            f.write(refined_transcript)
-                        self.accumulated_transcript = refined_transcript
-                        self._log(f"[REVISÃO OFFLINE] Transcrição refinada salva em: {self.transcription_file_path.name}")
-                        if self.on_transcription_update:
-                            self.on_transcription_update(0, "", refined_transcript, True)
-                    self._set_status("Gerando Ata Executiva offline (LLM Local)...")
-                    minute_text, backend_used = self.offline_asr_service.generate_offline_minutes(
-                        title=self.meeting_title,
-                        date_str=date_str,
-                        duration_str=duration_str,
-                        transcript_md=refined_transcript,
-                        minutes_prompt_template=self.MINUTES_SYSTEM_PROMPT,
-                        preferred_ollama_model=self.offline_ollama_model,
-                    )
-                finally:
-                    self.offline_asr_service.stop_llm_server()
+                self.offline_asr_service.unload_asr_models()
+                sanitized_raw, _, _ = self._detect_and_sanitize_repetition(raw_transcript)
+                enrolled_names = (
+                    [p["name"] for p in self.voiceprint_service.list_profiles()]
+                    if self.voiceprint_service
+                    else []
+                )
+                # Só executa se houver servidor Ollama externo rodando; caso contrário retorna em 0.0s
+                refined_transcript = self.offline_asr_service.refine_offline_transcript(
+                    sanitized_raw,
+                    title=self.meeting_title,
+                    context_notes=self.context_notes,
+                    enrolled_names=enrolled_names,
+                    preferred_ollama_model=self.offline_ollama_model,
+                )
+                if refined_transcript != raw_transcript and refined_transcript.strip():
+                    with open(self.transcription_file_path, "w", encoding="utf-8") as f:
+                        f.write(refined_transcript)
+                    self.accumulated_transcript = refined_transcript
+                    if self.on_transcription_update:
+                        self.on_transcription_update(0, "", refined_transcript, True)
 
-                self.tracker.register_request(audio_seconds=0.0, input_tokens=0, output_tokens=0, is_new_meeting=True)
+                self._set_status("Gerando Ata Executiva (Híbrido texto / Síntese local)...")
+                minute_text, backend_used, used_cloud = self._synthesize_minutes_hybrid_or_local(
+                    title=self.meeting_title,
+                    date_str=date_str,
+                    duration_str=duration_str,
+                    transcript_text=refined_transcript,
+                    allow_cloud_text=True,
+                    register_new_meeting=True,
+                )
+                if used_cloud and "Modo Híbrido" not in minute_text:
+                    minute_text += (
+                        f"\n---\n*Ata sintetizada em modo Híbrido: Transcrição 100% Offline (Whisper Turbo CT2) "
+                        f"+ Síntese Textual ({backend_used})*\n"
+                    )
+
                 with open(self.minute_file_path, "w", encoding="utf-8") as f:
                     f.write(minute_text)
                 self.last_minutes_text = minute_text
-                self._log(f"[SUCESSO] Ata Executiva Offline salva ({backend_used}): {self.minute_file_path.name}")
+                self._log(f"[SUCESSO] Ata Executiva salva ({backend_used}): {self.minute_file_path.name}")
                 self._export_session_archive(refined_transcript, minute_text)
                 if self.on_minute_generated:
                     self.on_minute_generated(self.minute_file_path, minute_text)
@@ -1193,31 +1355,22 @@ Transcrição completa da reunião:
                 self._log(f"[REVISÃO] Transcrição revisada salva em: {self.transcription_file_path.name}")
 
             self._set_status("Gerando Ata Executiva consolidada...")
-            prompt = self.MINUTES_SYSTEM_PROMPT.format(
+            self._log("[IA] Enviando transcrição revisada para síntese da Ata Executiva...")
+            minute_text, backend_used, _used_cloud = self._synthesize_minutes_hybrid_or_local(
                 title=self.meeting_title,
                 date_str=date_str,
                 duration_str=duration_str,
-                full_transcript=refined_transcript,
+                transcript_text=refined_transcript,
+                allow_cloud_text=True,
+                register_new_meeting=True,
             )
-
-            self._log("[IA] Enviando transcrição revisada para síntese da Ata Executiva...")
-            response = self._client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[prompt],
-            )
-
-            minute_text = response.text.strip() if response.text else "# Ata Executiva\n*(Falha ao gerar texto)*"
-
-            # Rastreamento de tokens da Ata Executiva
-            in_tok, out_tok = self._extract_usage_tokens(response)
-            self.tracker.register_request(audio_seconds=0.0, input_tokens=in_tok, output_tokens=out_tok, is_new_meeting=True)
 
             # Salva no arquivo de Ata Executiva
             with open(self.minute_file_path, "w", encoding="utf-8") as f:
                 f.write(minute_text)
             self.last_minutes_text = minute_text
 
-            self._log(f"[SUCESSO] Ata Executiva salva com sucesso em: {self.minute_file_path.name}")
+            self._log(f"[SUCESSO] Ata Executiva salva ({backend_used}) em: {self.minute_file_path.name}")
             self._export_session_archive(refined_transcript, minute_text)
 
             if self.on_minute_generated:

@@ -742,37 +742,44 @@ class VoiceprintService:
             append=append,
         )
 
-    # ---------------- IDENTIFICAÇÃO EM BLOCOS ----------------
-    def _match_embedding_details(
+    def _score_profiles(
         self,
         emb: np.ndarray,
-        unknown_clusters: List[Tuple[str, np.ndarray, int]],
-        match_threshold: float,
-        overlap_margin: float,
-    ) -> Tuple[str, Optional[float], bool]:
-        """Classifica um embedding em `(nome_limpo, raw_score_ou_None, is_overlap)` com centragem de coorte."""
-        self.ensure_profiles_loaded()
-
+    ) -> Tuple[List[Tuple[str, float, float, float]], Dict[str, float], bool]:
+        """Calcula similaridades bruta, centrada na coorte e composta para todos os perfis."""
         use_cen = bool(self._use_cohort_centering and self._cohort_centroid is not None and self._centered_profiles)
         emb_c = (
             _l2_normalize(emb - DEFAULT_COHORT_ALPHA * self._cohort_centroid)
             if use_cen
             else emb
         )
+        candidates: List[Tuple[str, float, float, float]] = []
+        scores_by_name: Dict[str, float] = {}
+        for name, pdata in self._profiles.items():
+            raw_s = float(np.dot(emb, pdata["embedding"]))
+            if use_cen and name in self._centered_profiles:
+                cen_s = float(np.dot(emb_c, self._centered_profiles[name]))
+                rank_s = DEFAULT_CENTERED_WEIGHT * cen_s + (1.0 - DEFAULT_CENTERED_WEIGHT) * raw_s
+            else:
+                cen_s = raw_s
+                rank_s = raw_s
+            candidates.append((name, raw_s, cen_s, rank_s))
+            scores_by_name[name] = rank_s
+        candidates.sort(key=lambda item: item[3], reverse=True)
+        return candidates, scores_by_name, use_cen
 
-        if self._profiles:
-            candidates: List[Tuple[str, float, float, float]] = []
-            for name, pdata in self._profiles.items():
-                raw_s = float(np.dot(emb, pdata["embedding"]))
-                if use_cen and name in self._centered_profiles:
-                    cen_s = float(np.dot(emb_c, self._centered_profiles[name]))
-                    rank_s = DEFAULT_CENTERED_WEIGHT * cen_s + (1.0 - DEFAULT_CENTERED_WEIGHT) * raw_s
-                else:
-                    cen_s = raw_s
-                    rank_s = raw_s
-                candidates.append((name, raw_s, cen_s, rank_s))
+    def _classify_embedding(
+        self,
+        emb: np.ndarray,
+        unknown_clusters: List[Tuple[str, np.ndarray, int]],
+        match_threshold: float,
+        overlap_margin: float,
+    ) -> Tuple[str, Optional[float], bool, float, Dict[str, float]]:
+        """Classifica um embedding retornando `(nome_limpo, raw_score, is_overlap, best_rank, scores_by_name)`."""
+        self.ensure_profiles_loaded()
+        candidates, scores_by_name, use_cen = self._score_profiles(emb)
 
-            candidates.sort(key=lambda item: item[3], reverse=True)
+        if candidates:
             top_name, top_raw, top_cen, top_rank = candidates[0]
             if top_raw >= match_threshold and (not use_cen or top_cen >= DEFAULT_CENTERED_MIN):
                 if len(candidates) > 1 and top_raw < 0.78:
@@ -780,8 +787,8 @@ class VoiceprintService:
                     sec_ok = sec_raw >= (match_threshold - 0.06) and (not use_cen or sec_cen >= 0.12)
                     margin = (top_rank - sec_rank) if use_cen else (top_raw - sec_raw)
                     if sec_ok and margin <= overlap_margin:
-                        return f"Possível sobreposição ({top_name} / {sec_name})", top_raw, True
-                return top_name, top_raw, False
+                        return f"Possível sobreposição ({top_name} / {sec_name})", top_raw, True, top_rank, scores_by_name
+                return top_name, top_raw, False, top_rank, scores_by_name
 
         # Agrupa locutores desconhecidos consistentes dentro do bloco
         best_u_idx = -1
@@ -790,8 +797,9 @@ class VoiceprintService:
         best_u_cen = -1.0
         for idx, (_uname, uemb, _ucnt) in enumerate(unknown_clusters):
             raw_u = float(np.dot(emb, uemb))
-            if use_cen:
+            if use_cen and self._cohort_centroid is not None:
                 uemb_c = _l2_normalize(uemb - DEFAULT_COHORT_ALPHA * self._cohort_centroid)
+                emb_c = _l2_normalize(emb - DEFAULT_COHORT_ALPHA * self._cohort_centroid)
                 cen_u = float(np.dot(emb_c, uemb_c))
                 rank_u = DEFAULT_CENTERED_WEIGHT * cen_u + (1.0 - DEFAULT_CENTERED_WEIGHT) * raw_u
             else:
@@ -803,15 +811,30 @@ class VoiceprintService:
                 best_u_cen = cen_u
                 best_u_idx = idx
 
+        fallback_rank = candidates[0][3] if candidates else 0.0
         if best_u_idx >= 0 and best_u_raw >= DEFAULT_UNKNOWN_CLUSTER_THRESHOLD and (not use_cen or best_u_cen >= 0.35):
             uname, uemb, ucnt = unknown_clusters[best_u_idx]
             new_uemb = _l2_normalize((uemb * float(ucnt) + emb) / float(ucnt + 1))
             unknown_clusters[best_u_idx] = (uname, new_uemb, ucnt + 1)
-            return uname, None, False
+            return uname, None, False, max(best_u_rank, fallback_rank), scores_by_name
 
         new_label = f"Locutor Desconhecido {len(unknown_clusters) + 1}"
         unknown_clusters.append((new_label, emb, 1))
-        return new_label, None, False
+        return new_label, None, False, fallback_rank, scores_by_name
+
+    # ---------------- IDENTIFICAÇÃO EM BLOCOS ----------------
+    def _match_embedding_details(
+        self,
+        emb: np.ndarray,
+        unknown_clusters: List[Tuple[str, np.ndarray, int]],
+        match_threshold: float,
+        overlap_margin: float,
+    ) -> Tuple[str, Optional[float], bool]:
+        """Classifica um embedding em `(nome_limpo, raw_score_ou_None, is_overlap)` com centragem de coorte."""
+        lbl, raw_score, is_overlap, _best_rank, _scores = self._classify_embedding(
+            emb, unknown_clusters, match_threshold, overlap_margin
+        )
+        return lbl, raw_score, is_overlap
 
     def _match_embedding(
         self,
@@ -829,6 +852,27 @@ class VoiceprintService:
             return f"**{clean_lbl}** (score {raw_score:.2f})"
         return f"**{clean_lbl}**"
 
+    def identify_speaker_segment_with_details(
+        self,
+        samples_f32: np.ndarray,
+        sample_rate: int = TARGET_SAMPLE_RATE,
+        unknown_clusters: Optional[List[Tuple[str, np.ndarray, int]]] = None,
+        match_threshold: float = DEFAULT_MATCH_THRESHOLD,
+        overlap_margin: float = DEFAULT_OVERLAP_MARGIN,
+    ) -> Tuple[str, float, Dict[str, float]]:
+        """Identifica o locutor retornando `(nome_limpo, best_rank, scores_por_perfil)`."""
+        self.ensure_profiles_loaded()
+        clusters = unknown_clusters if unknown_clusters is not None else []
+        if not self.are_models_ready():
+            return "Participante 1", 0.0, {}
+        emb = self.compute_embedding(samples_f32, sample_rate)
+        if emb is None:
+            return "Participante 1", 0.0, {}
+        clean_lbl, _raw, _ov, best_rank, scores_by_name = self._classify_embedding(
+            emb, clusters, match_threshold, overlap_margin
+        )
+        return clean_lbl, best_rank, scores_by_name
+
     def identify_speaker_segment(
         self,
         samples_f32: np.ndarray,
@@ -838,14 +882,9 @@ class VoiceprintService:
         overlap_margin: float = DEFAULT_OVERLAP_MARGIN,
     ) -> str:
         """Identifica o locutor de um trecho retornando nome limpo (sem marcação Markdown)."""
-        self.ensure_profiles_loaded()
-        clusters = unknown_clusters if unknown_clusters is not None else []
-        if not self.are_models_ready():
-            return "Participante 1"
-        emb = self.compute_embedding(samples_f32, sample_rate)
-        if emb is None:
-            return "Participante 1"
-        clean_lbl, _score, _ov = self._match_embedding_details(emb, clusters, match_threshold, overlap_margin)
+        clean_lbl, _best_rank, _scores = self.identify_speaker_segment_with_details(
+            samples_f32, sample_rate, unknown_clusters, match_threshold, overlap_margin
+        )
         return clean_lbl
 
     def diarize_speech_segments(
@@ -853,13 +892,13 @@ class VoiceprintService:
         vad_segments: List[Tuple[float, float, np.ndarray]],
         sample_rate: int = TARGET_SAMPLE_RATE,
         unknown_clusters: Optional[List[Tuple[str, np.ndarray, int]]] = None,
-        max_segment_len_sec: float = 5.5,
-        win_sec: float = 2.4,
-        hop_sec: float = 1.2,
+        max_segment_len_sec: float = 10.0,
+        win_sec: float = 3.2,
+        hop_sec: float = 1.6,
         match_threshold: float = DEFAULT_MATCH_THRESHOLD,
         overlap_margin: float = DEFAULT_OVERLAP_MARGIN,
     ) -> List[Tuple[float, float, str, np.ndarray]]:
-        """Diariza segmentos VAD e divide trechos longos (>5,5s) apenas em trocas sustentadas de locutor."""
+        """Diariza segmentos VAD com inércia em trechos curtos e divisão sustentada em segmentos >10s."""
         self.ensure_profiles_loaded()
         clusters = unknown_clusters if unknown_clusters is not None else []
         out: List[Tuple[float, float, str, np.ndarray]] = []
@@ -870,8 +909,32 @@ class VoiceprintService:
         win_samples = max(1, int(round(win_sec * sample_rate)))
         hop_samples = max(1, int(round(hop_sec * sample_rate)))
         min_tail_samples = max(1, int(round(0.65 * sample_rate)))
-        min_split_samples = max(1, int(round(1.6 * sample_rate)))
+        min_split_samples = max(1, int(round(2.0 * sample_rate)))
         max_samples = int(round(max_segment_len_sec * sample_rate))
+
+        prev_speaker: Optional[str] = None
+        prev_end_t: float = -10.0
+
+        def _apply_short_inertia(
+            lbl: str,
+            best_rank: float,
+            scores_by_name: Dict[str, float],
+            seg_s: float,
+            seg_e: float,
+        ) -> str:
+            seg_dur = seg_e - seg_s
+            if (
+                seg_dur < 2.5
+                and prev_speaker
+                and prev_speaker in self._profiles
+                and (seg_s - prev_end_t) <= 2.0
+                and not lbl.startswith("Possível sobreposição")
+                and lbl != prev_speaker
+            ):
+                prev_score = scores_by_name.get(prev_speaker, -1.0)
+                if (seg_dur < 1.2 and (seg_s - prev_end_t) <= 1.0) or (best_rank - prev_score) < 0.11:
+                    return prev_speaker
+            return lbl
 
         for s_t, e_t, seg_arr in vad_segments:
             n_samp = len(seg_arr)
@@ -882,38 +945,44 @@ class VoiceprintService:
                 continue
 
             if n_samp <= max_samples:
-                lbl = self.identify_speaker_segment(
+                lbl, best_rank, scores_by_name = self.identify_speaker_segment_with_details(
                     seg_arr, sample_rate, clusters, match_threshold, overlap_margin
                 )
+                lbl = _apply_short_inertia(lbl, best_rank, scores_by_name, s_t, e_t)
                 out.append((s_t, e_t, lbl, seg_arr))
+                prev_speaker = lbl
+                prev_end_t = e_t
                 continue
 
-            # Segmento longo: varre com janela deslizante e exige histerese contra picos isolados
-            win_labels: List[Tuple[int, int, str]] = []
+            # Segmento longo (>10s): varre com janela deslizante de 3,2s exigindo confirmação + margem >= 0,09
+            win_labels: List[Tuple[int, int, str, float, Dict[str, float]]] = []
             pos = 0
             while pos < n_samp:
                 end_pos = min(n_samp, pos + win_samples)
                 sub = seg_arr[pos:end_pos]
                 if len(sub) < min_tail_samples and win_labels:
-                    prev_s, _prev_e, prev_lbl = win_labels[-1]
-                    win_labels[-1] = (prev_s, n_samp, prev_lbl)
+                    prev_s, _prev_e, prev_lbl, prev_br, prev_sc = win_labels[-1]
+                    win_labels[-1] = (prev_s, n_samp, prev_lbl, prev_br, prev_sc)
                     break
-                lbl = self.identify_speaker_segment(
+                lbl, w_best_rank, w_scores = self.identify_speaker_segment_with_details(
                     sub, sample_rate, clusters, match_threshold, overlap_margin
                 )
-                win_labels.append((pos, end_pos, lbl))
+                win_labels.append((pos, end_pos, lbl, w_best_rank, w_scores))
                 if end_pos >= n_samp:
                     break
                 pos += hop_samples
 
             if not win_labels:
-                lbl = self.identify_speaker_segment(
+                lbl, best_rank, scores_by_name = self.identify_speaker_segment_with_details(
                     seg_arr, sample_rate, clusters, match_threshold, overlap_margin
                 )
+                lbl = _apply_short_inertia(lbl, best_rank, scores_by_name, s_t, e_t)
                 out.append((s_t, e_t, lbl, seg_arr))
+                prev_speaker = lbl
+                prev_end_t = e_t
                 continue
 
-            # Remove picos isolados de 1 única janela no meio da frase (A -> B -> A passa a A -> A -> A)
+            # Remove picos isolados de 1 única janela no meio da frase
             smoothed = [list(w) for w in win_labels]
             for idx in range(1, len(smoothed) - 1):
                 if smoothed[idx - 1][2] == smoothed[idx + 1][2] and smoothed[idx][2] != smoothed[idx - 1][2]:
@@ -921,17 +990,24 @@ class VoiceprintService:
 
             runs: List[Tuple[int, int, str]] = []
             cur_slice_start = 0
-            cur_lbl = smoothed[0][2]
+            cur_lbl = _apply_short_inertia(
+                smoothed[0][2],
+                smoothed[0][3],
+                smoothed[0][4],
+                s_t,
+                s_t + (smoothed[0][1] / float(sample_rate)),
+            )
             prev_center = (smoothed[0][0] + smoothed[0][1]) // 2
 
             for idx in range(1, len(smoothed)):
-                w_s, w_e, w_lbl = smoothed[idx]
+                w_s, w_e, w_lbl, w_best_rank, w_scores = smoothed[idx]
                 w_center = (w_s + w_e) // 2
-                is_confirmed = (idx + 1 < len(smoothed) and smoothed[idx + 1][2] == w_lbl) or (
-                    idx == len(smoothed) - 1 and (n_samp - prev_center) >= min_split_samples
-                )
+                has_consecutive = idx + 1 < len(smoothed) and smoothed[idx + 1][2] == w_lbl
+                cur_score = w_scores.get(cur_lbl, -1.0)
+                has_margin = (cur_lbl not in self._profiles) or ((w_best_rank - cur_score) >= 0.09)
                 if (
-                    is_confirmed
+                    has_consecutive
+                    and has_margin
                     and w_lbl != cur_lbl
                     and not cur_lbl.startswith("Possível sobreposição")
                     and not w_lbl.startswith("Possível sobreposição")
@@ -952,6 +1028,8 @@ class VoiceprintService:
                 abs_s = s_t + (sub_s / float(sample_rate))
                 abs_e = s_t + (sub_e / float(sample_rate))
                 out.append((abs_s, abs_e, sub_lbl, sub_arr))
+                prev_speaker = sub_lbl
+                prev_end_t = abs_e
 
         return out
 
