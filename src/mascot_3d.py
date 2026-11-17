@@ -241,7 +241,7 @@ class Mesh3D:
         return v, idx, cols, shines
 
 
-class OmniMic3DRenderer:
+class Vozito3DRenderer:
     """Renderiza o Vozito #03-A atualizado (sprites Blender PS1 Bayer 4x4 + fallback procedural)."""
 
     def __init__(self) -> None:
@@ -683,4 +683,4 @@ class OmniMic3DRenderer:
         return img.resize((DISPLAY_W, DISPLAY_H), Image.Resampling.NEAREST)
 
 
-Vozito3DRenderer = OmniMic3DRenderer
+OmniMic3DRenderer = Vozito3DRenderer

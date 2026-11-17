@@ -68,7 +68,7 @@ def _ensure_genai_loaded() -> bool:
         HAS_GOOGLE_GENAI = False
     return HAS_GOOGLE_GENAI
 
-logger = logging.getLogger("omniscribe.gemini_service")
+logger = logging.getLogger("escutai.gemini_service")
 
 
 def get_base_dir() -> Path:

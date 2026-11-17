@@ -35,7 +35,7 @@ from voiceprint_service import (
     _to_float32_mono,
 )
 
-logger = logging.getLogger("omniscribe.offline_asr")
+logger = logging.getLogger("escutai.offline_asr")
 
 WHISPER_MODELS: Dict[str, Dict[str, str]] = {
     "small": {

@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace OmniScribeSetup
+namespace EscutaiSetup
 {
     internal static class NativeMethods
     {
@@ -600,8 +600,8 @@ namespace OmniScribeSetup
 
                 string fullTargetDir = Path.GetFullPath(_targetDir);
                 string parentDir = Path.GetDirectoryName(fullTargetDir) ?? fullTargetDir;
-                string backupAtas = Path.Combine(parentDir, "_omniscribe_atas_backup");
-                string backupEnv = Path.Combine(parentDir, "_omniscribe_env_backup");
+                string backupAtas = Path.Combine(parentDir, "_escutai_atas_backup");
+                string backupEnv = Path.Combine(parentDir, "_escutai_env_backup");
                 bool hasBackupAtas = false;
                 bool hasBackupEnv = false;
 

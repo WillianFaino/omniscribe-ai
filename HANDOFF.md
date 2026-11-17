@@ -1,7 +1,7 @@
 # Handoff Técnico — Escutaí
 
 > Documento de referência para continuidade de desenvolvimento, manutenção, build e distribuição do **Escutaí** (anteriormente *OmniScribe AI*).
-> Última atualização: 17/11/2026 (baseado no commit `5bdc492` na branch `main` + rebranding 5.F na branch `feat/rebrand-escutai-vozito`).
+> Última atualização: 17/11/2026 (baseado no commit `33f5adc` na branch `main` após PR #21 + padronização completa na branch `refactor/rename-vozito-escutai-assets`).
 
 ---
 
@@ -30,18 +30,16 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
 ├── make_package.py           # Empacotador ZIP + compilador do instalador nativo Win32/.NET
 ├── assets/
 │   ├── blender/
-│   │   ├── omnimic_mascot.blend   # Cena inicial com rascunhos OmniMic_Detailed e OmniMic_V2_Exact
-│   │   ├── omnimic_tpose.blend    # Modelo principal OmniMic_TPOSE em T-pose pronto para rigging
-│   │   ├── omnimic_rigged.blend   # Cena rigada (OmniMic_Rig, 22 ossos) + 4 props PS1 + 7 animações em NLA
-│   │   └── rig_omnimic.py         # Script reprodutível de rigging, props PS1, curvas Bezier e QA geométrico
+│   │   ├── vozito_tpose.blend     # Modelo principal Vozito_TPOSE em T-pose pronto para rigging
+│   │   ├── vozito_rigged.blend    # Cena rigada (Vozito_Rig, 22 ossos) + 4 props PS1 + 7 animações em NLA
+│   │   └── rig_vozito.py          # Script reprodutível de rigging, props PS1, curvas Bezier e QA geométrico
 │   ├── mascot/
 │   │   ├── manifest.json          # Metadados das 8 tiras RGBA (`160x180`, 16-24 quadros) renderizadas do Blender
 │   │   └── {idle,greeting,listening,transcribing,celebrating,warning,sleeping,spin}.png  # Sprites RGBA PS1
 │   ├── models/
-│   │   └── omnimic.glb            # Exportação GLB v2 (~906 KB) com skinning, 4 props e 7 Actions embutidas
+│   │   └── vozito.glb             # Exportação GLB v2 (~906 KB) com skinning, 4 props e 7 Actions embutidas
 │   └── references/
-│       ├── omnimic_var1_more_serrilhado.jpg  # Referência visual aprovada (PS1 low-poly + Bayer dithering)
-│       └── omnimic_tpose_{front,back,left,right,top,bottom}.jpg  # Turnaround ortográfico 6 vistas em T-pose
+│       └── vozito_tpose_{front,back,left,right,top,bottom}.jpg  # Turnaround ortográfico 6 vistas em T-pose
 └── src/
     ├── __init__.py
     ├── main.py               # Entry point, sys.path, logging em atas_reunioes/logs/app.log e boot da GUI
@@ -52,8 +50,8 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
     ├── voiceprint_service.py # Biometria vocal ONNX (sherpa-onnx + ResNet34-LM + Silero VAD) e identificação automática
     ├── usage_tracker.py      # Persistência de uso diário (Free Tier 1.500 req/dia) e cálculo estimado USD/BRL
     ├── gui.py                # Interface CustomTkinter (ZoomTranscriberApp + modais VoiceProfiles, ApiKey, Usage, History e Retranscribe)
-    ├── mascot_3d.py          # Renderizador 3D software Ultra Low-Poly (NumPy + Pillow) do Vozito (`Vozito3DRenderer` / `OmniMic3DRenderer`)
-    ├── mascot_widget.py      # Widget flutuante/arrastável (`VozitoWidget` / `OmniMicWidget`) com balão XP e máquina de estados
+    ├── mascot_3d.py          # Renderizador 3D software Ultra Low-Poly (NumPy + Pillow) do Vozito (`Vozito3DRenderer`)
+    ├── mascot_widget.py      # Widget flutuante/arrastável (`VozitoWidget`) com balão XP e máquina de estados
     ├── installer.py          # Setup Wizard em CustomTkinter (alternativa Python ao instalador nativo)
     └── installer_native.cs   # Stub WinForms/C# (~30 KB) que lê app_data.zip acoplado via EOF Overlay ('OMNISCRB')
 ```
@@ -117,18 +115,18 @@ zoom-transcriber/ (GitHub: WillianFaino/omniscribe-ai)
 - Modais auxiliares (`VoiceProfilesModal`, `RetranscribeModal` com seletor Online/Offline, `ApiKeyModal`, `UsageModal`, `HistoryModal`) estilizados uniformemente com `_style_option_menu`.
 
 ### 3.6 Mascote 3D Vozito (`src/mascot_3d.py` e `src/mascot_widget.py`)
-- **Renderização (`Vozito3DRenderer` / `OmniMic3DRenderer`)**: carrega diretamente as **sprite sheets RGBA transparentes** de `assets/mascot/` (`idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning`, `sleeping`, `spin`) renderizadas em Blender EEVEE com o shader `NG_PS1_Bayer4x4` e os 4 props oficiais, fazendo composição limpa sobre o fundo do tema ativo (com fallback automático para a malha procedural caso `assets/mascot/` não exista).
-- **Interatividade (`VozitoWidget` / `OmniMicWidget`)**:
+- **Renderização (`Vozito3DRenderer`)**: carrega diretamente as **sprite sheets RGBA transparentes** de `assets/mascot/` (`idle`, `greeting`, `listening`, `transcribing`, `celebrating`, `warning`, `sleeping`, `spin`) renderizadas em Blender EEVEE com o shader `NG_PS1_Bayer4x4` e os 4 props oficiais, fazendo composição limpa sobre o fundo do tema ativo (com fallback automático para a malha procedural caso `assets/mascot/` não exista).
+- **Interatividade (`VozitoWidget`)**:
   - Overlay flutuante/arrastável no canto da janela com método `set_theme("Dark" | "Light")` sincronizando card, fundo do sprite e balão XP ao alternador de tema da GUI.
   - Reação a eventos da aplicação: `greeting`, `idle`, `sleeping` (após 45s sem interação), `listening` (com mini-mic LED ciano e velocidade sensível ao RMS), `transcribing` (bloquinho amarelo + lápis), `celebrating` (troféu dourado ao finalizar ata), `warning` e `spin` (rotação 360° em câmera orbital).
   - Visibilidade alternável pelo botão `🤖 Vozito` na barra superior.
-- **Assets 3D em Blender (`assets/blender/omnimic_tpose.blend` e `assets/references/`)**:
-  - Turnaround ortográfico completo em T-pose nas 6 vistas (`omnimic_tpose_{front,back,left,right,top,bottom}.jpg`), derivado de `omnimic_var1_more_serrilhado.jpg`, com braços partindo da face externa do garfo U-yoke.
-  - Cena principal `OmniMic_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
+- **Assets 3D em Blender (`assets/blender/vozito_tpose.blend` e `assets/references/`)**:
+  - Turnaround ortográfico completo em T-pose nas 6 vistas (`vozito_tpose_{front,back,left,right,top,bottom}.jpg`), com braços partindo da face externa do garfo U-yoke.
+  - Cena principal `Vozito_TPOSE` (`28` objetos, coleção `TPOSE_Lighting` com `6` luzes `AREA`, render `BLENDER_EEVEE` `768x768` com `Standard / None`).
   - Shader retrô PS1 em grupo `NG_PS1_Bayer4x4` (`ShaderToRGB -> Ambient Occlusion -> Layer Weight -> matriz Bayer 4x4` em `GridScale = 384.0`) alinhado ao compositor `Compositor_PS1` (`Pixelate Size = 2`), além de `Outline_Solidify` com backface culling e geometria refinada (expressão calma/preguiçosa nos olhos e sobrancelhas, luvas 3D com `3` costuras dorsais visíveis na vista traseira e facetas radiais na base inferior).
-  - **Rigging, Props & Animações (`assets/blender/omnimic_rigged.blend` + `assets/models/omnimic.glb`):**
+  - **Rigging, Props & Animações (`assets/blender/vozito_rigged.blend` + `assets/models/vozito.glb`):**
     - Braços subdivididos em `16` segmentos ao longo de X com *Dual Quaternion* (`use_deform_preserve_volume = True`) e pesos suaves entre `Torso_Yoke -> UpperArm -> Forearm -> Hand` + punho (`Cuff`) compartilhado para impedir qualquer deslocamento da mão.
-    - Armature `OmniMic_Rig` (`22` ossos: `Root`, `Stand_Base`, `Torso_Yoke`, `Head`, olhos/pupilas/sobrancelhas `NegX`/`PosX`, `Mouth`, `Jaw_Lip`, cadeias conectadas `UpperArm -> Forearm -> Hand` L/R e `4` ossos de props: `Prop_Notepad`, `Prop_Pencil`, `Prop_MiniMic` e `Prop_Trophy`).
+    - Armature `Vozito_Rig` (`22` ossos: `Root`, `Stand_Base`, `Torso_Yoke`, `Head`, olhos/pupilas/sobrancelhas `NegX`/`PosX`, `Mouth`, `Jaw_Lip`, cadeias conectadas `UpperArm -> Forearm -> Hand` L/R e `4` ossos de props: `Prop_Notepad`, `Prop_Pencil`, `Prop_MiniMic` e `Prop_Trophy`).
     - **4 Props low-poly no mesmo shader `NG_PS1_Bayer4x4` + `Outline_Solidify`:** bloquinho amarelo pautado (`Prop_Notepad`) + lápis hexagonal (`Prop_Pencil`) no `transcribing`, mini microfone direcional com anel LED ciano (`Prop_MiniMic`) no `listening`, e troféu estrela dourado (`Prop_Trophy`) no `celebrating`.
     - **7 animações detalhadas exportadas no `.glb`:** `idle` (96f), `greeting` (76f), `listening` (80f com mão em concha na lateral/orelha + mini-mic apontado para o monitor), `transcribing` (80f escrevendo 3 linhas no bloquinho com acompanhamento ocular), `celebrating` (72f com troféu + saltos), `warning` (64f) e `sleeping` (96f com micro-cochilo), validadas quadro a quadro contra colisão com a cabeça (`min_head_clear >= 6,2 cm`), deriva de punho (`<= 2,8 mm`) e arcos orgânicos de cotovelo (`17,2°–54,0°`, sem travas rígidas de `90°`).
   - **Diretriz consolidada (não repetir abordagens descartadas):** sprites 2D estáticos animados por escala/rotação, modelagem manual por `LatheGeometry` em Three.js e geradores web gratuitos com limite de exportação/polígonos foram descartados em favor do modelo próprio em **Blender** com *rigging* esquelético real.
@@ -194,7 +192,8 @@ python src/main.py
 2. **Extração & Segmentação Automática:** converter a faixa de áudio (via `ffmpeg` ou `av`/`pydub`) para chunks de `16 kHz` com barra de progresso e aplicar o mesmo pipeline de diarização e geração de Ata Executiva.
 
 ### F. Rebranding e Nome Mais Acessível — **[IMPLEMENTADO]**
-1. **Identidade Visual & Nomes Acessíveis (`Escutaí` & `Vozito`):** aplicativo renomeado de *OmniScribe AI* para **Escutaí** e mascote 3D renomeado de *OmniMic* para **Vozito** (com aliases `VozitoWidget` / `Vozito3DRenderer` preservando retrocompatibilidade interna), executáveis `Escutai.exe` / `Escutai_Setup.exe`, pasta de instalação `%LOCALAPPDATA%\Programs\Escutai` e extensão padrão **`.escutai`** mantendo suporte total de leitura/importação para pacotes legados `.omniscribe`.
+1. **Identidade Visual & Nomes Acessíveis (`Escutaí` & `Vozito`):** aplicativo renomeado de *OmniScribe AI* para **Escutaí** e mascote 3D renomeado de *OmniMic* para **Vozito** (`VozitoWidget`, `Vozito3DRenderer`, loggers `escutai.*`, namespace `EscutaiSetup`, aliases retrocompatíveis `OmniMicWidget` / `OmniMic3DRenderer`), executáveis `Escutai.exe` / `Escutai_Setup.exe`, pasta de instalação `%LOCALAPPDATA%\Programs\Escutai` e extensão padrão **`.escutai`** mantendo suporte total de leitura/importação para pacotes legados `.omniscribe`.
+2. **Padronização Completa dos Assets 3D & Referências:** todos os arquivos de cena, script, malha exportada e vistas de referência foram atualizados para **`vozito_tpose.blend`**, **`vozito_rigged.blend`**, **`rig_vozito.py`**, **`vozito.glb`** e **`vozito_tpose_{front,back,left,right,top,bottom}.jpg`**, incluindo coleção (`Vozito_TPOSE`) e armature (`Vozito_Rig`) internos no Blender.
 
 ### G. Arquitetura Multi-LLM Agnóstica, Autenticação por Login e Fallback Automático
 1. **Independência de Provedor/Modelo:** tornar a aplicação agnóstica ao modelo de LLM, permitindo ao usuário escolher entre **Claude, ChatGPT (OpenAI), Gemini, Grok** e outros provedores compatíveis.
@@ -209,11 +208,11 @@ python src/main.py
 
 ## 6. Estado Atual do Git e Pontos de Atenção
 
-- **Branch base**: `main` (sincronizada com `origin/main` no commit `5bdc492` após PRs #14–#18; rebranding Escutaí / Vozito implementado na branch `feat/rebrand-escutai-vozito`).
-- **Instalador Windows (`Escutai_Setup.exe`, ex-`OmniScribe_Setup.exe`)**: ~417 MB (~1.205 arquivos com `models/voiceprint` e `models/asr/sherpa-onnx-whisper-small` INT8 embutidos) — **nota pós-merge:** recompilar o binário no Windows para refletir `Escutai.exe` e `Escutai_Setup.exe` após o merge do rebranding.
+- **Branch base**: `main` (sincronizada com `origin/main` após PR #21 `33f5adc`, com padronização completa dos nomes de assets e identificadores na branch `refactor/rename-vozito-escutai-assets`).
+- **Instalador Windows (`Escutai_Setup.exe`)**: compilado com `417,00 MB` (`1.205` arquivos, incluindo `Escutai.exe`, `models/voiceprint` e `models/asr/sherpa-onnx-whisper-small` INT8 embutidos) para uso imediato offline desde a instalação.
 - **Dependência externa principal (apenas modo Online)**: `GEMINI_API_KEY` válida (configurada via `.env` ou modal). No modo **Offline**, o app opera integralmente sem API Key.
 - **Observações técnicas conhecidas no código atual**:
   - O rótulo do usuário local no prompt de diarização e cabeçalho de transcrição está definido como `Willian (Você)` em `src/gemini_service.py` e `src/offline_asr_service.py` (bom ponto para parametrizar futuramente caso o app seja distribuído para outros usuários).
-  - O nome da classe principal em `src/gui.py` ainda é `ZoomTranscriberApp` e os arquivos/rigs Blender originais mantêm o prefixo `omnimic_*` + assinatura EOF `'OMNISCRB'` em `make_package.py` / `src/installer_native.cs` para estabilidade binária.
+  - O nome da classe principal da janela em `src/gui.py` ainda é `ZoomTranscriberApp` e a assinatura EOF do instalador nativo mantém `'OMNISCRB'` em `make_package.py` / `src/installer_native.cs` para estabilidade binária.
   - Os arquivos `src/installer.py` (CustomTkinter) e `src/installer_native.cs` (WinForms nativo) coexistem no repositório; o fluxo oficial dos `.bat` e `make_package.py` utiliza `src/installer_native.cs`.
   - Os testes de regressão/smoke são executados sob demanda via Python e ainda não estão organizados em uma suíte `pytest` versionada em `tests/`.

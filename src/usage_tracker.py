@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-logger = logging.getLogger("omniscribe.usage_tracker")
+logger = logging.getLogger("escutai.usage_tracker")
 
 # Preços de referência do Gemini 2.5 Flash (Google AI Studio / Vertex AI)
 # Entrada de Áudio: ~$0.07 / hora (~$0.00001944 por segundo)

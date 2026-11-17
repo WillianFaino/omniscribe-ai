@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-logger = logging.getLogger("omniscribe.archive")
+logger = logging.getLogger("escutai.archive")
 
 PRIMARY_ARCHIVE_EXT = ".escutai"
 SUPPORTED_ARCHIVE_EXTS = (".escutai", ".omniscribe")
@@ -346,7 +346,7 @@ class MeetingArchiveService:
         }
 
     def read_archive_summary(self, archive_path: Path) -> Dict:
-        """Lê metadados resumidos de um pacote `.omniscribe` sem decodificar o áudio."""
+        """Lê metadados resumidos de um pacote `.escutai` (ou `.omniscribe` legado) sem decodificar o áudio."""
         archive_path = Path(archive_path)
         conn = sqlite3.connect(f"file:{archive_path}?mode=ro", uri=True)
         try:
@@ -383,7 +383,7 @@ class MeetingArchiveService:
             conn.close()
 
     def load_archive_contents(self, archive_path: Path) -> Dict:
-        """Carrega documentos (`transcript_md`, `minutes_md`) e metadados do `.omniscribe`."""
+        """Carrega documentos (`transcript_md`, `minutes_md`) e metadados do pacote `.escutai` / `.omniscribe`."""
         archive_path = Path(archive_path)
         summary = self.read_archive_summary(archive_path)
         conn = sqlite3.connect(f"file:{archive_path}?mode=ro", uri=True)
@@ -415,7 +415,7 @@ class MeetingArchiveService:
             conn.close()
 
     def extract_wav(self, archive_path: Path, dest_wav_path: Optional[Path] = None) -> Optional[Path]:
-        """Reconstrói um WAV 16-bit PCM reproduzível a partir dos chunks comprimidos no `.omniscribe`."""
+        """Reconstrói um WAV 16-bit PCM reproduzível a partir dos chunks comprimidos no pacote `.escutai` / `.omniscribe`."""
         archive_path = Path(archive_path)
         conn = sqlite3.connect(f"file:{archive_path}?mode=ro", uri=True)
         try:
@@ -451,7 +451,7 @@ class MeetingArchiveService:
         target_dir: Path,
         extract_documents: bool = True,
     ) -> Dict:
-        """Copia um `.omniscribe` compartilhado para o workspace sem sobrescrever existentes."""
+        """Copia um pacote `.escutai` (ou `.omniscribe` legado) compartilhado para o workspace sem sobrescrever existentes."""
         source_archive = Path(source_archive).resolve()
         target_dir = Path(target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
